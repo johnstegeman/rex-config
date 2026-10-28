@@ -20,12 +20,25 @@ function M.render_prompt(template, vars)
   end))
 end
 
--- `git rev-parse --git-common-dir` gives <project root>/.git (with or without a
--- trailing slash). The project root is its parent and the name its basename.
+-- `<project root>/.git`, as produced by `git rev-parse --path-format=absolute
+-- --git-common-dir` (with or without a trailing slash): the project root is its
+-- parent and the project name the basename of that root. The plain form of that
+-- command prints a path relative to the worktree (".git"), which names no
+-- project at all, so a relative input returns nil instead of empty strings --
+-- callers must ask git for the absolute form and handle nil.
 function M.project_from_common_dir(common_dir)
   local dir = (common_dir or ""):gsub("/+$", "")
-  local root = dir:match("^(.*)/[^/]+$") or ""
-  local name = root:match("([^/]+)$") or ""
+  if not dir:match("^/") then
+    return nil
+  end
+  local root = dir:match("^(.*)/[^/]+$")
+  if root == nil then
+    return nil
+  end
+  local name = root:match("([^/]+)$")
+  if name == nil then
+    return nil
+  end
   return { root = root, name = name }
 end
 
@@ -37,6 +50,9 @@ function M.main_worktree(list_json)
     return nil
   end
   local items = list_json.items or list_json
+  if type(items) ~= "table" then
+    return nil
+  end
   for _, item in ipairs(items) do
     if type(item) == "table" then
       local path, is_main
@@ -57,6 +73,8 @@ end
 -- ever builds its command line. --base is meaningful only when creating.
 function M.wt_switch_argv(args)
   args = args or {}
+  assert(type(args.branch) == "string" and type(args.agent) == "string",
+    "wt_switch_argv: branch and agent are required")
   local argv = { "wt", "switch" }
   if args.create then
     argv[#argv + 1] = "--create"
