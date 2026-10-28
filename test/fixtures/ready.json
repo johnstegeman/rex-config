@@ -1,0 +1,100 @@
+[
+  {
+    "id": "pmm-iris-a4l",
+    "title": "Treat index/catalog pages as non-extractable",
+    "description": "https://neo4j.com/docs/apoc/current/ is a pure index listing every module.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "bug",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-31T14:22:46Z",
+    "updated_at": "2026-08-31T14:22:46Z",
+    "labels": [
+      "extraction",
+      "noise"
+    ]
+  },
+  {
+    "id": "pmm-iris-8u1",
+    "title": "Per-component grain config on RootSpec (reference | prose | auto)",
+    "description": "The Slice A classifier keys on dotted-name ratio.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-31T14:22:48Z",
+    "updated_at": "2026-08-31T14:22:48Z",
+    "labels": [
+      "config",
+      "extraction",
+      "grain"
+    ]
+  },
+  {
+    "id": "pmm-iris-58h",
+    "title": "Phase 3 follow-on: implement bootstrap-vs-delta diff path",
+    "description": "Deferred from Phase 3 (Extraction module update).",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-27T14:54:38Z",
+    "updated_at": "2026-08-27T14:54:38Z",
+    "labels": [
+      "diff",
+      "extraction"
+    ]
+  },
+  {
+    "id": "superpowers-workflow.explore",
+    "title": "Metric gate: Expected action: notification",
+    "description": "Molecule step, not work a person can pick.",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-30T10:00:00Z",
+    "updated_at": "2026-08-30T10:00:00Z",
+    "labels": null
+  },
+  {
+    "id": "pmm-iris-9zz",
+    "title": "Molecule container: diff path follow-on",
+    "description": "Container bead for a sub-workflow.",
+    "status": "open",
+    "priority": 0,
+    "issue_type": "molecule",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-30T10:01:00Z",
+    "updated_at": "2026-08-30T10:01:00Z",
+    "labels": []
+  },
+  {
+    "id": "pmm-iris-9yy",
+    "title": "Plan reviewed / ready to execute",
+    "description": "Human gate.",
+    "status": "open",
+    "priority": 0,
+    "issue_type": "gate",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-30T10:02:00Z",
+    "updated_at": "2026-08-30T10:02:00Z",
+    "labels": [
+      "step:implement"
+    ]
+  },
+  {
+    "id": "pmm-iris-9xx",
+    "title": "Task 3: branch defaults",
+    "description": "Molecule step of a workflow molecule, labelled step:*.",
+    "status": "open",
+    "priority": 0,
+    "issue_type": "task",
+    "owner": "john.stegeman@gmail.com",
+    "created_at": "2026-08-30T10:03:00Z",
+    "updated_at": "2026-08-30T10:03:00Z",
+    "labels": [
+      "step:explore"
+    ]
+  }
+]
