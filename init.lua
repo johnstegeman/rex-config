@@ -197,10 +197,12 @@ function M.project_for(cwd)
   end
 
   -- main_worktree compares the main flag with true, so it needs the decoded
-  -- document; raw JSON text is never a boolean.
-  local decoded_ok, decoded = pcall(rex.json.decode, listed.stdout or "")
-  if not decoded_ok then
-    return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. tostring(decoded)
+  -- document; raw JSON text is never a boolean. rex.json.decode reports bad text
+  -- by returning nil and a reason rather than raising, so the value decides.
+  local decoded, decode_reason = rex.json.decode(listed.stdout or "")
+  if type(decoded) ~= "table" then
+    return nil, "could not read the worktrunk listing for " .. project.root .. ": "
+      .. (decode_reason and tostring(decode_reason) or "no JSON value")
   end
   local main = M.main_worktree(decoded)
   if main == nil then
@@ -219,8 +221,8 @@ local NO_DATABASE = "no beads database"
 -- the worktrunk layout the root holds only .git, and main/.beads/redirect is
 -- what resolves the database.
 --
--- Returns true, or false and the reason bd could not be consulted (nil when bd
--- ran and reported no database itself).
+-- Returns true, or false and the reason bd gave: nil when bd ran and reported no
+-- database itself, and a message when bd could not be started or failed.
 function M.has_beads(main)
   local reply, reason = run_in_shell("bd ready --json", main)
   if reply == nil then
@@ -233,7 +235,9 @@ function M.has_beads(main)
   if said:lower():find(NO_DATABASE, 1, true) ~= nil then
     return false
   end
-  return false, "bd could not be run in " .. main .. ": " .. said
+  -- bd ran and failed for a reason of its own; "could not be run" is for the
+  -- reply == nil case above, where there was no bd to ask.
+  return false, "bd failed in " .. main .. ": " .. said
 end
 
 -- The working directory of the terminal behind ctx's block, or nil when Rex
@@ -362,7 +366,6 @@ function M.setup(opts)
   if actions_registered then
     return M
   end
-  actions_registered = true
 
   rex.action{
     name = "work_new",
@@ -380,6 +383,9 @@ function M.setup(opts)
       return M.work_new_go(ctx, args)
     end,
   }
+  -- Set only once both are in, so a registration Rex rejects leaves the flag
+  -- alone and a retry registers again.
+  actions_registered = true
 
   return M
 end

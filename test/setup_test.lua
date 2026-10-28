@@ -91,10 +91,12 @@ local function stub_rex()
     return reply
   end
 
+  -- rex.json.decode does not raise on bad text: it returns nil and this message
+  -- (measured against the running server), so the stub does the same.
   stub.json = {
     decode = function(text)
       local value = stub.json_replies[text]
-      if value == nil then error("setup_test: unexpected JSON: " .. tostring(text)) end
+      if value == nil then return nil, "rex.json.decode: text is not valid JSON" end
       return value
     end,
     encode = unused("json.encode"),
@@ -279,11 +281,17 @@ stub.exec_replies.git = nil
 eq("a git that cannot start says so", select(2, M.project_for("/tmp")),
   "git could not be run: git: executable file not found in PATH")
 
--- --- Minor 1: an unreadable listing is not the same as no main worktree ---
+-- An unreadable listing is not the same as a listing with no main worktree, and
+-- rex.json.decode answers bad text with nil plus a reason instead of raising.
 stub = project_stub()
-stub.json_replies["wt list"] = nil          -- the shell's stdout was not JSON
-contains("an unreadable worktrunk listing is named", select(2, M.project_for("/x/pmm-iris/main")),
-  "could not read the worktrunk listing for /x/pmm-iris: ")
+stub.json_replies["wt list"] = nil          -- stdout was not JSON
+eq("garbage listing message", select(2, M.project_for("/x/pmm-iris/main")),
+  "could not read the worktrunk listing for /x/pmm-iris: rex.json.decode: text is not valid JSON")
+
+stub = project_stub()
+stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "", stderr = "" }
+eq("empty listing message", select(2, M.project_for("/x/pmm-iris/main")),
+  "could not read the worktrunk listing for /x/pmm-iris: rex.json.decode: text is not valid JSON")
 
 -- has_beads() ---------------------------------------------------------------
 
@@ -305,7 +313,12 @@ stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
 beads, beads_reason = M.has_beads("/x/main")
 eq("has_beads false", beads, false)
 eq("bd failing on its own reports why", beads_reason,
-  "bd could not be run in /x/main: mise ERROR bd is not a valid shim.")
+  "bd failed in /x/main: mise ERROR bd is not a valid shim.")
+
+-- bd ran and failed without saying anything: it still ran.
+stub.exec_replies["bd ready --json"] = { ok = false, code = 2, stdout = "", stderr = "" }
+beads, beads_reason = M.has_beads("/x/main")
+eq("a silent bd failure still counts as a run", beads_reason, "bd failed in /x/main: no error output")
 
 -- bd could not even start.
 stub.exec_replies["bd ready --json"] = nil
@@ -380,7 +393,7 @@ stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
 local ok_broken_bd, broken_bd_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("a bd that cannot be consulted fails", ok_broken_bd, false)
 eq("a bd that cannot be consulted is not called a missing database", broken_bd_message,
-  "bd could not be run in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
+  "bd failed in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
 eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
 
 -- base = false means "let worktrunk choose", so there is nothing to pass on.
