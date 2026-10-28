@@ -350,8 +350,7 @@ do
     if event == "bd update " .. BEAD .. " --claim" then claim_at = i end
     if event == "session.new_window" then tab_at = i end
   end
-  eq("nothing runs before the session is attached to",
-    stub.events[1], "session.list")
+  eq("the flow starts by listing Rex's sessions", stub.events[1], "session.list")
   eq("the bead is claimed before the tab is made",
     claim_at ~= nil and tab_at ~= nil and claim_at < tab_at, true)
 end
@@ -375,8 +374,11 @@ end
 -- the session, so the branch is what comes into view.
 eq("the app client is asked to show it", request_of(stub, "client.perform").client_id, "client:app")
 eq("the client shows the session", request_of(stub, "client.perform").action, "session.select")
-eq("the client shows the tab", request_of(stub, "client.perform").args,
-  { session_id = "session:iris", window_id = "window:tab" })
+do
+  local args = request_of(stub, "client.perform").args
+  eq("the client's args name the session", args.session_id, "session:iris")
+  eq("the client shows the tab", args.window_id, "window:tab")
+end
 eq("the client is told where the request came from",
   request_of(stub, "client.perform").origin, "cli")
 eq("nothing is queued without an invocation", #stub.queued, 0)
@@ -387,8 +389,11 @@ stub = new_branch_stub()
 ok = pcall(M.work_new_go, { origin = "key", session_id = "session:rex" }, payload())
 eq("a key press succeeds", ok, true)
 eq("a key press queues the selection", stub.queued[1] and stub.queued[1].action, "session.select")
-eq("the queued selection names the tab", stub.queued[1] and stub.queued[1].args,
-  { session_id = "session:iris", window_id = "window:tab" })
+do
+  local args = stub.queued[1] and stub.queued[1].args or {}
+  eq("the queued selection names the session", args.session_id, "session:iris")
+  eq("the queued selection names the tab", args.window_id, "window:tab")
+end
 eq("a key press asks no client directly", #calls_to(stub, "client.perform"), 0)
 
 -- The palette goes the same way as a key.
@@ -406,8 +411,11 @@ eq("a repeat press creates nothing", field(again, "created"), false)
 eq("a repeat press makes no tab", #calls_to(stub, "session.new_window"), 0)
 eq("a repeat press claims nothing", #stub.exec_calls, 0)
 eq("a repeat press makes no session", #calls_to(stub, "session.create"), 0)
-eq("a repeat press still shows the tab", request_of(stub, "client.perform").args,
-  { session_id = "session:iris", window_id = "window:tab" })
+do
+  local args = request_of(stub, "client.perform").args
+  eq("a repeat press still shows the session", args.session_id, "session:iris")
+  eq("a repeat press still shows the tab", args.window_id, "window:tab")
+end
 
 -- A session whose label merely starts with the project's name is not the
 -- project's session: the flow makes the right one.
@@ -430,6 +438,30 @@ contains("the failure says it could not attach", unattached, "could not attach t
 contains("the failure says what Rex said", unattached, "session not found")
 eq("a session that cannot be attached to claims nothing", #stub.exec_calls, 0)
 eq("a session that cannot be attached to makes no tab", #calls_to(stub, "session.new_window"), 0)
+
+-- An attach that answers without a view leaves the flow with no list of tabs, and
+-- "no list" is not "no tabs": read as one, every press would make another tab and
+-- take another claim. It is refused instead.
+stub = new_branch_stub()
+stub.call_replies["session.attach"] = { client_id = "client:app" }
+local ok_no_view, no_view = pcall(M.work_new_go, { origin = "cli" }, payload())
+eq("an attach with no view fails", ok_no_view, false)
+contains("the failure says the view is missing", no_view, "returned no view")
+contains("the failure names the tab list", no_view, "list of tabs")
+eq("an attach with no view claims nothing", #stub.exec_calls, 0)
+eq("an attach with no view makes no tab", #calls_to(stub, "session.new_window"), 0)
+
+-- A view without windows is a session with no tabs -- the server leaves an empty
+-- list out -- so that is where a first tab comes from, not a reason to refuse.
+stub = new_branch_stub()
+stub.call_replies["session.attach"] = {
+  client_id = "client:app",
+  view = { session_id = "session:iris", label = PROJECT, revision = 0 },
+}
+local ok_empty, empty = pcall(M.work_new_go, { origin = "cli" }, payload())
+eq("a session with no windows still gets its tab", ok_empty, true)
+eq("a session with no windows makes the tab", field(empty, "created"), true)
+eq("a session with no windows still claims the bead", #stub.exec_calls, 1)
 
 -- A bead that cannot be claimed stops the flow before a tab is made: an agent
 -- started on an unclaimed bead is worse than an error.

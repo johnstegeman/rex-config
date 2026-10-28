@@ -410,21 +410,34 @@ end
 
 -- Attach to the target session, because a session method only reaches a session
 -- the connection is attached to: the app is attached to the session it shows,
--- which is not necessarily the project's, so without this every session.view or
--- session.new_window below fails with "stream is not attached to session". An
--- attach adds to the attachments a connection already has, so it takes nothing
--- away from the session the user is looking at, and it stays for as long as the
--- connection does: nothing here detaches.
+-- which is not necessarily the project's, so without this session.new_window
+-- below -- the call that makes the tab -- fails with "stream is not attached to
+-- session". An attach adds to the attachments a connection already has, so it
+-- takes nothing away from the session the user is looking at, and it stays for as
+-- long as the connection does: nothing here detaches.
 --
--- The reply carries the session's view, so this is where its tabs are read too.
--- Returns the windows, or nil and the reason it could not attach.
+-- The reply carries the session's view, so this is where the tabs that already
+-- exist are read too, which is what keeps a second press from making a second
+-- tab. Returns the windows, or nil and the reason it could not attach.
 local function attach_session(session_id)
   local attached, reason = call("session.attach", { session_id = session_id })
   if attached == nil then
     return nil, reason
   end
-  local view = type(attached.view) == "table" and attached.view or {}
-  return type(view.windows) == "table" and view.windows or {}
+  -- No view means no list of tabs, and "no list of tabs" is not "no tabs": read
+  -- as one it would make another tab, and take another claim, for a branch that
+  -- already has one. So this is refused rather than guessed at.
+  if type(attached) ~= "table" or type(attached.view) ~= "table" then
+    return nil, "session.attach returned no view, so there is no list of tabs"
+  end
+  if type(attached.view.windows) ~= "table" then
+    -- A view without windows is a session with none: the server leaves an empty
+    -- list out (measured: a session created with no windows answers attach with
+    -- label, revision and session_id only), so this is where the first tab comes
+    -- from. Only a missing view means the list cannot be known.
+    return {}
+  end
+  return attached.view.windows
 end
 
 -- The project's session, made when it is not there yet with one tab called
