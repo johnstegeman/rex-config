@@ -32,9 +32,12 @@ commands:
 tools, which is how the tests and dry runs work.
 
 pick's --bead and --branch answer a question instead of asking it, and an
-empty value means none; with no terminal on stdin both questions are skipped
-rather than waited on. --main and --root must be absolute: Rex resolves them
-against its own working directory, not this one.
+empty value means none. The branch question is typed, with the bead's name
+offered in the prompt: an empty answer accepts that name, or cancels when
+there is none. With no terminal on stdin the bead question is skipped and the
+branch question reads an empty answer, rather than waiting for either.
+--main and --root must be absolute: Rex resolves them against its own working
+directory, not this one.
 EOF
 }
 
@@ -334,32 +337,33 @@ pick_bead() {
       --preview "$script preview {1} --main $main_q" || return 0
 }
 
-# The branch question: the existing branches as suggestions, prefilled with
-# the bead-derived name. What was typed is the branch -- the name on screen is
-# always the name handed back, so a name that only resembles a listed branch is
-# still a branch to create. `--print-query` prints that text on the first line
-# and the highlighted entry on the second, so the entry only decides when the
-# query is empty: ctrl-u clears the prefilled default and then enter (or an
-# arrow) picks a listed branch. Aborting prints nothing, which pick turns into
-# exit 3.
+# The branch question: a typed answer, not a picker. Creating a branch is the
+# usual case and a list of names that already exist offers nothing for a name
+# that does not exist yet, so the answer is typed -- with the name derived from
+# the bead shown in the prompt, where a bare Enter accepts it. Whatever is
+# typed is the branch, exactly as typed; the candidate list decides afterwards
+# whether that name is an existing worktree to switch to or one to create.
+#
+# The prompt goes to stderr because stdout carries the hand-back, and only to a
+# terminal: a pipe is answered, never asked. EOF -- a pipe that has ended, or a
+# terminal closed with ctrl-d -- is an empty answer, which pick turns into
+# exit 3 the way esc used to.
 pick_branch() {
-  local candidates=$1 query=$2 header=$3 out typed selected
+  local suggestion=$1 prompt='branch> ' answer=''
 
-  out=$(
-    { [ -z "$candidates" ] || printf '%s\n' "$candidates"; } |
-      fzf --print-query --reverse --query "$query" --header "$header"
-  ) || return 0
-
-  typed=${out%%$'\n'*}
-  case $out in
-    *$'\n'*) selected=${out#*$'\n'} ;;
-    *) selected='' ;;
-  esac
-  if [ -n "$typed" ]; then
-    printf '%s\n' "$typed"
-  else
-    printf '%s\n' "${selected%%$'\n'*}"
+  if [ -n "$suggestion" ]; then
+    prompt="branch [$suggestion]> "
   fi
+  if [ -t 0 ]; then
+    printf '%s' "$prompt" >&2
+  fi
+  # read fails at EOF; that is an empty answer rather than a reason to stop, so
+  # it must not end the run here under `set -e`.
+  IFS= read -r answer || true
+  if [ -z "$answer" ]; then
+    answer=$suggestion
+  fi
+  printf '%s\n' "$answer"
 }
 
 # `new-work.sh pick --main DIR --root PATH --project NAME [--base B]`
@@ -442,10 +446,11 @@ cmd_pick() {
   need_absolute 'pick: --root' "$root"
 
   # The picker's own requirements, before any work. fzf is asked for only where
-  # a question will really be asked -- in the float, where stdin is a terminal --
-  # so a scripted run is not stopped by a tool it would never call. Saved tool
-  # output stands in for the tools it replaces.
-  if [ -t 0 ] && { [ "$bead_set" -eq 0 ] || [ "$branch_set" -eq 0 ]; }; then
+  # the bead question will really be asked -- in the float, where stdin is a
+  # terminal -- so a scripted run is not stopped by a tool it would never call:
+  # the branch question is typed and needs nothing but stdin. Saved tool output
+  # stands in for the tools it replaces.
+  if [ -t 0 ] && [ "$bead_set" -eq 0 ]; then
     need fzf
   fi
   [ -n "$wt_json" ] || need wt
@@ -507,30 +512,21 @@ cmd_pick() {
   fi
 
   if [ "$branch_set" -eq 0 ]; then
-    if [ ! -t 0 ]; then
-      # Same rule as the bead question: with no terminal there is nobody to
-      # ask, and the empty branch below ends the run the way esc does.
-      if [ -n "$note" ]; then
-        printf '%s\n' "$note" >&2
-      fi
-      printf '%s: skipping the branch question: stdin is not a terminal\n' \
-        "$PROG" >&2
-    else
-      local query=''
-      if [ -n "$bead" ]; then
-        # A bead the list did not describe still gets a name: types outside the
-        # map fall back to feat, like the map itself does.
-        query=$(cmd_branch_default --type "${issue_type:-other}" --id "$bead")
-      fi
-      local header='type a branch name, or ctrl-u then enter to switch to a listed one'
-      if [ -n "$base" ]; then
-        header="$header (new branches start from $base)"
-      fi
-      if [ -n "$note" ]; then
-        header="$note — $header"
-      fi
-      branch=$(pick_branch "$candidates" "$query" "$header")
+    local suggestion=''
+    if [ -n "$bead" ]; then
+      # A bead the list did not describe still gets a name: types outside the
+      # map fall back to feat, like the map itself does.
+      suggestion=$(cmd_branch_default --type "${issue_type:-other}" --id "$bead")
     fi
+    # Told before the prompt rather than packed into it, so the prompt stays one
+    # short line whatever the reason for asking.
+    if [ -n "$base" ]; then
+      printf '%s: new branches start from %s\n' "$PROG" "$base" >&2
+    fi
+    if [ -n "$note" ]; then
+      printf '%s: %s\n' "$PROG" "$note" >&2
+    fi
+    branch=$(pick_branch "$suggestion")
   elif [ -n "$note" ]; then
     printf '%s\n' "$note" >&2
   fi

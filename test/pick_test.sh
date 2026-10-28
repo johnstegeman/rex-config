@@ -2,9 +2,10 @@
 # `new-work.sh pick` and `new-work.sh preview`.
 #
 # pick is the two-stage picker behind ctrl+space>n: a bead, then a branch, then
-# one JSON object handed back to Rex. fzf cannot be driven without a terminal,
-# so every assertion here goes through the --bead/--branch bypasses, --dry-run,
-# and saved tool output (--bd-json/--wt-json/--refs).
+# one JSON object handed back to Rex. The bead question is fzf, which cannot be
+# driven without a terminal, so it is bypassed with --bead or served by saved
+# tool output (--bd-json/--wt-json/--refs). The branch question is typed, so its
+# answers arrive on stdin like a person's would.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -59,6 +60,25 @@ run_pick() {
     --bd-json "$fixture" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+# run_pick_answer <typed text> <beads fixture> [options...]
+#
+# The same run with the branch answer typed on stdin and followed by Enter; an
+# empty text is the bare Enter that accepts the suggestion. The branch question
+# is a typed prompt, so this drives the real path end to end: no fzf stand-in.
+run_pick_answer() {
+  local text=$1 fixture=$2
+  shift 2
+  ran=$((ran + 1))
+  rm -f "$tmp/rex-args"
+  printf '%s\n' "$text" |
+    PATH="${PICK_PATH:-$PATH}" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+      --main /p/demo/main --root /p/demo --project demo \
+      --bd-json "$fixture" \
+      --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" "$@" \
+      >"$tmp/out" 2>"$tmp/err"
   status=$?
 }
 
@@ -228,6 +248,81 @@ else
   assert_json "exact candidate payload" "$json" '.create == false'
 fi
 
+# (d2) The branch question is typed, not picked: the name derived from the bead
+# sits in the prompt and a bare Enter accepts it. This is the gesture the live
+# picker lost, and stdin carries the answer now, so no stand-in is involved.
+rm -f "$tmp/fzf-ran"
+PICK_PATH="$tmp/bin:$PATH" FZF_MARKER=$tmp/fzf-ran \
+  run_pick_answer '' test/fixtures/ready.json --bead pmm-iris-58h --dry-run
+if [ "$status" -ne 0 ]; then
+  fail "enter at the suggestion exits 0" "exit $status: $(cat "$tmp/err")"
+fi
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "enter at the suggestion prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "enter at the suggestion: the suggestion is the branch" \
+    "$json" '.branch == "feat/58h"'
+  assert_json "enter at the suggestion: create is true" "$json" \
+    '.create == true'
+  assert_json "enter at the suggestion: the bead rides along" "$json" \
+    '.bead == "pmm-iris-58h" and (.title | length) > 0'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/fzf-ran" ]; then
+  fail "the branch question never starts fzf" "fzf was started"
+fi
+
+# (d3) Anything typed is the branch, exactly as typed -- and a name that no
+# candidate carries is a branch to create.
+run_pick_answer 'my-branch' test/fixtures/ready.json --bead '' --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "typed branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "typed branch: exactly what was typed" "$json" \
+    '.branch == "my-branch"'
+  assert_json "typed branch: create is true" "$json" '.create == true'
+fi
+
+# (d4) A typed name that exactly matches a candidate still switches to the
+# worktree that has it: the list is no longer shown, but it still decides.
+run_pick_answer 'feat/abc123' test/fixtures/ready.json --bead '' --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "typed candidate prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "typed candidate: the typed name" "$json" \
+    '.branch == "feat/abc123"'
+  assert_json "typed candidate: create is false" "$json" '.create == false'
+fi
+
+# (d5) The bead question is still a picker and still skipped without a
+# terminal; the branch answer arrives on the pipe all the same.
+run_pick_answer 'feat/piped' test/fixtures/ready.json --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "piped branch with no bead prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "piped branch with no bead: the branch" "$json" \
+    '.branch == "feat/piped"'
+  assert_json "piped branch with no bead: no bead, no title" "$json" \
+    '.bead == "" and .title == ""'
+fi
+
+# (d6) Empty input with nothing to suggest is a cancelled pick, exactly as esc:
+# exit 3, no payload, no Rex.
+run_pick_answer '' test/fixtures/ready.json --bead '' --dry-run
+if [ "$status" -ne 3 ]; then
+  fail "empty answer with no suggestion exits 3" \
+    "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+  fail "empty answer with no suggestion starts nothing" \
+    "stdout: $(cat "$tmp/out")"
+fi
+
 # (e) A title from a database: quotes survive, tabs and newlines become single
 # spaces, nothing is truncated.
 run_pick test/fixtures/ready-quirky-title.json --bead pmm-iris-q1 \
@@ -290,6 +385,29 @@ if [ "$status" -ne 3 ]; then
   fail "no terminal needs no fzf" "exit $status: $(cat "$tmp/err")"
 elif grep -q 'not found on PATH' "$tmp/err"; then
   fail "no terminal needs no fzf" "stderr: $(cat "$tmp/err")"
+fi
+
+# The branch question needs no fzf at all: with the answer on stdin the picker
+# hands back even where fzf is not installed. Only the bead question is a
+# picker, and --bead says that one is already answered.
+ran=$((ran + 1))
+printf 'feat/no-fzf\n' |
+  PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json test/fixtures/ready.json \
+    --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+    --bead pmm-iris-a4l --dry-run >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a typed branch needs no fzf" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a typed branch needs no fzf: no payload" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a typed branch needs no fzf: the branch" "$json" \
+    '.branch == "feat/no-fzf"'
+  assert_json "a typed branch needs no fzf: create is true" "$json" \
+    '.create == true'
 fi
 
 # (h) pick without the project it is working on. stdin is /dev/null so a run
@@ -355,9 +473,10 @@ if [ $? -ne 2 ]; then
   fail "preview without --main exits 2" "stderr: $(cat "$tmp/err")"
 fi
 
-# (j) Never wait for a terminal that is not there. With neither --bead nor
-# --branch and stdin not a terminal, both questions are skipped -- an fzf
-# launched here would block forever -- and the run ends the way esc does.
+# (j) Never wait for a terminal that is not there. With /dev/null on stdin the
+# bead question is a picker and is skipped (an fzf launched here would block
+# forever), and the branch question reads its answer and gets EOF at once
+# instead of waiting for a key: the run ends the way esc does.
 ran=$((ran + 1))
 rm -f "$tmp/rex-args" "$tmp/fzf-ran"
 PICK_PATH="$tmp/bin:$PATH" FZF_MARKER=$tmp/fzf-ran \
@@ -369,9 +488,8 @@ elif [ -e "$tmp/fzf-ran" ]; then
 elif ! grep -q 'skipping the bead question: stdin is not a terminal' \
   "$tmp/err"; then
   fail "no terminal skips the bead question" "stderr: $(cat "$tmp/err")"
-elif ! grep -q 'skipping the branch question: stdin is not a terminal' \
-  "$tmp/err"; then
-  fail "no terminal skips the branch question" "stderr: $(cat "$tmp/err")"
+elif ! grep -q 'no branch given, nothing to start' "$tmp/err"; then
+  fail "no terminal gets an empty branch" "stderr: $(cat "$tmp/err")"
 fi
 
 # (k) A relative --main or --root is refused. Rex resolves the payload's paths

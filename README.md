@@ -21,10 +21,10 @@ ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktre
    if the directory is not in a git repository or the repository has no beads
    database.
 2. Otherwise a floating picker opens, running `new-work.sh`. It asks two
-   questions: which ready bead (with a preview of its long description), and
-   which branch — prefilled with `<prefix>/<short-id>`, e.g. `bug/58h` for
-   `pmm-iris-58h`, and editable. Existing branches and worktrees are listed too,
-   so typing an existing name switches to it instead of creating anything.
+   questions: which ready bead (with a preview of its long description), then
+   which branch — typed at a prompt that offers `<prefix>/<short-id>`, e.g.
+   `bug/58h` for `pmm-iris-58h`, so a bare Enter accepts it. Typing the name of
+   an existing branch or worktree switches to it instead of creating anything.
 3. The picker hands its answer back to the action `work_new_go`, which:
    - finds the project's session by label, creating it with a `main` tab in the
      main worktree when it is not there yet;
@@ -60,7 +60,7 @@ looked up through your shell):
 |---|---|
 | `wt` | worktrunk, with `-x` / `--execute`, for switching, creating and starting the agent |
 | `jq` | the picker's JSON hand-back and bead filtering |
-| `fzf` | the two pickers |
+| `fzf` | the bead picker and its preview pane |
 | `bd` | beads, for `bd ready` and claiming the picked bead |
 | your agent | default `pi`; anything that takes a prompt argument works |
 | `bat` | optional, for the bead preview |
@@ -158,7 +158,7 @@ the branch name exactly as typed (`bug/58h`).
 ```
 ~/.config/rex/rex-config/
   init.lua        the module: options, the two actions, project and session logic
-  new-work.sh     the bead and branch pickers; hands back to work_new_go
+  new-work.sh     the bead picker and the branch prompt; hands back to work_new_go
   test/           lua and bash tests, run with `bash test/run.sh`
   docs/           the design this was built from
 ```
@@ -170,4 +170,5 @@ bash test/run.sh
 ```
 
 The Lua tests stub the `rex` global, so they need no Rex server, and the shell
-tests read saved tool output instead of asking `bd`, `fzf` or the terminal.
+tests read saved tool output instead of asking `bd` or `fzf`, and pipe the
+branch answer instead of typing it at the prompt.
