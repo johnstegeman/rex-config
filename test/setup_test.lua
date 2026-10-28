@@ -55,8 +55,6 @@ local function stub_rex()
   local stub = {
     actions = {},
     warns = {},
-    binds = {},
-    calls = {},
     exec_calls = {},
     block_calls = {},
     layers = {},
@@ -69,7 +67,16 @@ local function stub_rex()
 
   function stub.log(level, message) stub.warns[#stub.warns + 1] = { level = level, message = message } end
 
-  function stub.bind(keys, action) stub.binds[#stub.binds + 1] = { keys = keys, action = action } end
+  -- Anything this task's code does not call raises rather than answering: a stub
+  -- that returned a plausible value would hide a future misuse instead of failing.
+  local function unused(name)
+    return function()
+      error("setup_test: rex." .. name .. " was called, but no test stubs it", 2)
+    end
+  end
+
+  stub.bind = unused("bind")
+  stub.call = unused("call")
 
   -- nil is a program Rex could not start, which is also what the real one
   -- returns, with a message as its second value. A login-shell probe is one
@@ -84,18 +91,13 @@ local function stub_rex()
     return reply
   end
 
-  function stub.call(method, args)
-    stub.calls[#stub.calls + 1] = { method = method, args = args }
-    return nil, "not stubbed"
-  end
-
   stub.json = {
     decode = function(text)
       local value = stub.json_replies[text]
       if value == nil then error("setup_test: unexpected JSON: " .. tostring(text)) end
       return value
     end,
-    encode = function(value) return tostring(value) end,
+    encode = unused("json.encode"),
   }
 
   function stub.block_call(creator, method, request)
@@ -116,7 +118,7 @@ local function stub_rex()
     end,
   }
 
-  stub.layout = { block = function(spec) return { block = spec } end }
+  stub.layout = { block = unused("layout.block") }
   return stub
 end
 
@@ -207,7 +209,7 @@ eq("the warning's level", rex_stub.warns[#rex_stub.warns].level, "warn")
 contains("the warning names the option", rex_stub.warns[#rex_stub.warns].message, "nope")
 eq("an unknown option is not kept", M.options.nope, nil)
 eq("an unknown option leaves the others alone", M.options.agent, "claude")
-eq("every setup registers both actions", #rex_stub.actions, 6)
+eq("a repeated setup registers nothing new", #rex_stub.actions, 2)
 
 -- The login shell -------------------------------------------------------
 --
@@ -231,6 +233,8 @@ eq("wt still runs in the project root", call_for(stub, "wt list --format=json").
 -- project_for() -------------------------------------------------------------
 
 stub = fresh_rex()
+stub.exec_replies.git = { ok = false, code = 128, stdout = "",
+  stderr = "fatal: not a git repository (or any of the parent directories): .git\n" }
 local project, message = M.project_for("/tmp")
 eq("not a repository returns nil", project, nil)
 eq("not a repository message", message, "not a git repository: /tmp")
@@ -272,8 +276,14 @@ contains("a relative common dir names the directory", relative_message, "/x/pmm-
 
 stub = project_stub()
 stub.exec_replies.git = nil
-eq("a git that cannot start is not a repository", select(2, M.project_for("/tmp")),
-  "not a git repository: /tmp")
+eq("a git that cannot start says so", select(2, M.project_for("/tmp")),
+  "git could not be run: git: executable file not found in PATH")
+
+-- --- Minor 1: an unreadable listing is not the same as no main worktree ---
+stub = project_stub()
+stub.json_replies["wt list"] = nil          -- the shell's stdout was not JSON
+contains("an unreadable worktrunk listing is named", select(2, M.project_for("/x/pmm-iris/main")),
+  "could not read the worktrunk listing for /x/pmm-iris: ")
 
 -- has_beads() ---------------------------------------------------------------
 
@@ -283,10 +293,26 @@ eq("has_beads true", M.has_beads("/x/main"), true)
 eq("bd ready is run in the login shell", call_for(stub, "bd ready --json").argv,
   { shell(), "-lc", "bd ready --json" })
 eq("bd ready runs in the main worktree", call_for(stub, "bd ready --json").cwd, "/x/main")
-stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "", stderr = "no beads database found\n" }
-eq("has_beads false", M.has_beads("/x/main"), false)
+stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
+  stderr = "Error: no beads database found\nHint: run 'bd where'\n" }
+local beads, beads_reason = M.has_beads("/x/main")
+eq("has_beads false", beads, false)
+eq("bd reporting no database is no reason to give", beads_reason, nil)
+
+-- bd ran but failed for a reason of its own: a broken mise shim is the real one.
+stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
+  stderr = "mise ERROR bd is not a valid shim.\nsecond line\n" }
+beads, beads_reason = M.has_beads("/x/main")
+eq("has_beads false", beads, false)
+eq("bd failing on its own reports why", beads_reason,
+  "bd could not be run in /x/main: mise ERROR bd is not a valid shim.")
+
+-- bd could not even start.
 stub.exec_replies["bd ready --json"] = nil
-eq("has_beads false when bd cannot start", M.has_beads("/x/main"), false)
+beads, beads_reason = M.has_beads("/x/main")
+eq("has_beads false when bd cannot start", beads, false)
+eq("bd that cannot start reports why", beads_reason,
+  "bd could not be run in /x/main: bd ready --json: executable file not found in PATH")
 
 -- work_new() ----------------------------------------------------------------
 
@@ -346,6 +372,16 @@ eq("a project without beads fails", ok_no_beads, false)
 eq("a project without beads says beads is required", no_beads_message,
   "beads is required, but no beads database was found in /x/pmm-iris/main")
 eq("a project without beads opens nothing", #stub.layers, 0)
+
+-- A beads database that is there but cannot be asked is not a missing one.
+stub = project_stub()
+stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
+  stderr = "mise ERROR bd is not a valid shim.\n" }
+local ok_broken_bd, broken_bd_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
+eq("a bd that cannot be consulted fails", ok_broken_bd, false)
+eq("a bd that cannot be consulted is not called a missing database", broken_bd_message,
+  "bd could not be run in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
+eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
 
 -- base = false means "let worktrunk choose", so there is nothing to pass on.
 stub = project_stub()

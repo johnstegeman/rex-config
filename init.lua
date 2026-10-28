@@ -174,8 +174,11 @@ end
 -- directory, and the main worktree from worktrunk. Returns nil and a message
 -- naming the reason when the directory is not in a repository this can use.
 function M.project_for(cwd)
-  local git = run({ "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" })
-  if git == nil or git.code ~= 0 then
+  local git, git_reason = run({ "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" })
+  if git == nil then
+    return nil, "git could not be run: " .. tostring(git_reason)
+  end
+  if git.code ~= 0 then
     return nil, "not a git repository: " .. cwd
   end
 
@@ -196,7 +199,10 @@ function M.project_for(cwd)
   -- main_worktree compares the main flag with true, so it needs the decoded
   -- document; raw JSON text is never a boolean.
   local decoded_ok, decoded = pcall(rex.json.decode, listed.stdout or "")
-  local main = (decoded_ok and M.main_worktree(decoded)) or nil
+  if not decoded_ok then
+    return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. tostring(decoded)
+  end
+  local main = M.main_worktree(decoded)
   if main == nil then
     return nil, "no main worktree found for " .. project.root
   end
@@ -204,12 +210,30 @@ function M.project_for(cwd)
   return { root = project.root, name = project.name, main = main }
 end
 
+-- bd's own way of saying a directory has no database. A failure that says
+-- something else is a different problem -- a shim that cannot find its program, a
+-- locked database -- and calling that "no database" would be a lie.
+local NO_DATABASE = "no beads database"
+
 -- Whether the project has a beads database, asked from the main worktree: in
 -- the worktrunk layout the root holds only .git, and main/.beads/redirect is
 -- what resolves the database.
+--
+-- Returns true, or false and the reason bd could not be consulted (nil when bd
+-- ran and reported no database itself).
 function M.has_beads(main)
-  local reply = run_in_shell("bd ready --json", main)
-  return reply ~= nil and reply.code == 0
+  local reply, reason = run_in_shell("bd ready --json", main)
+  if reply == nil then
+    return false, "bd could not be run in " .. main .. ": " .. tostring(reason)
+  end
+  if reply.code == 0 then
+    return true
+  end
+  local said = first_line(reply.stderr)
+  if said:lower():find(NO_DATABASE, 1, true) ~= nil then
+    return false
+  end
+  return false, "bd could not be run in " .. main .. ": " .. said
 end
 
 -- The working directory of the terminal behind ctx's block, or nil when Rex
@@ -302,7 +326,11 @@ function M.work_new(ctx)
   if project == nil then
     error(reason, 0)
   end
-  if not M.has_beads(project.main) then
+  local beads, beads_reason = M.has_beads(project.main)
+  if not beads then
+    if beads_reason ~= nil then
+      error(beads_reason, 0)
+    end
     error("beads is required, but no beads database was found in " .. project.main, 0)
   end
   return open_picker(ctx, project)
@@ -317,6 +345,8 @@ end
 -- Options from the configuration file, then the two actions. run takes the
 -- action's context, and for work_new_go the hand-back payload as a second
 -- argument.
+local actions_registered = false
+
 function M.setup(opts)
   for key, value in pairs(opts or {}) do
     if KNOWN_OPTION[key] then
@@ -326,6 +356,13 @@ function M.setup(opts)
         tostring(key), table.concat(OPTION_NAMES, ", ")))
     end
   end
+
+  -- Registering twice would only warn about replacing an action, so a second
+  -- setup{} keeps its options and leaves the actions alone.
+  if actions_registered then
+    return M
+  end
+  actions_registered = true
 
   rex.action{
     name = "work_new",
