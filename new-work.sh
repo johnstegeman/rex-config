@@ -33,7 +33,8 @@ tools, which is how the tests and dry runs work.
 
 pick's --bead and --branch answer a question instead of asking it, and an
 empty value means none; with no terminal on stdin both questions are skipped
-rather than waited on.
+rather than waited on. --main and --root must be absolute: Rex resolves them
+against its own working directory, not this one.
 EOF
 }
 
@@ -44,22 +45,58 @@ usage_error() {
   exit 2
 }
 
+# Exit 2: an argument whose value cannot mean what it says. Rex resolves the
+# hand-back's paths against its own working directory rather than the float's,
+# so a relative one would build a tab somewhere else entirely -- and fail there
+# with nothing on screen to explain it.
+need_absolute() {
+  case $2 in
+    /*) return 0 ;;
+  esac
+  usage_error "$1 must be an absolute path, not $2"
+}
+
 # Exit 1: the environment cannot run the command at all.
 die() {
   printf '%s: %s\n' "$PROG" "$1" >&2
   exit 1
 }
 
-# Exit 1 after a pause: the picker runs in a floating terminal, so exiting at
-# once would make the pane vanish before anyone could read why it did. The
-# keypress goes to that terminal; with stdin closed (a script, or the tests) it
-# returns immediately.
+# Whether this run has already paused, so a failure that has been read is not
+# waited on twice: need pauses for its own message, and hold_pick covers every
+# other way the picker can stop.
+held=0
+
+# Wait for one keypress before the message just printed disappears with the
+# terminal: the picker runs in a floating terminal, which closes the moment this
+# script exits. The keypress goes to that terminal; with no terminal on stdin (a
+# script, a pipe, or the tests) there is nobody to wait for, so it returns.
+wait_for_key() {
+  held=1
+  [ -t 0 ] || return 0
+  read -r -s -n 1 _ || true
+}
+
+# On the way out of pick -- usage_error's 2, die's 1, a missing tool's 1, rex's
+# own status -- hold the float with the failure still on screen. A cancelled
+# pick (3) is an answer rather than a failure, so esc closes the picker the way
+# it always did.
+hold_pick() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && [ "$held" -eq 0 ]; then
+    wait_for_key
+  fi
+  exit "$status"
+}
+
+# Exit 1: a tool the command cannot work without is not installed, so the pane
+# is held open on the name of it.
 need() {
   if command -v "$1" >/dev/null 2>&1; then
     return 0
   fi
   printf '%s not found on PATH — press any key\n' "$1" >&2
-  read -r -s -n 1 _ || true
+  wait_for_key
   exit 1
 }
 
@@ -398,6 +435,12 @@ cmd_pick() {
   [ -n "$root" ] || usage_error 'pick: need --root PATH'
   [ -n "$project" ] || usage_error 'pick: need --project NAME'
 
+  # The hand-back's paths are read by the Rex server, whose working directory is
+  # not this one, so they have to say where they are. The Lua side derives both
+  # from git and they are always absolute; this is the guard for a hand-run.
+  need_absolute 'pick: --main' "$main"
+  need_absolute 'pick: --root' "$root"
+
   # The picker's own requirements, before any work. fzf is asked for only where
   # a question will really be asked -- in the float, where stdin is a terminal --
   # so a scripted run is not stopped by a tool it would never call. Saved tool
@@ -529,7 +572,15 @@ cmd_pick() {
     return 0
   fi
 
-  rex do work_new_go --args "$payload"
+  # The hand-back is the last thing that can fail here, and the one failure that
+  # used to leave nothing on screen: rex prints why it refused on this terminal,
+  # and a line of ours says nothing was started even when rex says nothing at
+  # all. hold_pick keeps it there while the float still exists.
+  local handed=0
+  rex do work_new_go --args "$payload" || handed=$?
+  if [ "$handed" -ne 0 ]; then
+    die "Rex did not start the work: rex exited $handed"
+  fi
 }
 
 case ${1:-} in
@@ -551,6 +602,9 @@ case ${1:-} in
     ;;
   pick)
     shift
+    # Every way the picker can stop passes through here on its way out, so the
+    # pause that keeps its message on screen is taken in one place.
+    trap hold_pick EXIT
     cmd_pick "$@"
     ;;
   *)

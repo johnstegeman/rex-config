@@ -30,6 +30,10 @@ mkdir -p "$tmp/bin"
 cat >"$tmp/bin/rex" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@" >"$REX_ARGS_FILE"
+if [ -n "${REX_FAIL:-}" ]; then
+  printf 'rex: %s\n' "$REX_FAIL" >&2
+  exit "${REX_STATUS:-1}"
+fi
 EOF
 cat >"$tmp/bin/fzf" <<'EOF'
 #!/bin/sh
@@ -288,10 +292,12 @@ elif grep -q 'not found on PATH' "$tmp/err"; then
   fail "no terminal needs no fzf" "stderr: $(cat "$tmp/err")"
 fi
 
-# (h) pick without the project it is working on.
+# (h) pick without the project it is working on. stdin is /dev/null so a run
+# started from a terminal asks for no keypress: the picker holds a failure open
+# only where there is a float to hold it in.
 pick_no() {
   ran=$((ran + 1))
-  ./new-work.sh pick "$@" >"$tmp/out" 2>"$tmp/err"
+  ./new-work.sh pick "$@" >"$tmp/out" 2>"$tmp/err" </dev/null
   local got=$?
   if [ "$got" -ne 2 ]; then
     fail "pick $* exits 2" "exit $got: $(cat "$tmp/err")"
@@ -366,6 +372,101 @@ elif ! grep -q 'skipping the bead question: stdin is not a terminal' \
 elif ! grep -q 'skipping the branch question: stdin is not a terminal' \
   "$tmp/err"; then
   fail "no terminal skips the branch question" "stderr: $(cat "$tmp/err")"
+fi
+
+# (k) A relative --main or --root is refused. Rex resolves the payload's paths
+# against its own working directory, not the float's, so `.` would build a tab
+# in the server's directory and fail there with nothing on screen to say why.
+# Nothing is looked up either: every tool here is a stand-in that leaves a mark
+# when it is run, so "no tool was asked anything" is a missing file -- wt
+# included, which the picker would otherwise need before it can list branches.
+mkdir -p "$tmp/watch-bin"
+for tool in rex wt bd jq git fzf; do
+  cat >"$tmp/watch-bin/$tool" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$0" >>"$CALLED_FILE"
+EOF
+  chmod +x "$tmp/watch-bin/$tool"
+done
+ln -sf "$(command -v cat)" "$tmp/watch-bin/cat"
+
+pick_relative() {
+  local name=$1 want=$2
+  shift 2
+  ran=$((ran + 1))
+  rm -f "$tmp/called"
+  PATH="$tmp/watch-bin" CALLED_FILE=$tmp/called "${BASH:-bash}" \
+    ./new-work.sh pick --project demo --bead '' --branch feat/x --dry-run \
+    "$@" >"$tmp/out" 2>"$tmp/err" </dev/null
+  local got=$?
+  if [ "$got" -ne 2 ]; then
+    fail "$name exits 2" "exit $got: $(cat "$tmp/err")"
+  elif ! grep -qF "new-work.sh: $want" "$tmp/err"; then
+    fail "$name is named as relative" "stderr: $(cat "$tmp/err")"
+  fi
+  ran=$((ran + 1))
+  if [ -s "$tmp/out" ] || [ -e "$tmp/called" ]; then
+    fail "$name starts nothing" \
+      "stdout: $(cat "$tmp/out") called: $(sort -u "$tmp/called" 2>/dev/null)"
+  fi
+}
+pick_relative 'relative --main' 'pick: --main must be an absolute path, not .' \
+  --main . --root /p/demo
+pick_relative 'relative --root' 'pick: --root must be an absolute path, not ..' \
+  --main /p/demo/main --root ..
+pick_relative 'a bare name as --main' 'pick: --main must be an absolute path, not main' \
+  --main main --root /p/demo
+
+# (l) A hand-back Rex refuses is the failure nobody used to see: rex's reason
+# goes to this terminal, a line of ours says no work was started, and the run
+# exits non-zero -- which is what holds the float open on screen.
+ran=$((ran + 1))
+rm -f "$tmp/rex-args"
+PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args \
+  REX_FAIL='could not claim pmm-iris-58h: mise ERROR bd is not a valid shim' \
+  ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --bead pmm-iris-a4l --branch bug/a4l \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+if [ "$status" -eq 0 ]; then
+  fail "a refused hand-back exits non-zero" "exit 0: $(cat "$tmp/err")"
+elif ! grep -qF 'could not claim pmm-iris-58h' "$tmp/err"; then
+  fail "a refused hand-back shows rex's reason" "stderr: $(cat "$tmp/err")"
+elif ! grep -qF 'new-work.sh: Rex did not start the work' "$tmp/err"; then
+  fail "a refused hand-back says nothing was started" \
+    "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ ! -e "$tmp/rex-args" ]; then
+  fail "a refused hand-back still handed over" "rex was never called"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ]; then
+  fail "a refused hand-back writes nothing to stdout" "stdout: $(cat "$tmp/out")"
+fi
+
+# (m) The same failure with no terminal returns at once: the hold would wait
+# for a key that is never coming. stdin is a pipe that stays open and silent,
+# so a read of it would block for the whole five seconds.
+start=$SECONDS
+rm -f "$tmp/rex-args"
+PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args REX_FAIL='no server' \
+  ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --bead pmm-iris-a4l --branch bug/a4l \
+  >"$tmp/out" 2>"$tmp/err" < <(sleep 5)
+status=$?
+elapsed=$((SECONDS - start))
+ran=$((ran + 1))
+if [ "$status" -eq 0 ]; then
+  fail "no terminal: a refused hand-back still fails" "exit 0"
+elif [ "$elapsed" -ge 3 ]; then
+  fail "no terminal never waits for a keypress" "waited ${elapsed}s"
+elif ! grep -qF 'new-work.sh: Rex did not start the work' "$tmp/err"; then
+  fail "no terminal: the failure is still printed" "stderr: $(cat "$tmp/err")"
 fi
 
 if [ "$fails" -ne 0 ]; then
