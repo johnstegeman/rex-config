@@ -46,16 +46,9 @@ eq("main_worktree schema2", M.main_worktree({ items = { { worktree = { path = "/
 eq("main_worktree legacy", M.main_worktree({ { path = "/r/main", is_main = true }, { path = "/r/feat" } }), "/r/main")
 eq("main_worktree none", M.main_worktree({ items = {} }), nil)
 eq("main_worktree non-table items", M.main_worktree({ items = "x" }), nil)
-eq("wt create", M.wt_switch_argv{ branch = "bug/58h", create = true, base = "@", agent = "pi", prompt = "hello world" },
-   { "wt", "switch", "--create", "--base", "@", "bug/58h", "-x", "pi", "--", "hello world" })
-eq("wt existing", M.wt_switch_argv{ branch = "bug/58h", create = false, base = "@", agent = "pi" },
-   { "wt", "switch", "bug/58h", "-x", "pi", "--" })
-eq("wt agent_args", M.wt_switch_argv{ branch = "b", create = true, agent = "pi", agent_args = { "--thinking", "high" }, prompt = "p" },
-   { "wt", "switch", "--create", "b", "-x", "pi", "--", "--thinking", "high", "p" })
-eq("wt base suppressed when creating from false", M.wt_switch_argv{ branch = "b", create = true, base = false, agent = "pi" },
-   { "wt", "switch", "--create", "b", "-x", "pi", "--" })
-eq("wt requires branch", pcall(M.wt_switch_argv, { agent = "pi" }), false)
-eq("wt requires agent", pcall(M.wt_switch_argv, { branch = "b" }), false)
+-- The `wt switch` words themselves are asserted where they are executed:
+-- test/wrapper_test.sh runs the tab's wrapper with a stand-in `wt` and reads
+-- the words it was given, for a create run and for an existing worktree.
 
 if fails > 0 then os.exit(1) end
 print("ok " .. count .. " assertions")

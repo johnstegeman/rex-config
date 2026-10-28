@@ -69,33 +69,6 @@ function M.main_worktree(list_json)
   return nil
 end
 
--- argv for `wt switch`: worktrunk owns worktree creation, so this plugin only
--- ever builds its command line. --base is meaningful only when creating.
-function M.wt_switch_argv(args)
-  args = args or {}
-  assert(type(args.branch) == "string" and type(args.agent) == "string",
-    "wt_switch_argv: branch and agent are required")
-  local argv = { "wt", "switch" }
-  if args.create then
-    argv[#argv + 1] = "--create"
-    if args.base ~= nil and args.base ~= false then
-      argv[#argv + 1] = "--base"
-      argv[#argv + 1] = args.base
-    end
-  end
-  argv[#argv + 1] = args.branch
-  argv[#argv + 1] = "-x"
-  argv[#argv + 1] = args.agent
-  argv[#argv + 1] = "--"
-  for _, arg in ipairs(args.agent_args or {}) do
-    argv[#argv + 1] = arg
-  end
-  if args.prompt ~= nil and args.prompt ~= false then
-    argv[#argv + 1] = args.prompt
-  end
-  return argv
-end
-
 -- The session whose label is exactly the project's name. The label is the only
 -- key: a session called pmm-iris-2 belongs to something else, and adopting it
 -- would put the tab in the wrong place.
@@ -143,11 +116,94 @@ M.options = {
   script = beside_module("new-work.sh"),
 }
 
--- The command the new tab runs: worktrunk switches the worktree and starts the
--- agent in it, so the pane ends up in the right directory with no cd of our
--- own. The prompt is the bead's, unless the flow was started without one.
+-- The program the new tab runs, as POSIX sh (the tab gets it through
+-- `sh -c`, see new_tab_argv below for the parameters). It exists because the
+-- pane has to outlive the agent: switch the worktree, run the agent in it, then
+-- leave a login shell there, so worktrunk's hook output and the agent's last
+-- lines stay readable above a prompt that works. Exiting that shell closes the
+-- tab.
+--
+-- Every value the flow knows arrives as a positional parameter, so no branch,
+-- base, agent name or prompt is ever written into this text: a branch with a
+-- slash, a prompt with quotes and an agent name with a space each stay one
+-- argument, because the shell hands them over as they were. Nothing here is
+-- bash -- it runs on whatever `sh` the machine has.
+M.new_tab_script = [==[
+# $1 = create (1 or 0), $2 = branch, $3 = base (empty when there is none), then
+# the agent and the arguments it is started with, the prompt last.
+create=$1
+branch=$2
+base=$3
+shift 3
+# Named once so the messages below can name the agent even if the caller sent
+# no arguments at all: nothing is run then, but the pane still has to say what.
+agent=${1:-the agent}
+
+# worktrunk owns the switch: --create makes the branch and its worktree, --base
+# says what the branch starts from (only meaningful when creating), and --no-cd
+# leaves this shell where it is, so the worktree's path is read from the JSON
+# reply rather than arrived at by changing directory. Either way the project's
+# hooks run here, and their output belongs on this pane.
+switch_worktree() {
+  if [ "$create" = 1 ]; then
+    if [ -n "$base" ]; then
+      wt switch --create "$branch" --base "$base" --no-cd --format=json
+    else
+      wt switch --create "$branch" --no-cd --format=json
+    fi
+  else
+    wt switch "$branch" --no-cd --format=json
+  fi
+}
+
+listing=$(switch_worktree)
+# The assignment's status is the switch's own, captured before anything else
+# runs: a worktrunk that failed has already said why, on this pane's stderr.
+switched=$?
+
+# The worktree the switch chose, and nothing else: the agent must never start in
+# the wrong directory, so a path that cannot be read -- the switch failed, jq is
+# missing, the reply carries none -- means the agent is not started at all.
+path=
+if [ "$switched" -eq 0 ]; then
+  path=$(printf '%s\n' "$listing" | jq -r '.path // empty')
+fi
+
+# A login shell is this program's last act. It is what keeps the pane alive
+# for the user once the agent is gone, and exiting it is what closes the tab.
+leave_shell() {
+  exec "${SHELL:-/bin/sh}" -l
+}
+
+if [ -z "$path" ]; then
+  printf 'rex-config: wt switch %s reported no worktree path (exit %s); not starting %s\n' \
+    "$branch" "$switched" "$agent" >&2
+  leave_shell
+fi
+
+cd "$path" || {
+  printf 'rex-config: could not enter %s; not starting %s\n' "$path" "$agent" >&2
+  leave_shell
+}
+
+"$@"
+leave_shell
+]==]
+
+-- The command the new tab runs: that wrapper, with everything it needs as a
+-- parameter --
+--
+--   sh -c SCRIPT sh <create> <branch> <base> <agent> [agent_args...] <prompt>
+--
+-- because a parameter is the one way a branch, a prompt or an agent name
+-- reaches a shell without the shell parsing it as text. The prompt is the
+-- bead's, unless the flow was started without one.
 function M.new_tab_argv(project, args)
   args = args or {}
+  assert(type(args.branch) == "string" and args.branch ~= "",
+    "new_tab_argv: a branch is required")
+  assert(type(M.options.agent) == "string" and M.options.agent ~= "",
+    "new_tab_argv: an agent is required")
   local prompt
   if type(args.bead) == "string" and args.bead ~= "" then
     prompt = M.render_prompt(M.options.bead_prompt, {
@@ -159,16 +215,29 @@ function M.new_tab_argv(project, args)
   else
     prompt = M.options.no_bead_prompt
   end
-  return M.wt_switch_argv{
-    branch = args.branch,
-    create = args.create,
-    -- --base says what a new branch starts from, so it is only there when
-    -- worktrunk is asked to create one; false means its own default.
-    base = args.create and M.options.base or nil,
-    agent = M.options.agent,
-    agent_args = M.options.agent_args,
-    prompt = prompt,
+
+  -- --base says what a new branch starts from, so it only travels when
+  -- worktrunk is asked to create one; an empty parameter is its own default.
+  local base = ""
+  if args.create and M.options.base ~= nil and M.options.base ~= false then
+    base = M.options.base
+  end
+
+  local argv = {
+    "sh", "-c", M.new_tab_script,
+    -- sh takes the word after the program as $0, so this is what keeps the
+    -- create flag in $1 rather than the program's own name.
+    "sh",
+    args.create and "1" or "0",
+    args.branch,
+    base,
+    M.options.agent,
   }
+  for _, arg in ipairs(M.options.agent_args or {}) do
+    argv[#argv + 1] = arg
+  end
+  argv[#argv + 1] = prompt
+  return argv
 end
 
 local OPTION_NAMES = { "agent", "agent_args", "bead_prompt", "no_bead_prompt", "base", "bounds", "script" }
@@ -593,9 +662,10 @@ function M.work_new_go(ctx, args)
       options = {
         cwd = main,
         command = M.new_tab_argv(project, args),
-        -- The pane outlives the agent, so what worktrunk and the agent
-        -- printed above it can still be read once the agent exits.
-        exit = { on_completion = false },
+        -- Nothing keeps the pane open: the command it runs ends in a login
+        -- shell, so the pane lives as long as that shell does and the tab closes
+        -- when the user leaves it. A kept-open pane with no program in it is
+        -- exactly the dead tab this wrapper replaces.
       },
     },
   })

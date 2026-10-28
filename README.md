@@ -32,12 +32,17 @@ ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktre
      no second claim, no second worktree;
    - otherwise claims the bead (`bd update <id> --claim`, run in the main
      worktree) and creates the tab, labelled with the branch, in the main
-     worktree, kept open after the agent exits, running:
+     worktree, running a small shell wrapper:
 
      ```
-     wt switch --create <branch> --base <base> -x <agent> -- <prompt>
-     wt switch <branch> -x <agent> -- <prompt>          # branch already exists
+     wt switch --create <branch> --base <base> --no-cd --format=json   # or
+     wt switch <branch> --no-cd --format=json                          # existing
+     cd <the worktree that switch reported> && <agent> <prompt>
+     exec "$SHELL" -l                  # the shell the agent exits to
      ```
+
+     Every value reaches that wrapper as a positional parameter, so no branch,
+     prompt or agent name is ever parsed as shell text.
 
    - and shows that session and tab in the app.
 
@@ -47,9 +52,14 @@ the project's. So the flow attaches to the project's session before it reads its
 tabs or creates the new one, and stays attached — nothing detaches afterwards,
 and attaching takes nothing away from the session you are looking at.
 
-worktrunk owns the worktree: it creates it, runs its hooks there, and starts the
-agent in it, so the tab ends up in the right directory without the plugin
-changing directory itself. The plugin never runs `git worktree add`.
+worktrunk owns the worktree: it creates it and runs its hooks in the tab, so the
+tab ends up in the right directory without the plugin changing directory
+itself. The plugin never runs `git worktree add`.
+
+When the agent exits — quit, crash, or a brainstorming that finished — the tab
+drops into your login shell in that worktree: worktrunk's hook output and the
+agent's last lines stay readable above the prompt, and the tests the agent just
+wrote can be run there. Exiting that shell closes the tab.
 
 ## Requirements
 
@@ -58,8 +68,8 @@ looked up through your shell):
 
 | Tool | Why |
 |---|---|
-| `wt` | worktrunk, with `-x` / `--execute`, for switching, creating and starting the agent |
-| `jq` | the picker's JSON hand-back and bead filtering |
+| `wt` | worktrunk, for switching, creating, and naming the worktree's path |
+| `jq` | the picker's JSON hand-back, the tab's worktree path, and bead filtering |
 | `fzf` | the bead picker and its preview pane |
 | `bd` | beads, for `bd ready` and claiming the picked bead |
 | your agent | default `pi`; anything that takes a prompt argument works |
@@ -148,8 +158,11 @@ the branch name exactly as typed (`bug/58h`).
 - The bead cannot be claimed: the flow stops before a tab is made, naming what
   `bd` said, so an agent never starts on a bead that is not its own.
 - `wt switch` fails (bad ref, dirty base, a failing hook): its output stays in
-  the tab and the pane is kept open. The bead stays claimed, since the tab is
-  there too; `bd unclaim <id>` releases it.
+  the tab, the agent is not started — it never starts in the wrong directory —
+  and you are left in a login shell in the main worktree. The bead stays
+  claimed, since the tab is there too; `bd unclaim <id>` releases it.
+- `jq` is missing, or worktrunk reports no worktree path: the same, with a
+  one-line error naming the branch on the tab.
 - The tab was made but the app could not be switched to it: the error says the
   tab was created and names what failed. The tab is still there.
 

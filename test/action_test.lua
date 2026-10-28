@@ -273,31 +273,76 @@ eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
 
 -- new_tab_argv() --------------------------------------------------------------
 
--- Switching to a worktree that already exists: no --create, no --base, and the
--- bead's prompt after the program and its arguments.
+-- The tab does not run one program any more: it runs a POSIX sh wrapper that
+-- switches the worktree, starts the agent in it, and leaves a login shell
+-- behind when the agent exits. Everything the flow knows travels as a
+-- positional parameter --
+--
+--   sh -c SCRIPT sh <create 0|1> <branch> <base> <agent> <agent args…>
+--
+-- because that is the only way a branch, a prompt or an agent name can reach
+-- the wrapper without any shell parsing it as text. These assertions pin the
+-- shape element by element.
+
+-- The program the wrapper's sh is handed, as the module builds it: the one
+-- string an interpolating implementation would have rewritten with the answer.
+local WRAPPER = M.new_tab_argv(PROJECT, { branch = BRANCH, create = false })[3]
+eq("the wrapper program is text", type(WRAPPER), "string")
+
+-- sh -c takes the program, then the *next* word as $0: naming it "sh" is what
+-- keeps $1 the create flag rather than the program's own name.
+eq("sh is told what $0 is", M.new_tab_argv(PROJECT, { branch = BRANCH })[4], "sh")
+
 eq("new_tab_argv for an existing worktree",
   M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-  { "wt", "switch", BRANCH, "-x", "pi", "--", "/brainstorming for bead " .. BEAD })
+  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
 
 eq("new_tab_argv for a new branch",
   M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD, title = "Diff" }),
-  { "wt", "switch", "--create", "--base", "@", BRANCH, "-x", "pi", "--",
-    "/brainstorming for bead " .. BEAD })
+  { "sh", "-c", WRAPPER, "sh", "1", BRANCH, "@", "pi", "/brainstorming for bead " .. BEAD })
 
 eq("new_tab_argv without a bead asks for plain brainstorming",
   M.new_tab_argv(PROJECT, { branch = "x", create = true, bead = "" }),
-  { "wt", "switch", "--create", "--base", "@", "x", "-x", "pi", "--", "/brainstorming" })
+  { "sh", "-c", WRAPPER, "sh", "1", "x", "@", "pi", "/brainstorming" })
 
 -- A missing bead and an empty one are the same answer: no bead.
 eq("new_tab_argv with no bead field at all",
   M.new_tab_argv(PROJECT, { branch = "x", create = false }),
-  { "wt", "switch", "x", "-x", "pi", "--", "/brainstorming" })
+  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "pi", "/brainstorming" })
 
 -- A hand-back always says whether to create, but leaving the field out must not
 -- read as "create": that would add a worktree nobody asked for.
 eq("new_tab_argv with no create field switches, creating nothing",
   M.new_tab_argv(PROJECT, { branch = "x", bead = "" }),
-  { "wt", "switch", "x", "-x", "pi", "--", "/brainstorming" })
+  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "pi", "/brainstorming" })
+
+-- The base is what a new branch starts from, so it only travels for a create:
+-- an empty parameter is the wrapper's "worktrunk's own default".
+do
+  local base = M.options.base
+  M.options.base = false
+  eq("no base parameter when the option says so",
+    M.new_tab_argv(PROJECT, { branch = "x", create = true })[7], "")
+  M.options.base = base
+end
+
+-- The answer is data, never program text: a prompt with spaces and quotes and a
+-- branch with a slash each arrive as one argument, and neither appears in the
+-- script the shell parses.
+do
+  local bead_prompt, agent_args = M.options.bead_prompt, M.options.agent_args
+  M.options.bead_prompt = 'work on {branch}: "don\'t" $(id); {id}'
+  M.options.agent_args = { "--thinking", "high" }
+  local prompt = 'work on bug/58h: "don\'t" $(id); ' .. BEAD
+  local argv = M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD })
+  eq("the branch is one argument", argv[6], BRANCH)
+  eq("the agent's arguments and the prompt are arguments too",
+    { argv[8], argv[9], argv[10], argv[11] }, { "pi", "--thinking", "high", prompt })
+  eq("the number of arguments is the number of values", #argv, 11)
+  eq("the branch is not pasted into the program text", argv[3]:find(BRANCH, 1, true), nil)
+  eq("the prompt is not pasted into the program text", argv[3]:find(prompt, 1, true), nil)
+  M.options.bead_prompt, M.options.agent_args = bead_prompt, agent_args
+end
 
 -- The configured placeholders all arrive: the prompt is the plugin's, not one
 -- baked into this file.
@@ -307,8 +352,19 @@ do
   M.options.agent = "claude"
   eq("new_tab_argv renders the configured prompt",
     M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-    { "wt", "switch", BRANCH, "-x", "claude", "--", "work on pmm-iris/bug/58h for " .. BEAD .. ": Diff" })
+    { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "claude",
+      "work on pmm-iris/bug/58h for " .. BEAD .. ": Diff" })
   M.options.bead_prompt, M.options.agent = bead_prompt, agent
+end
+
+-- Without a branch or an agent there is nothing to start, and a tab that ran
+-- something arbitrary would be worse than a refusal.
+eq("a tab needs a branch", pcall(M.new_tab_argv, PROJECT, {}), false)
+do
+  local agent = M.options.agent
+  M.options.agent = ""
+  eq("a tab needs an agent", pcall(M.new_tab_argv, PROJECT, { branch = "x" }), false)
+  M.options.agent = agent
 end
 
 -- work_new_go(): the whole flow ----------------------------------------------
@@ -356,18 +412,24 @@ do
 end
 
 -- The tab: one window, in the project's session, labelled with the branch, in
--- the main worktree, kept open, running wt switch with the prompt.
+-- the main worktree, running the wrapper that switches, starts the agent and
+-- leaves a login shell behind.
 do
   local request = request_of(stub, "session.new_window")
+  local options = request.layout.block.options
   eq("the tab is made in the project's session", request.session_id, "session:iris")
   eq("the tab is labelled with the branch", request.window_label, BRANCH)
   eq("the tab's block is labelled too", request.layout.block.label, BRANCH)
-  eq("the tab starts in the main worktree", request.layout.block.options.cwd, MAIN)
-  eq("the tab runs the switch with the prompt", request.layout.block.options.command,
-    { "wt", "switch", "--create", "--base", "@", BRANCH, "-x", "pi", "--",
-      "/brainstorming for bead " .. BEAD })
-  eq("the tab is kept open when the agent exits",
-    request.layout.block.options.exit.on_completion, false)
+  eq("the tab starts in the main worktree", options.cwd, MAIN)
+  eq("the tab runs the wrapper", options.command, M.new_tab_argv(PROJECT, payload()))
+  eq("the wrapper is asked to create the worktree", options.command[5], "1")
+  eq("the wrapper is given the branch", options.command[6], BRANCH)
+  eq("the wrapper is given the prompt", options.command[#options.command],
+    "/brainstorming for bead " .. BEAD)
+  -- The login shell the wrapper leaves behind is the tab's last program, so the
+  -- pane closes when the shell exits; a kept-open pane with no program in it is
+  -- the dead tab this task exists to remove.
+  eq("the tab is not kept open after the agent exits", options.exit, nil)
 end
 
 -- Showing it: the app client is asked, and asked for the tab rather than just
@@ -496,15 +558,19 @@ eq("a bead id that is not one makes no tab", #calls_to(stub, "session.new_window
 stub = new_branch_stub()
 pcall(M.work_new_go, { origin = "cli" }, payload{ bead = "", title = "" })
 eq("no bead means no claim", #stub.exec_calls, 0)
-eq("no bead means the plain prompt", request_of(stub, "session.new_window").layout.block.options.command,
-  { "wt", "switch", "--create", "--base", "@", BRANCH, "-x", "pi", "--", "/brainstorming" })
+eq("no bead means the plain prompt",
+  request_of(stub, "session.new_window").layout.block.options.command,
+  M.new_tab_argv(PROJECT, payload{ bead = "", title = "" }))
 
 -- Switching to a worktree that already exists, with no tab for it yet: the tab
 -- is made without --create, so no second worktree appears.
 stub = new_branch_stub()
 pcall(M.work_new_go, { origin = "cli" }, payload{ create = false })
-eq("an existing worktree is switched to", request_of(stub, "session.new_window").layout.block.options.command,
-  { "wt", "switch", BRANCH, "-x", "pi", "--", "/brainstorming for bead " .. BEAD })
+eq("an existing worktree is switched to",
+  request_of(stub, "session.new_window").layout.block.options.command,
+  M.new_tab_argv(PROJECT, payload{ create = false }))
+eq("an existing worktree sends no base",
+  request_of(stub, "session.new_window").layout.block.options.command[7], "")
 
 -- A session that cannot be shown leaves the tab in place and says so, rather
 -- than throwing the work away.
