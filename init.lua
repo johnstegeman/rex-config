@@ -408,16 +408,23 @@ function M.work_new(ctx)
   return open_picker(ctx, project)
 end
 
--- Session methods only answer a connection attached to the session, and the app
--- is attached to the session it shows, which is not necessarily the project's.
--- An attach adds to the attachments a connection already has, so this takes
--- nothing away from the session the user is looking at. nil means attached.
+-- Attach to the target session, because a session method only reaches a session
+-- the connection is attached to: the app is attached to the session it shows,
+-- which is not necessarily the project's, so without this every session.view or
+-- session.new_window below fails with "stream is not attached to session". An
+-- attach adds to the attachments a connection already has, so it takes nothing
+-- away from the session the user is looking at, and it stays for as long as the
+-- connection does: nothing here detaches.
+--
+-- The reply carries the session's view, so this is where its tabs are read too.
+-- Returns the windows, or nil and the reason it could not attach.
 local function attach_session(session_id)
   local attached, reason = call("session.attach", { session_id = session_id })
   if attached == nil then
-    return reason
+    return nil, reason
   end
-  return nil
+  local view = type(attached.view) == "table" and attached.view or {}
+  return type(view.windows) == "table" and view.windows or {}
 end
 
 -- The project's session, made when it is not there yet with one tab called
@@ -482,7 +489,11 @@ local function show_session(ctx, session_id, window_id)
     args.window_id = window_id
   end
   if origin == "key" or origin == "palette" then
-    local queued, reason = pcall(rex.client.queue, "session.select", args)
+    -- The closure, not the call's arguments: rex.client may be missing entirely,
+    -- and that lookup is what has to be caught.
+    local queued, reason = pcall(function()
+      return rex.client.queue("session.select", args)
+    end)
     if not queued then
       return tostring(reason)
     end
@@ -522,7 +533,7 @@ function M.work_new_go(ctx, args)
 
   -- The hand-back is the only source of these, so one that is missing is
   -- refused before anything is made.
-  for _, name in ipairs({ "project", "main", "branch" }) do
+  for _, name in ipairs({ "project", "root", "main", "branch" }) do
     local value = args[name]
     if type(value) ~= "string" or value == "" then
       error("the picker's answer has no " .. name, 0)
@@ -534,18 +545,14 @@ function M.work_new_go(ctx, args)
   if session == nil then
     error(session_reason, 0)
   end
-  local attach_reason = attach_session(session)
-  if attach_reason ~= nil then
+  local windows, attach_reason = attach_session(session)
+  if windows == nil then
     error("could not attach to the " .. project .. " session: " .. attach_reason, 0)
   end
 
-  local view, view_reason = call("session.view", { session_id = session })
-  if view == nil then
-    error("could not read the " .. project .. " session: " .. view_reason, 0)
-  end
-  -- A second press for the same branch finds this: one tab, one worktree and
-  -- one claim, whatever the picker was asked.
-  local existing = M.find_tab(view.windows, branch)
+  -- A second press for the same branch finds its tab here: one tab, one worktree
+  -- and one claim, whatever the picker was asked.
+  local existing = M.find_tab(windows, branch)
   if existing ~= nil then
     local show_reason = show_session(ctx, session, existing)
     if show_reason ~= nil then

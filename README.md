@@ -41,6 +41,12 @@ ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktre
 
    - and shows that session and tab in the app.
 
+Rex answers a session's methods only on a connection attached to that session,
+and the app is attached to the session it is showing, which is not necessarily
+the project's. So the flow attaches to the project's session before it reads its
+tabs or creates the new one, and stays attached — nothing detaches afterwards,
+and attaching takes nothing away from the session you are looking at.
+
 worktrunk owns the worktree: it creates it, runs its hooks there, and starts the
 agent in it, so the tab ends up in the right directory without the plugin
 changing directory itself. The plugin never runs `git worktree add`.

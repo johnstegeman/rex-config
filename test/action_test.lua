@@ -71,6 +71,10 @@ local function stub_rex()
     queued = {},
     call_replies = {},
     exec_replies = {},
+    -- What happened, in order: a rex.call by method name, a rex.exec by the
+    -- command it ran. Ordering is half of the safety of the flow, so it is
+    -- asserted rather than assumed.
+    events = {},
   }
 
   function stub.action(spec) stub.actions[#stub.actions + 1] = spec end
@@ -90,6 +94,7 @@ local function stub_rex()
   -- running server does; a test that wants a failure stubs that.
   function stub.call(method, request)
     stub.calls[#stub.calls + 1] = { method = method, request = request }
+    stub.events[#stub.events + 1] = method
     local reply = stub.call_replies[method]
     if type(reply) == "function" then return reply(method, request) end
     if reply == nil then
@@ -104,6 +109,7 @@ local function stub_rex()
     stub.exec_calls[#stub.exec_calls + 1] = { argv = argv, cwd = opts and opts.cwd }
     local program = argv[1]
     if argv[2] == "-lc" then program = argv[3] end
+    stub.events[#stub.events + 1] = program
     local reply = stub.exec_replies[program]
     if type(reply) == "function" then return reply(argv, opts) end
     if reply == nil then return nil, program .. ": executable file not found in PATH" end
@@ -165,17 +171,27 @@ local function program(call)
   return call.argv[1]
 end
 
+-- The recorded argv and cwd of NAME, or an empty table when it never ran, so an
+-- absent call gives a named FAIL rather than a Lua error.
 local function exec_for(stub, name)
   for _, call in ipairs(stub.exec_calls) do
     if program(call) == name then return call end
   end
+  return {}
 end
 
--- The one recorded rex.call for a method, and how many there were.
+-- The one recorded rex.call for a method, and how many there were. The request
+-- is empty rather than nil for the same reason: a missing call has to read as a
+-- failed assertion, not as a crash.
 local function call_for(stub, method)
   for _, call in ipairs(stub.calls) do
     if call.method == method then return call end
   end
+  return {}
+end
+
+local function request_of(stub, method)
+  return call_for(stub, method).request or {}
 end
 
 local function calls_to(stub, method)
@@ -195,10 +211,14 @@ local function new_branch_stub()
     session_id = "session:iris",
     initial_windows = { { window_id = "window:main", block_ids = { "block:main" }, revision = 1 } },
   }
-  stub.call_replies["session.attach"] = { client_id = "client:app", view = { session_id = "session:iris" } }
-  stub.call_replies["session.view"] = {
-    session_id = "session:iris",
-    windows = { { window_id = "window:main", label = "main" } },
+  -- The attach reply carries the session's view, which is where the existing
+  -- tabs come from.
+  stub.call_replies["session.attach"] = {
+    client_id = "client:app",
+    view = {
+      session_id = "session:iris",
+      windows = { { window_id = "window:main", label = "main" } },
+    },
   }
   stub.call_replies["session.new_window"] = {
     window_id = "window:tab", block_ids = { "block:tab" }, revision = 2,
@@ -213,11 +233,14 @@ end
 local function existing_tab_stub()
   local stub = new_branch_stub()
   stub.call_replies["session.list"] = { sessions = { { session_id = "session:iris", label = PROJECT } } }
-  stub.call_replies["session.view"] = {
-    session_id = "session:iris",
-    windows = {
-      { window_id = "window:main", label = "main" },
-      { window_id = "window:tab", label = BRANCH },
+  stub.call_replies["session.attach"] = {
+    client_id = "client:app",
+    view = {
+      session_id = "session:iris",
+      windows = {
+        { window_id = "window:main", label = "main" },
+        { window_id = "window:tab", label = BRANCH },
+      },
     },
   }
   return stub
@@ -270,6 +293,12 @@ eq("new_tab_argv with no bead field at all",
   M.new_tab_argv(PROJECT, { branch = "x", create = false }),
   { "wt", "switch", "x", "-x", "pi", "--", "/brainstorming" })
 
+-- A hand-back always says whether to create, but leaving the field out must not
+-- read as "create": that would add a worktree nobody asked for.
+eq("new_tab_argv with no create field switches, creating nothing",
+  M.new_tab_argv(PROJECT, { branch = "x", bead = "" }),
+  { "wt", "switch", "x", "-x", "pi", "--", "/brainstorming" })
+
 -- The configured placeholders all arrive: the prompt is the plugin's, not one
 -- baked into this file.
 do
@@ -297,15 +326,15 @@ eq("work_new_go reports that it created the tab", field(result, "created"), true
 -- that the session's own methods answer this connection.
 eq("the sessions are listed", #calls_to(stub, "session.list"), 1)
 eq("the session is created from the hand-back's project name",
-  call_for(stub, "session.create").request.label, PROJECT)
+  request_of(stub, "session.create").label, PROJECT)
 do
-  local window = call_for(stub, "session.create").request.initial_windows[1]
+  local window = request_of(stub, "session.create").initial_windows[1]
   eq("the new session opens with a main tab", window.window_label, "main")
   eq("the main tab starts in the main worktree", window.layout.block.options.cwd, MAIN)
   eq("the main tab is a shell", window.layout.block.flavor, "com.superlogical.terminal.shell")
 end
-eq("the session is attached to", call_for(stub, "session.attach").request.session_id, "session:iris")
-eq("the session's windows are read", call_for(stub, "session.view").request.session_id, "session:iris")
+eq("the session is attached to", request_of(stub, "session.attach").session_id, "session:iris")
+eq("the attach's view is what the tabs are read from", #calls_to(stub, "session.view"), 0)
 
 -- The bead is claimed from the main worktree, through the login shell that has
 -- bd on its PATH.
@@ -313,10 +342,24 @@ eq("the bead is claimed", exec_for(stub, "bd update " .. BEAD .. " --claim").arg
   { shell(), "-lc", "bd update " .. BEAD .. " --claim" })
 eq("the claim runs in the main worktree", exec_for(stub, "bd update " .. BEAD .. " --claim").cwd, MAIN)
 
+-- The order matters: the bead is claimed before the tab is made, so an agent
+-- never starts on a bead that is not its own.
+do
+  local claim_at, tab_at
+  for i, event in ipairs(stub.events) do
+    if event == "bd update " .. BEAD .. " --claim" then claim_at = i end
+    if event == "session.new_window" then tab_at = i end
+  end
+  eq("nothing runs before the session is attached to",
+    stub.events[1], "session.list")
+  eq("the bead is claimed before the tab is made",
+    claim_at ~= nil and tab_at ~= nil and claim_at < tab_at, true)
+end
+
 -- The tab: one window, in the project's session, labelled with the branch, in
 -- the main worktree, kept open, running wt switch with the prompt.
 do
-  local request = call_for(stub, "session.new_window").request
+  local request = request_of(stub, "session.new_window")
   eq("the tab is made in the project's session", request.session_id, "session:iris")
   eq("the tab is labelled with the branch", request.window_label, BRANCH)
   eq("the tab's block is labelled too", request.layout.block.label, BRANCH)
@@ -330,12 +373,12 @@ end
 
 -- Showing it: the app client is asked, and asked for the tab rather than just
 -- the session, so the branch is what comes into view.
-eq("the app client is asked to show it", call_for(stub, "client.perform").request.client_id, "client:app")
-eq("the client shows the session", call_for(stub, "client.perform").request.action, "session.select")
-eq("the client shows the tab", call_for(stub, "client.perform").request.args,
+eq("the app client is asked to show it", request_of(stub, "client.perform").client_id, "client:app")
+eq("the client shows the session", request_of(stub, "client.perform").action, "session.select")
+eq("the client shows the tab", request_of(stub, "client.perform").args,
   { session_id = "session:iris", window_id = "window:tab" })
 eq("the client is told where the request came from",
-  call_for(stub, "client.perform").request.origin, "cli")
+  request_of(stub, "client.perform").origin, "cli")
 eq("nothing is queued without an invocation", #stub.queued, 0)
 
 -- From a key the app is running the action itself, so the selection is queued
@@ -361,9 +404,9 @@ eq("a repeat press succeeds", ok_again, true)
 eq("a repeat press selects the tab that is already there", field(again, "window_id"), "window:tab")
 eq("a repeat press creates nothing", field(again, "created"), false)
 eq("a repeat press makes no tab", #calls_to(stub, "session.new_window"), 0)
-eq("a repeat press claims nothing", #calls_to(stub, "bd update " .. BEAD .. " --claim"), 0)
+eq("a repeat press claims nothing", #stub.exec_calls, 0)
 eq("a repeat press makes no session", #calls_to(stub, "session.create"), 0)
-eq("a repeat press still shows the tab", call_for(stub, "client.perform").request.args,
+eq("a repeat press still shows the tab", request_of(stub, "client.perform").args,
   { session_id = "session:iris", window_id = "window:tab" })
 
 -- A session whose label merely starts with the project's name is not the
@@ -373,9 +416,20 @@ stub.call_replies["session.list"] = { sessions = {
   { session_id = "session:other", label = PROJECT .. "-2" },
 } }
 pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a look-alike session is not adopted", call_for(stub, "session.create").request.label, PROJECT)
+eq("a look-alike session is not adopted", request_of(stub, "session.create").label, PROJECT)
 eq("the tab goes to the session the flow made",
-  call_for(stub, "session.new_window").request.session_id, "session:iris")
+  request_of(stub, "session.new_window").session_id, "session:iris")
+
+-- A session that cannot be attached to is refused before anything is made: the
+-- attach is what every later session method depends on.
+stub = new_branch_stub()
+stub.call_replies["session.attach"] = function() return nil, "session not found" end
+local ok_unattached, unattached = pcall(M.work_new_go, { origin = "cli" }, payload())
+eq("a session that cannot be attached to fails", ok_unattached, false)
+contains("the failure says it could not attach", unattached, "could not attach to the " .. PROJECT .. " session")
+contains("the failure says what Rex said", unattached, "session not found")
+eq("a session that cannot be attached to claims nothing", #stub.exec_calls, 0)
+eq("a session that cannot be attached to makes no tab", #calls_to(stub, "session.new_window"), 0)
 
 -- A bead that cannot be claimed stops the flow before a tab is made: an agent
 -- started on an unclaimed bead is worse than an error.
@@ -410,14 +464,14 @@ eq("a bead id that is not one makes no tab", #calls_to(stub, "session.new_window
 stub = new_branch_stub()
 pcall(M.work_new_go, { origin = "cli" }, payload{ bead = "", title = "" })
 eq("no bead means no claim", #stub.exec_calls, 0)
-eq("no bead means the plain prompt", call_for(stub, "session.new_window").request.layout.block.options.command,
+eq("no bead means the plain prompt", request_of(stub, "session.new_window").layout.block.options.command,
   { "wt", "switch", "--create", "--base", "@", BRANCH, "-x", "pi", "--", "/brainstorming" })
 
 -- Switching to a worktree that already exists, with no tab for it yet: the tab
 -- is made without --create, so no second worktree appears.
 stub = new_branch_stub()
 pcall(M.work_new_go, { origin = "cli" }, payload{ create = false })
-eq("an existing worktree is switched to", call_for(stub, "session.new_window").request.layout.block.options.command,
+eq("an existing worktree is switched to", request_of(stub, "session.new_window").layout.block.options.command,
   { "wt", "switch", BRANCH, "-x", "pi", "--", "/brainstorming for bead " .. BEAD })
 
 -- A session that cannot be shown leaves the tab in place and says so, rather
