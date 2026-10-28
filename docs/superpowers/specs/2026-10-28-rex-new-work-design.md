@@ -33,8 +33,8 @@ directory, as a tab in the project's own session.
 
 ## Non-goals (this cut)
 
-- **GitHub issues.** Bead-first; the `gh` path is a later addition, and only
-  when the repo has no beads database.
+- **GitHub issues.** Bead-first and bead-only. Beads is a hard requirement, so
+  there is no degraded mode for a repo without it.
 - **Worktree removal / cleanup.** No "close finished work" flow. The user closes
   the tab and runs `wt remove`. Tracked separately as bead `rex-config-6c4`.
 - **Switching to existing worktrees as a first-class flow.** The old trial
@@ -105,9 +105,11 @@ directory, as a tab in the project's own session.
    - The **main worktree** path comes from `wt list --format=json` (schema 2:
      `items[].worktree.path` with `items[].worktree.main`), and is the tab's
      initial working directory **and** the cwd for every `bd` call.
-3. `work_new` opens a floating picker (bounds configurable) running
-   `new-work.sh`, passing the project root, project name, `--base`, and whether
-   the project has a beads database.
+3. `work_new` stops here if the project has no beads database (probe: `bd where`
+   or `bd ready --json` from the main worktree) — an error names the directory and
+   says beads is required. Otherwise it opens a floating picker (bounds
+   configurable) running `new-work.sh`, passing the project root, project name and
+   `--base`.
 4. `new-work.sh` asks two questions:
    - **Bead** — `bd ready --json`, filtered (see below), shown as
      `id  title` with `fzf --preview` running `bd show <id>` (through `bat` when
@@ -156,6 +158,12 @@ agent exits.
 A project session that doesn't exist is created with one `main` tab, so the
 user's "home tab" convention bootstraps itself for a repo never opened in Rex
 before.
+
+**The label is the only key.** The plugin never scans sessions' terminal
+working directories to guess which one belongs to a project, and never renames
+one. A session you made by hand for pmm-iris under some other name will not be
+adopted — the convention is that a project's session is named after the
+project, and the flow creates it that way.
 
 ### Bead filtering
 
@@ -227,7 +235,6 @@ require("rex-config").setup{
   base        = "@",                             -- what --create branches from, resolved in the main worktree; false = worktrunk default
   bounds      = { 0.15, 0.1, 0.7, 0.8 },         -- picker float, fractions of the window
   script      = nil,                             -- override new-work.sh's path
-  skip_beads  = false,                           -- force-ignore beads for this project
 }
 rex.bind("ctrl+space>n", "work_new")
 ```
@@ -238,8 +245,10 @@ usable from the CLI for tests and for scripting).
 ## Edge cases and failure behaviour
 
 - **Not a git repository** → picker never opens; an error names the directory.
-- **No beads database** (`bd` fails, or `skip_beads`) → the bead step is skipped
-  and only the branch question is asked.
+- **No beads database** → the flow refuses. The picker never opens; an error
+  names the directory and says beads is required. Brainstorming does not work
+  without beads, so a branch-with-agent run that skipped the bead would produce
+  an agent with nothing to work on.
 - **`wt`, `fzf`, or `jq` missing** → the float says which one and waits for a
   keypress, rather than vanishing.
 - **Branch already has a worktree and a tab** → select that tab; change nothing.
