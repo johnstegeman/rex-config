@@ -25,7 +25,8 @@ commands:
   pick --main DIR --root PATH --project NAME [--base B]
        [--bead ID] [--branch NAME] [--dry-run]
       ask for a bead, then a branch, and hand the answer to Rex as one JSON
-      object; exit 3 when no branch was chosen
+      object; exit 3 when no branch was chosen, exit 2 when the name typed for
+      a new branch is not a valid ref
 
 --bd-json, --wt-json and --refs read saved tool output instead of asking the
 tools, which is how the tests and dry runs work.
@@ -297,20 +298,31 @@ pick_bead() {
 }
 
 # The branch question: the existing branches as suggestions, prefilled with
-# the bead-derived name and editable. `--print-query` puts the typed text on
-# the first line, and `enter:replace-query` swaps the query for the
-# highlighted entry first -- so one keystroke means "switch to this branch"
-# when a branch is highlighted and "create this name" when nothing matches.
-# Aborting prints nothing, which pick turns into exit 3.
+# the bead-derived name. What was typed is the branch -- the name on screen is
+# always the name handed back, so a name that only resembles a listed branch is
+# still a branch to create. `--print-query` prints that text on the first line
+# and the highlighted entry on the second, so the entry only decides when the
+# query is empty: ctrl-u clears the prefilled default and then enter (or an
+# arrow) picks a listed branch. Aborting prints nothing, which pick turns into
+# exit 3.
 pick_branch() {
-  local candidates=$1 query=$2 header=$3 out
+  local candidates=$1 query=$2 header=$3 out typed selected
 
   out=$(
     { [ -z "$candidates" ] || printf '%s\n' "$candidates"; } |
-      fzf --print-query --reverse --query "$query" --header "$header" \
-        --bind 'enter:replace-query+accept'
+      fzf --print-query --reverse --query "$query" --header "$header"
   ) || return 0
-  printf '%s\n' "$out" | head -n 1
+
+  typed=${out%%$'\n'*}
+  case $out in
+    *$'\n'*) selected=${out#*$'\n'} ;;
+    *) selected='' ;;
+  esac
+  if [ -n "$typed" ]; then
+    printf '%s\n' "$typed"
+  else
+    printf '%s\n' "${selected%%$'\n'*}"
+  fi
 }
 
 # `new-work.sh pick --main DIR --root PATH --project NAME [--base B]`
@@ -386,10 +398,11 @@ cmd_pick() {
   [ -n "$root" ] || usage_error 'pick: need --root PATH'
   [ -n "$project" ] || usage_error 'pick: need --project NAME'
 
-  # The picker's own requirements, before any work: fzf first, because a run
-  # that may stop to ask something is a run that needs it. Saved tool output
-  # stands in for the tools it replaces.
-  if [ "$bead_set" -eq 0 ] || [ "$branch_set" -eq 0 ]; then
+  # The picker's own requirements, before any work. fzf is asked for only where
+  # a question will really be asked -- in the float, where stdin is a terminal --
+  # so a scripted run is not stopped by a tool it would never call. Saved tool
+  # output stands in for the tools it replaces.
+  if [ -t 0 ] && { [ "$bead_set" -eq 0 ] || [ "$branch_set" -eq 0 ]; }; then
     need fzf
   fi
   [ -n "$wt_json" ] || need wt
@@ -400,7 +413,9 @@ cmd_pick() {
   if ! ready=$(ready_json "$main" "$bd_json"); then
     die "pick: could not read the ready beads from ${bd_json:-$main}"
   fi
-  rows=$(printf '%s\n' "$ready" | pickable_rows)
+  if ! rows=$(printf '%s\n' "$ready" | pickable_rows); then
+    die "pick: could not read the bead list from ${bd_json:-$main}"
+  fi
 
   local note=''
   if [ "$bead_set" -eq 0 ]; then
@@ -428,13 +443,19 @@ cmd_pick() {
   local title='' issue_type=''
   if [ -n "$bead" ]; then
     if ! printf '%s\n' "$rows" | cut -f1 | grep -Fxq -- "$bead"; then
-      printf '%s: %s is not on the ready list; starting it without a title\n' \
-        "$PROG" "$bead" >&2
+      # It can still have a title: a gate, a molecule or a step is filtered out
+      # of the picker but present in the database.
+      printf '%s: %s is not on the pickable list\n' "$PROG" "$bead" >&2
     fi
-    issue_type=$(printf '%s\n' "$ready" | jq -r --arg id "$bead" \
-      '[.[] | select(.id == $id)][0].issue_type // ""')
-    title=$(printf '%s\n' "$ready" | jq -r --arg id "$bead" \
-      '([.[] | select(.id == $id)][0].title // "") | gsub("[\\t\\n\\r]+"; " ")')
+    # One lookup for both fields, one per line, so the empty issue_type cannot
+    # be lost to field splitting.
+    {
+      read -r issue_type
+      read -r title
+    } < <(printf '%s\n' "$ready" | jq -r --arg id "$bead" '
+          ([.[] | select(.id == $id)][0]) as $b
+          | ($b.issue_type // ""),
+            (($b.title // "") | gsub("[\\t\\n\\r]+"; " "))')
   fi
 
   local candidates
@@ -458,7 +479,7 @@ cmd_pick() {
         # map fall back to feat, like the map itself does.
         query=$(cmd_branch_default --type "${issue_type:-other}" --id "$bead")
       fi
-      local header='pick an existing branch, or type a new name to create it'
+      local header='type a branch name, or ctrl-u then enter to switch to a listed one'
       if [ -n "$base" ]; then
         header="$header (new branches start from $base)"
       fi
@@ -481,6 +502,14 @@ cmd_pick() {
   local create=true
   if printf '%s\n' "$candidates" | grep -Fxq -- "$branch"; then
     create=false
+  fi
+
+  # A name to create has to be one worktrunk can actually create: better to say
+  # so here, where the float is still on screen, than in the new tab's output.
+  if [ "$create" = true ] &&
+    ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+    printf '%s: not a valid branch name: %s\n' "$PROG" "$branch" >&2
+    exit 2
   fi
 
   local payload

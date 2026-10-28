@@ -132,19 +132,47 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "dry run prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out")"
 else
-  assert_json "exact branch payload" "$json" '.branch == "bug/a4l"'
-  assert_json "exact branch payload" "$json" '.create == false'
-  assert_json "exact branch payload" "$json" '.bead == "pmm-iris-a4l"'
-  assert_json "exact branch payload" "$json" \
+  assert_json "exact branch: branch" "$json" '.branch == "bug/a4l"'
+  assert_json "exact branch: create is false" "$json" '.create == false'
+  assert_json "exact branch: bead" "$json" '.bead == "pmm-iris-a4l"'
+  assert_json "exact branch: title" "$json" \
     '.title == "Treat index/catalog pages as non-extractable"'
-  assert_json "exact branch payload" "$json" \
+  assert_json "exact branch: project, root, main" "$json" \
     '.project == "demo" and .root == "/p/demo" and .main == "/p/demo/main"'
-  assert_json "exact branch payload" "$json" \
+  assert_json "exact branch: exactly the seven keys" "$json" \
     'keys == ["bead", "branch", "create", "main", "project", "root", "title"]'
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/rex-args" ]; then
   fail "dry run does not call rex" "rex saw: $(sed -n '1,4p' "$tmp/rex-args")"
+fi
+
+# (b2) A name that merely begins like a candidate is not that candidate: an
+# exact match is a switch, a fuzzy one is a branch to create. `bug/a4` is a
+# prefix of `bug/a4l`, so a substring match would call it existing.
+run_pick test/fixtures/ready.json --bead '' --branch bug/a4 --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "fuzzy prefix prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "fuzzy prefix: branch" "$json" '.branch == "bug/a4"'
+  assert_json "fuzzy prefix: create is true" "$json" '.create == true'
+fi
+
+# (b3) A new branch name has to be a ref worktrunk can create; the script says
+# so itself instead of letting `wt switch` fail in the new tab.
+run_pick test/fixtures/ready.json --bead '' --branch 'not a ref' --dry-run
+if [ "$status" -ne 2 ]; then
+  fail "invalid branch name exits 2" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -q "new-work.sh: not a valid branch name: not a ref" "$tmp/err"; then
+  fail "invalid branch name says so" "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+  fail "invalid branch name starts nothing" \
+    "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
 fi
 
 # (c) --bead '' answers the bead question with "none": the bead stage is not
@@ -223,20 +251,41 @@ else
   fi
 fi
 
-# (g) A missing tool is named and the pane waits instead of vanishing. fzf is
-# the picker's first requirement, so a PATH without it answers first.
+# (g) A missing tool is named, the pane waits for a keypress and the run exits 1
+# instead of vanishing. jq is needed before any question is asked, so with no
+# tools at all it is the one that answers.
 ran=$((ran + 1))
 rm -f "$tmp/rex-args"
-PATH=/usr/bin:/bin REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+PATH=/nonexistent REX_ARGS_FILE=$tmp/rex-args "${BASH:-bash}" ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
   --bead pmm-iris-a4l </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 1 ]; then
-  fail "missing fzf exits 1" "exit $status: $(cat "$tmp/err")"
-elif ! grep -q 'fzf not found on PATH — press any key' "$tmp/err"; then
-  fail "missing fzf says which tool" "stderr: $(cat "$tmp/err")"
+  fail "missing tool exits 1" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qx 'jq not found on PATH — press any key' "$tmp/err"; then
+  fail "missing tool is named" "stderr: $(cat "$tmp/err")"
+fi
+
+# Every tool the run needs except fzf: with no terminal nothing is asked, so the
+# run must reach the empty-branch exit instead of complaining about fzf.
+mkdir -p "$tmp/no-fzf-bin"
+for tool in bash cat cut grep sed awk tr git bd wt jq; do
+  found=$(command -v "$tool") || continue
+  ln -sf "$found" "$tmp/no-fzf-bin/$tool"
+done
+ran=$((ran + 1))
+PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 3 ]; then
+  fail "no terminal needs no fzf" "exit $status: $(cat "$tmp/err")"
+elif grep -q 'not found on PATH' "$tmp/err"; then
+  fail "no terminal needs no fzf" "stderr: $(cat "$tmp/err")"
 fi
 
 # (h) pick without the project it is working on.
