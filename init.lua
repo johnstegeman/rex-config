@@ -131,12 +131,33 @@ M.options = {
 M.new_tab_script = [==[
 # $1 = create (1 or 0), $2 = branch, $3 = base (empty when there is none), then
 # the agent and the arguments it is started with, the prompt last.
+
+# A login shell is this program's last act, and every path below ends here: it
+# is what keeps the pane alive once the agent is gone, with the output above it
+# still readable, and exiting it is what closes the tab. A $SHELL naming a
+# program that is not installed would leave the pane dead with exit 127, so the
+# plain sh is the fallback.
+leave_shell() {
+  if [ -n "${SHELL:-}" ] && command -v "$SHELL" >/dev/null 2>&1; then
+    exec "$SHELL" -l
+  fi
+  exec /bin/sh -l
+}
+
+# The three parameters come before the agent, and `shift 3` on a short list is
+# fatal in a non-interactive shell -- dash exits outright -- which would leave
+# the pane with nothing in it. So a broken caller is answered with a shell too.
+if [ "$#" -lt 3 ]; then
+  printf 'rex-config: the tab needs create, branch and base\n' >&2
+  leave_shell
+fi
+
 create=$1
 branch=$2
 base=$3
 shift 3
-# Named once so the messages below can name the agent even if the caller sent
-# no arguments at all: nothing is run then, but the pane still has to say what.
+# Named once so the messages below can name the agent even if it was sent with
+# no arguments: nothing is run then, but the pane still has to say what.
 agent=${1:-the agent}
 
 # worktrunk owns the switch: --create makes the branch and its worktree, --base
@@ -169,12 +190,6 @@ if [ "$switched" -eq 0 ]; then
   path=$(printf '%s\n' "$listing" | jq -r '.path // empty')
 fi
 
-# A login shell is this program's last act. It is what keeps the pane alive
-# for the user once the agent is gone, and exiting it is what closes the tab.
-leave_shell() {
-  exec "${SHELL:-/bin/sh}" -l
-}
-
 if [ -z "$path" ]; then
   printf 'rex-config: wt switch %s reported no worktree path (exit %s); not starting %s\n' \
     "$branch" "$switched" "$agent" >&2
@@ -186,7 +201,16 @@ cd "$path" || {
   leave_shell
 }
 
-"$@"
+# A ^C while the agent runs belongs to the agent: the terminal sends it to
+# every process in the pane's group, so the agent dies (or handles it) -- and if
+# this wrapper died with it there would be no shell left to hand over, which is
+# the dead pane all over again. The wrapper therefore ignores INT for exactly
+# the length of the agent's run, and the agent gets the default disposition
+# back in its own child. Outside this, INT is left alone: interrupting the
+# switch itself (a hook approval prompt, say) still stops the wrapper as it did.
+trap '' INT
+( trap - INT; exec "$@" )
+trap - INT
 leave_shell
 ]==]
 

@@ -90,27 +90,52 @@ printf 'shell pwd: %s\n' "$PWD"
 printf 'shell args: %s\n' "$*"
 EOF
 
-chmod +x "$bin/wt" "$bin/agent" "$tmp/shell"
+# An agent that keeps running until it is killed, the way a ^C ends a busy agent.
+cat >"$bin/agent-killed" <<'EOF'
+#!/bin/sh
+: >"$READY"
+sleep 30
+EOF
+
+# An agent that catches the ^C itself and leaves cleanly afterwards. It records
+# that the signal reached it, so a wrapper that kept the signal to itself would
+# be caught by that as well as by the missing shell.
+cat >"$bin/agent-trapping" <<'EOF'
+#!/bin/sh
+trap ': >"$GOT_INT"; exit 0' INT
+: >"$READY"
+while :; do sleep 0.1; done
+EOF
+
+chmod +x "$bin/wt" "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
 
 # The wrapper is run by the machine's own `sh`, resolved here so a run can take
-# every tool but `wt` off the PATH (that is how a missing jq is tested).
+# every tool but `wt` off the PATH (that is how a missing jq is tested). Every
+# sh the machine has is kept too: the wrapper has to survive a ^C on all of
+# them, and dash is the one whose wait dies first.
 sh_bin=$(command -v sh)
+shells=$sh_bin
+if command -v dash >/dev/null 2>&1; then
+  shells="$shells $(command -v dash)"
+fi
 
 # Run the wrapper the way Rex runs the tab: as an argv with no shell in between,
 # the tab's own directory as cwd, and the answer under test as its parameters.
-# WRAPPER_PATH narrows the PATH for the run. Sets $status and leaves stdout in
-# $tmp/out, stderr in $tmp/err.
+# WRAPPER_PATH narrows the PATH for the run, RUN_SHELL picks the sh, TEST_SHELL
+# replaces the stand-in shell, TEST_WT_PATH the path worktrunk reports, and
+# STDIN_FROM what the pane's stdin is (a file of commands, for a fallback sh that
+# is not a stub). Sets $status and leaves stdout in $tmp/out, stderr in $tmp/err.
 run_wrapper() {
   local create=$1 branch=$2 base=$3
   shift 3
   (
     cd "$start" || exit 1
     PATH=${WRAPPER_PATH:-$bin:$PATH}
-    SHELL=$tmp/shell
-    WT_WORDS=$tmp/wt-words WT_PATH=$worktree WT_FAIL=${WT_FAIL:-0}
+    SHELL=${TEST_SHELL:-$tmp/shell}
+    WT_WORDS=$tmp/wt-words WT_PATH=${TEST_WT_PATH:-$worktree} WT_FAIL=${WT_FAIL:-0}
     export PATH SHELL WT_WORDS WT_PATH WT_FAIL
-    "$sh_bin" -c "$script" sh "$create" "$branch" "$base" "$@"
-  ) >"$tmp/out" 2>"$tmp/err"
+    "${RUN_SHELL:-$sh_bin}" -c "$script" sh "$create" "$branch" "$base" "$@"
+  ) >"$tmp/out" 2>"$tmp/err" <"${STDIN_FROM:-/dev/null}"
   status=$?
 }
 
@@ -223,6 +248,66 @@ if ! grep -qx "shell pwd: $start" "$tmp/out" || ! grep -q jq "$tmp/err"; then
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 
+# A path worktrunk reported but the shell cannot enter -- the worktree going away
+# between the switch and the cd. The agent must not run there either, and the
+# pane still gets its shell, in the tab's directory.
+ran=$((ran + 1))
+TEST_WT_PATH=/nonexistent/nope run_wrapper 1 feat/x1 @ agent "/brainstorming"
+if [ "$status" -ne 0 ]; then
+  fail "a worktree that cannot be entered still leaves a shell" \
+    "exit $status: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+if grep -q "agent pwd" "$tmp/out"; then
+  fail "a worktree that cannot be entered never starts the agent" \
+    "output: $(cat "$tmp/out")"
+fi
+
+ran=$((ran + 1))
+if ! grep -q "could not enter" "$tmp/err" || ! grep -qx "shell pwd: $start" "$tmp/out"; then
+  fail "a worktree that cannot be entered is named, and the shell stays put" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
+# A caller that sends too few parameters: `shift 3` on a short list is fatal in a
+# non-interactive shell (dash exits outright), which would kill the pane with no
+# shell at all. The wrapper says what is missing and opens the shell anyway.
+for run_shell in $shells; do
+  shell_name=${run_shell##*/}
+  ran=$((ran + 1))
+  (
+    cd "$start" || exit 1
+    SHELL=$tmp/shell PATH=$bin:$PATH
+    export SHELL PATH
+    "$run_shell" -c "$script" sh 1 feat/x1
+  ) >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+  if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $start" "$tmp/out"; then
+    fail "too few parameters still leave a shell ($shell_name)" \
+      "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+  fi
+
+  ran=$((ran + 1))
+  if ! grep -q "create, branch and base" "$tmp/err"; then
+    fail "too few parameters say which ones are missing ($shell_name)" \
+      "stderr: $(cat "$tmp/err")"
+  fi
+done
+
+# $SHELL naming a program that is not installed: exec'ing it would leave the pane
+# dead with exit 127, so the plain sh is the fallback. That sh is not a stub, so
+# it is given a command on stdin: it reads it once it has started.
+ran=$((ran + 1))
+cat >"$tmp/fallback" <<'EOF'
+printf 'fallback shell pwd: %s\n' "$PWD"
+EOF
+TEST_SHELL=/nonexistent/shell STDIN_FROM=$tmp/fallback run_wrapper 0 feat/x1 "" agent "/brainstorming"
+if [ "$status" -ne 0 ] || ! grep -qx "fallback shell pwd: $worktree" "$tmp/out"; then
+  fail "a missing \$SHELL falls back to /bin/sh in the worktree" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
 # The answer is data: a branch and a prompt full of shell syntax reach worktrunk
 # and the agent as themselves, and none of it is executed.
 ran=$((ran + 1))
@@ -235,6 +320,62 @@ else
   fail "the branch and the prompt are arguments, not program text" \
     "words: $(cat "$tmp/wt-words") output: $(cat "$tmp/out")"
 fi
+
+# A ^C in the pane: it goes to the whole process group, so the agent AND this
+# wrapper get it, and a wrapper killed by it leaves no shell behind at all --
+# the pane dies. Both shapes have to end in a shell: an agent killed by the
+# signal, and an agent that catches it and exits cleanly.
+#
+# Bash's job control puts the run in its own process group, exactly as a
+# terminal does, so the INT can be sent to the group; the agent touches $tmp/ready
+# once it is running, so the signal arrives while it is.
+interrupt_run() {
+  local agent_name=$1
+  shift
+  rm -f "$tmp/ready" "$tmp/got-int"
+  (
+    cd "$start" || exit 1
+    set -m
+    PATH=${WRAPPER_PATH:-$bin:$PATH}
+    SHELL=$tmp/shell
+    WT_WORDS=$tmp/wt-words WT_PATH=$worktree WT_FAIL=0
+    READY=$tmp/ready GOT_INT=$tmp/got-int
+    export PATH SHELL WT_WORDS WT_PATH WT_FAIL READY GOT_INT
+    "${RUN_SHELL:-$sh_bin}" -c "$script" sh 0 feat/x1 "" "$agent_name" "$@" &
+    local child=$! waited=0
+    while [ ! -e "$tmp/ready" ] && [ "$waited" -lt 100 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    kill -INT -"$child" 2>/dev/null || kill -INT "$child" 2>/dev/null
+    wait "$child"
+  ) >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+for run_shell in $shells; do
+  shell_name=${run_shell##*/}
+
+  ran=$((ran + 1))
+  RUN_SHELL=$run_shell interrupt_run agent-killed "/brainstorming"
+  if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+    fail "a ^C that kills the agent still leaves the shell ($shell_name)" \
+      "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+  fi
+
+  ran=$((ran + 1))
+  RUN_SHELL=$run_shell interrupt_run agent-trapping "/brainstorming"
+  if [ ! -e "$tmp/got-int" ]; then
+    fail "the ^C reaches the agent itself ($shell_name)" \
+      "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+  fi
+
+  ran=$((ran + 1))
+  if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+    fail "a ^C the agent catches still leaves the shell ($shell_name)" \
+      "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+  fi
+done
 
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"

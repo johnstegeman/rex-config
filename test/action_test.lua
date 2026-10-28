@@ -326,21 +326,26 @@ do
   M.options.base = base
 end
 
--- The answer is data, never program text: a prompt with spaces and quotes and a
--- branch with a slash each arrive as one argument, and neither appears in the
--- script the shell parses.
+-- The answer is data, never program text: a prompt with spaces, quotes and a
+-- newline, and a branch with a slash, each arrive as one argument, and none of
+-- it appears in the script the shell parses. A bead title can carry a newline,
+-- and a newline is the one character that would split a value into two
+-- commands if it were pasted into a program.
 do
   local bead_prompt, agent_args = M.options.bead_prompt, M.options.agent_args
-  M.options.bead_prompt = 'work on {branch}: "don\'t" $(id); {id}'
+  M.options.bead_prompt = 'work on {branch}: "don\'t" $(id)\nsecond line; {id}'
   M.options.agent_args = { "--thinking", "high" }
-  local prompt = 'work on bug/58h: "don\'t" $(id); ' .. BEAD
+  local prompt = 'work on bug/58h: "don\'t" $(id)\nsecond line; ' .. BEAD
   local argv = M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD })
   eq("the branch is one argument", argv[6], BRANCH)
   eq("the agent's arguments and the prompt are arguments too",
     { argv[8], argv[9], argv[10], argv[11] }, { "pi", "--thinking", "high", prompt })
+  eq("the prompt keeps its newline", argv[11]:match("\n(.*)$"), "second line; " .. BEAD)
   eq("the number of arguments is the number of values", #argv, 11)
   eq("the branch is not pasted into the program text", argv[3]:find(BRANCH, 1, true), nil)
   eq("the prompt is not pasted into the program text", argv[3]:find(prompt, 1, true), nil)
+  eq("the prompt's second line is not in the program text",
+    argv[3]:find("second line", 1, true), nil)
   M.options.bead_prompt, M.options.agent_args = bead_prompt, agent_args
 end
 
