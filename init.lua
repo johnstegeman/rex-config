@@ -96,6 +96,31 @@ function M.wt_switch_argv(args)
   return argv
 end
 
+-- The session whose label is exactly the project's name. The label is the only
+-- key: a session called pmm-iris-2 belongs to something else, and adopting it
+-- would put the tab in the wrong place.
+function M.session_for(sessions, project)
+  for _, session in ipairs(type(sessions) == "table" and sessions or {}) do
+    if type(session) == "table" and session.label == project
+      and type(session.session_id) == "string" then
+      return session.session_id
+    end
+  end
+  return nil
+end
+
+-- The window labelled `label`, exactly: a tab is named after a branch, so a
+-- near match is a different branch.
+function M.find_tab(windows, label)
+  for _, window in ipairs(type(windows) == "table" and windows or {}) do
+    if type(window) == "table" and window.label == label
+      and type(window.window_id) == "string" then
+      return window.window_id
+    end
+  end
+  return nil
+end
+
 -- A file beside this module, so new-work.sh is found wherever the plugin was
 -- cloned to (normally ~/.config/rex/rex-config), nothing to configure.
 local function beside_module(name)
@@ -117,6 +142,34 @@ M.options = {
   bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
 }
+
+-- The command the new tab runs: worktrunk switches the worktree and starts the
+-- agent in it, so the pane ends up in the right directory with no cd of our
+-- own. The prompt is the bead's, unless the flow was started without one.
+function M.new_tab_argv(project, args)
+  args = args or {}
+  local prompt
+  if type(args.bead) == "string" and args.bead ~= "" then
+    prompt = M.render_prompt(M.options.bead_prompt, {
+      id = args.bead,
+      title = args.title,
+      branch = args.branch,
+      project = project,
+    })
+  else
+    prompt = M.options.no_bead_prompt
+  end
+  return M.wt_switch_argv{
+    branch = args.branch,
+    create = args.create,
+    -- --base says what a new branch starts from, so it is only there when
+    -- worktrunk is asked to create one; false means its own default.
+    base = args.create and M.options.base or nil,
+    agent = M.options.agent,
+    agent_args = M.options.agent_args,
+    prompt = prompt,
+  }
+end
 
 local OPTION_NAMES = { "agent", "agent_args", "bead_prompt", "no_bead_prompt", "base", "bounds", "script" }
 local KNOWN_OPTION = {}
@@ -168,6 +221,21 @@ local function first_line(text)
     return "no error output"
   end
   return (line:gsub("\r$", ""))
+end
+
+-- rex.call answers a request that failed with nil and a message rather than by
+-- raising, the way rex.exec does, so this turns both that and a raise into the
+-- same two values. The method names are the ones `rex api ls` lists, and the
+-- server's own methods only answer a connection attached to the session.
+local function call(method, request)
+  local called, reply, reason = pcall(rex.call, method, request)
+  if not called then
+    return nil, tostring(reply)
+  end
+  if reply == nil then
+    return nil, tostring(reason)
+  end
+  return reply
 end
 
 -- The project a directory belongs to: its root and name from git's common
@@ -340,10 +408,189 @@ function M.work_new(ctx)
   return open_picker(ctx, project)
 end
 
+-- Session methods only answer a connection attached to the session, and the app
+-- is attached to the session it shows, which is not necessarily the project's.
+-- An attach adds to the attachments a connection already has, so this takes
+-- nothing away from the session the user is looking at. nil means attached.
+local function attach_session(session_id)
+  local attached, reason = call("session.attach", { session_id = session_id })
+  if attached == nil then
+    return reason
+  end
+  return nil
+end
+
+-- The project's session, made when it is not there yet with one tab called
+-- main in the main worktree: that is the convention the rest of the flow
+-- assumes, so a project opened here for the first time starts out right.
+local function session_to_use(project, main)
+  local listed, list_reason = call("session.list")
+  if listed == nil then
+    return nil, "could not list Rex's sessions: " .. list_reason
+  end
+  local found = M.session_for(listed.sessions, project)
+  if found ~= nil then
+    return found
+  end
+  local created, create_reason = call("session.create", {
+    label = project,
+    initial_windows = {
+      {
+        window_label = "main",
+        layout = rex.layout.block{
+          flavor = "com.superlogical.terminal.shell",
+          label = "main",
+          options = { cwd = main },
+        },
+      },
+    },
+  })
+  if created == nil then
+    return nil, "could not create the " .. project .. " session: " .. create_reason
+  end
+  return created.session_id
+end
+
+-- The one thing from the hand-back that travels inside a command line is the
+-- bead id, so it is checked against the shape bd's ids have before it goes in.
+local BEAD_ID = "^[%w][%w%._%-]*$"
+
+-- Claim the bead, from the main worktree, which is where the database is
+-- reachable. nil means it is claimed; a message says why it is not.
+local function claim_bead(bead, main)
+  if bead:match(BEAD_ID) == nil then
+    return "not a bead id: " .. bead
+  end
+  local reply, reason = run_in_shell("bd update " .. bead .. " --claim", main)
+  if reply == nil then
+    return "could not claim " .. bead .. ": " .. tostring(reason)
+  end
+  if reply.code ~= 0 then
+    return "could not claim " .. bead .. ": " .. first_line(reply.stderr)
+  end
+  return nil
+end
+
+-- Show the session, and the tab in it. Rex runs an action from a key or the
+-- palette itself, so a queued client action is accepted there; a hand-back
+-- from `rex do` has no invocation to queue against, so the app's clients are
+-- asked directly instead, which needs Remote Control on. nil means shown.
+local function show_session(ctx, session_id, window_id)
+  local origin = ctx.origin
+  local args = { session_id = session_id }
+  if window_id ~= nil then
+    args.window_id = window_id
+  end
+  if origin == "key" or origin == "palette" then
+    local queued, reason = pcall(rex.client.queue, "session.select", args)
+    if not queued then
+      return tostring(reason)
+    end
+    return nil
+  end
+
+  local listed, list_reason = call("client.list", { kinds = { "app" } })
+  if listed == nil then
+    return list_reason
+  end
+  local clients = type(listed.clients) == "table" and listed.clients or {}
+  if #clients == 0 then
+    return "no app client is connected"
+  end
+  local said = {}
+  for _, client in ipairs(clients) do
+    local request = { client_id = client.client_id, action = "session.select", args = args }
+    if type(origin) == "string" and origin ~= "" then
+      request.origin = origin
+    end
+    local performed, reason = call("client.perform", request)
+    if performed ~= nil then
+      return nil
+    end
+    said[#said + 1] = tostring(reason)
+  end
+  return table.concat(said, "; ")
+end
+
 -- Action work_new_go: the picker's hand-back. It already holds the whole
--- answer, so this only has to start the work.
-function M.work_new_go(_ctx, _args)
-  error("work_new_go is not implemented yet", 0)
+-- answer, so this only has to start the work: the project's session, the tab
+-- named after the branch, the claim, and the switch inside the tab. The
+-- payload's root is the project's root rather than a place anything runs in, so
+-- the tab and every bd call use the main worktree that came with them.
+function M.work_new_go(ctx, args)
+  ctx, args = ctx or {}, args or {}
+
+  -- The hand-back is the only source of these, so one that is missing is
+  -- refused before anything is made.
+  for _, name in ipairs({ "project", "main", "branch" }) do
+    local value = args[name]
+    if type(value) ~= "string" or value == "" then
+      error("the picker's answer has no " .. name, 0)
+    end
+  end
+  local project, main, branch = args.project, args.main, args.branch
+
+  local session, session_reason = session_to_use(project, main)
+  if session == nil then
+    error(session_reason, 0)
+  end
+  local attach_reason = attach_session(session)
+  if attach_reason ~= nil then
+    error("could not attach to the " .. project .. " session: " .. attach_reason, 0)
+  end
+
+  local view, view_reason = call("session.view", { session_id = session })
+  if view == nil then
+    error("could not read the " .. project .. " session: " .. view_reason, 0)
+  end
+  -- A second press for the same branch finds this: one tab, one worktree and
+  -- one claim, whatever the picker was asked.
+  local existing = M.find_tab(view.windows, branch)
+  if existing ~= nil then
+    local show_reason = show_session(ctx, session, existing)
+    if show_reason ~= nil then
+      error("could not show " .. branch .. ": " .. show_reason, 0)
+    end
+    return { window_id = existing, created = false }
+  end
+
+  -- The bead is claimed before the tab exists, so an agent never starts on a
+  -- bead that is not its own: a claim that fails leaves nothing behind.
+  local bead = args.bead
+  if type(bead) == "string" and bead ~= "" then
+    local claim_reason = claim_bead(bead, main)
+    if claim_reason ~= nil then
+      error(claim_reason, 0)
+    end
+  end
+
+  local created, create_reason = call("session.new_window", {
+    session_id = session,
+    window_label = branch,
+    layout = rex.layout.block{
+      flavor = "com.superlogical.terminal.shell",
+      label = branch,
+      options = {
+        cwd = main,
+        command = M.new_tab_argv(project, args),
+        -- The pane outlives the agent, so what worktrunk and the agent
+        -- printed above it can still be read once the agent exits.
+        exit = { on_completion = false },
+      },
+    },
+  })
+  if created == nil then
+    error("could not make the " .. branch .. " tab in the " .. project .. " session: "
+      .. create_reason, 0)
+  end
+
+  -- The tab exists from here on: failing to show it is reported, and the tab
+  -- is left where the user can still reach it.
+  local show_reason = show_session(ctx, session, created.window_id)
+  if show_reason ~= nil then
+    error("the " .. branch .. " tab was created, but Rex could not show it: " .. show_reason, 0)
+  end
+  return { window_id = created.window_id, created = true }
 end
 
 -- Options from the configuration file, then the two actions. run takes the
@@ -379,6 +626,21 @@ function M.setup(opts)
     name = "work_new_go",
     title = "New work: start the branch the picker chose",
     category = "New work",
+    -- Rex drops KEY=VALUE pairs an action does not declare, and the picker
+    -- hands back exactly these, so every one of them is declared here.
+    args = {
+      type = "object",
+      properties = {
+        project = { type = "string" },
+        root = { type = "string" },
+        main = { type = "string" },
+        branch = { type = "string" },
+        bead = { type = "string" },
+        title = { type = "string" },
+        create = { type = "boolean" },
+      },
+      required = { "project", "root", "main", "branch" },
+    },
     run = function(ctx, args)
       return M.work_new_go(ctx, args)
     end,
