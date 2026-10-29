@@ -122,7 +122,12 @@ M.options = {
   agents = nil,
   bead_prompt = "/brainstorming for bead {id}",
   no_bead_prompt = "/brainstorming",
-  base = "@",
+  -- The base a new branch starts from when nobody answered for this tab. Unset
+  -- -- nil rather than a value, so it reads as a default -- is auto-detect: the
+  -- picker resolves the remote's own default branch and the cycle that opens on
+  -- it. A string is that cycle's first entry, and false is "let worktrunk
+  -- choose" -- no --base word at all.
+  base = nil,
   bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
 }
@@ -140,10 +145,11 @@ M.options = {
 -- argument, because the shell hands them over as they were. Nothing here is
 -- bash -- it runs on whatever `sh` the machine has.
 M.new_tab_script = [==[
-# $1 = create (1 or 0), $2 = branch, $3 = base (empty when there is none), then
-# the agent and the arguments it is started with, the prompt last. An empty
-# agent is an answer -- the picker's "none" -- and the pane then goes straight to
-# a login shell, with the prompt said out loud instead of dropped.
+# $1 = create (1 or 0), $2 = branch, $3 = base (empty when there is none),
+# $4 = the remote the base lives on (empty when there is nothing to fetch),
+# then the agent and the arguments it is started with, the prompt last. An
+# empty agent is an answer -- the picker's "none" -- and the pane then goes
+# straight to a login shell, with the prompt said out loud instead of dropped.
 
 # A login shell is this program's last act, and every path below ends here: it
 # is what keeps the pane alive once the agent is gone, with the output above it
@@ -157,30 +163,67 @@ leave_shell() {
   exec /bin/sh -l
 }
 
-# The three parameters come before the agent, and `shift 3` on a short list is
+# The four parameters come before the agent, and `shift 4` on a short list is
 # fatal in a non-interactive shell -- dash exits outright -- which would leave
-# the pane with nothing in it. So a broken caller is answered with a shell too.
-if [ "$#" -lt 3 ]; then
-  printf 'rex-config: the tab needs create, branch and base\n' >&2
+# the pane with nothing in it. So a broken caller is answered with a shell too,
+# and the message names all four, so a caller that sends the three parameters
+# this program used to take learns about the fourth.
+if [ "$#" -lt 4 ]; then
+  printf 'rex-config: the tab needs create, branch, base and remote\n' >&2
   leave_shell
 fi
 
 create=$1
 branch=$2
 base=$3
-shift 3
+remote=$4
+shift 4
+
+# A fetch in a pane nobody can type into must never stop on a credential
+# prompt: it would hang there invisibly. So git's terminal prompt is turned off
+# before the fetch below and before worktrunk, whose hooks run git too.
+export GIT_TERMINAL_PROMPT=0
+
 # Named once so the messages below can name what is not started even when no
 # agent was asked for: "not starting " is not a sentence. ${1-} rather than $1
-# because a caller that sent the three parameters and nothing else leaves it
+# because a caller that sent the four parameters and nothing else leaves it
 # unset, and `nounset` would end this wrapper before it could open a shell.
 agent=${1-}
 what=${agent:-an agent}
 
+# A base that lives on a remote is fetched before the switch, so a new branch
+# starts from what the remote has now rather than from whatever this machine
+# saw last. The remote is the picker's answer and is never derived from the
+# ref's shape; an empty one means the base is local, so there is nothing to
+# fetch.
+#
+# The fetch is bounded by timeout or gtimeout when the machine has one, and by
+# nothing otherwise: the exported guard is what really prevents the invisible
+# credential prompt, and a slow network is worth waiting out in a pane somebody
+# asked for. Its stdin is /dev/null as well, so nothing can read from the pane.
+#
+# git's own last words are dropped: the line below says what failed and what
+# happens next, and a failed fetch is not the reason to fill the pane.
+fetch_base() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 30 git fetch --quiet "$remote" </dev/null >/dev/null 2>&1
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 30 git fetch --quiet "$remote" </dev/null >/dev/null 2>&1
+  else
+    git fetch --quiet "$remote" </dev/null >/dev/null 2>&1
+  fi
+}
+
 # worktrunk owns the switch: --create makes the branch and its worktree, --base
-# says what the branch starts from (only meaningful when creating), and --no-cd
-# leaves this shell where it is, so the worktree's path is read from the JSON
-# reply rather than arrived at by changing directory. Either way the project's
-# hooks run here, and their output belongs on this pane.
+# says what the branch starts from, and --no-cd leaves this shell where it is,
+# so the worktree's path is read from the JSON reply rather than arrived at by
+# changing directory. Either way the project's hooks run here, and their output
+# belongs on this pane.
+#
+# --base is only sent when there is one to send, and only with --create: an
+# existing worktree is not started from anything, and worktrunk answers a lone
+# --base with "--base flag is only used with --create, ignoring", which would
+# be a line of noise on the pane for no change at all.
 switch_worktree() {
   if [ "$create" = 1 ]; then
     if [ -n "$base" ]; then
@@ -192,6 +235,16 @@ switch_worktree() {
     wt switch "$branch" --no-cd --format=json
   fi
 }
+
+# A fetch that fails does not cost the work: one line says the ref is as it was,
+# and the switch below runs from it anyway. Only a create is given a base to
+# start from, so only a create has anything to freshen.
+if [ "$create" = 1 ] && [ -n "$remote" ]; then
+  if ! fetch_base; then
+    printf 'rex-config: could not fetch %s; %s starts from %s as it is\n' \
+      "$remote" "$branch" "$base" >&2
+  fi
+fi
 
 listing=$(switch_worktree)
 # The assignment's status is the switch's own, captured before anything else
@@ -259,13 +312,14 @@ leave_shell
 -- The command the new tab runs: that wrapper, with everything it needs as a
 -- parameter --
 --
---   sh -c SCRIPT sh <create> <branch> <base> <agent> [agent_args...] <prompt>
+--   sh -c SCRIPT sh <create> <branch> <base> <remote> <agent> [agent_args...] <prompt>
 --
--- because a parameter is the one way a branch, a prompt or an agent name
--- reaches a shell without the shell parsing it as text. The prompt is the
--- picker's own when it was typed there, the bead's, or -- with neither -- the
+-- because a parameter is the one way a branch, a base, a remote, a prompt or an
+-- agent name reaches a shell without the shell parsing it as text. The prompt is
+-- the picker's own when it was typed there, the bead's, or -- with neither -- the
 -- configured no-bead prompt. An empty agent is the picker's "none": the wrapper
--- starts nothing and hands the pane to a login shell.
+-- starts nothing and hands the pane to a login shell. An empty base is "no
+-- --base at all", and an empty remote is "nothing to fetch".
 function M.new_tab_argv(project, args)
   args = args or {}
   assert(type(args.branch) == "string" and args.branch ~= "",
@@ -300,11 +354,24 @@ function M.new_tab_argv(project, args)
     end
   end
 
-  -- --base says what a new branch starts from, so it only travels when
-  -- worktrunk is asked to create one; an empty parameter is its own default.
+  -- The base a new branch starts from, and the remote that base lives on. The
+  -- picker resolves both -- no ref is read here -- so this only carries the
+  -- answer, and the base is three-valued: a string is the ref to create from,
+  -- false is the picker's "let worktrunk choose" (and travels as the empty
+  -- parameter, worktrunk's own default), and absent means the picker never
+  -- answered -- a hand-run `rex do` -- so the configured base is the fallback.
   local base = ""
-  if args.create and M.options.base ~= nil and M.options.base ~= false then
+  if type(args.base) == "string" then
+    base = args.base
+  elseif args.base == nil and type(M.options.base) == "string" then
     base = M.options.base
+  end
+  -- The remote rides beside the base and is sent only when the picker found the
+  -- base on one: an empty parameter is nothing to fetch, which is what keeps a
+  -- local base from costing a `git fetch` in the tab.
+  local remote = ""
+  if type(args.base_remote) == "string" then
+    remote = args.base_remote
   end
 
   local argv = {
@@ -315,6 +382,7 @@ function M.new_tab_argv(project, args)
     args.create and "1" or "0",
     args.branch,
     base,
+    remote,
     agent,
   }
   -- An agent's arguments are the agent's, so they travel only when one starts.

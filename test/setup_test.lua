@@ -244,7 +244,9 @@ eq("agent default", M.options.agent, "pi")
 eq("agent_args default", M.options.agent_args, {})
 eq("bead_prompt default", M.options.bead_prompt, "/brainstorming for bead {id}")
 eq("no_bead_prompt default", M.options.no_bead_prompt, "/brainstorming")
-eq("base default", M.options.base, "@")
+-- Unset, so the picker resolves the remote's own default branch rather than
+-- being told one here: a configured base moves the cycle's first entry instead.
+eq("base default", M.options.base, nil)
 eq("bounds default", M.options.bounds, { 0.15, 0.1, 0.7, 0.8 })
 eq("script default is new-work.sh", (tostring(M.options.script):match("/new%-work%.sh$") ~= nil), true)
 local script_file = io.open(tostring(M.options.script), "r")
@@ -447,7 +449,7 @@ eq("the float's label", layer.layout.block.label, "new work")
 eq("the picker starts in the main worktree", layer.layout.block.options.cwd, "/x/pmm-iris/main")
 eq("the picker command", layer.layout.block.options.command,
   { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--base", "@", "--agents", "pi" })
+    "--project", "pmm-iris", "--agents", "pi" })
 
 -- A second press replaces the picker instead of stacking another one.
 local ok_again, result_again = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })

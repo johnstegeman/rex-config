@@ -99,6 +99,63 @@ eq("main_worktree string flag", M.main_worktree({ items = { { worktree = { path 
 eq("main_worktree string flag false", M.main_worktree({ items = { { worktree = { path = "/r/main", main = "false" } } } }), nil)
 eq("main_worktree none", M.main_worktree({ items = {} }), nil)
 eq("main_worktree non-table items", M.main_worktree({ items = "x" }), nil)
+
+-- new_tab_argv: the tab's four positional words
+--
+-- The tab runs a POSIX sh wrapper, and everything the flow knows reaches it as
+-- a positional parameter --
+--
+--   sh -c SCRIPT sh <create> <branch> <base> <remote> <agent> [args] <prompt>
+--
+-- so argv[4] is $0 and the words start at argv[5]: the create flag, the
+-- branch, the base, the remote. The base is three-valued -- a string is the
+-- ref to create from, false is worktrunk's own default (no --base word at
+-- all), and absent means the picker never answered, so the configured base is
+-- the fallback -- and the remote rides beside it, sent only when the picker
+-- resolved the base to a remote-tracking ref. An empty remote is nothing to
+-- fetch.
+do
+  local saved = M.options.base
+  M.options.base = nil
+
+  local answered = M.new_tab_argv("proj", { branch = "feat/x1", create = true,
+    base = "origin/main", base_remote = "origin" })
+  eq("the base travels as the third positional word", answered[7], "origin/main")
+  eq("the remote travels as the fourth positional word", answered[8], "origin")
+  eq("the answer's words leave the agent and the prompt after them",
+    { answered[9], answered[10] }, { "pi", "/brainstorming" })
+
+  -- The answer beats the configuration: base = false is the picker saying "let
+  -- worktrunk choose", and a configured fallback must not quietly undo it.
+  M.options.base = "main"
+  eq("a configured base does not replace the answer",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = "origin/main" })[7],
+    "origin/main")
+  eq("base = false sends an empty base",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = false })[7], "")
+  eq("base = false carries no remote",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = false })[8], "")
+
+  -- No base in the payload is a hand-run `rex do`: the configuration is the
+  -- fallback, and only when it names a ref.
+  eq("no base in the payload falls back to the configured one",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[7], "main")
+  M.options.base = false
+  eq("a configured base of false sends an empty base",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[7], "")
+  M.options.base = nil
+  eq("a base the picker never answered and no configuration sends nothing",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[7], "")
+  eq("a base with no remote of its own carries an empty remote",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = "@" })[8], "")
+  eq("a base_remote that is not a string is no remote to fetch",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true,
+      base = "@", base_remote = false })[8],
+    "")
+
+  M.options.base = saved
+end
+
 -- The `wt switch` words themselves are asserted where they are executed:
 -- test/wrapper_test.sh runs the tab's wrapper with a stand-in `wt` and reads
 -- the words it was given, for a create run and for an existing worktree.

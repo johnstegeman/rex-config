@@ -50,6 +50,7 @@ ctrl+space>n  →  pick a bead (or type a prompt)  →  which agent  →  edit t
      worktree, running a small shell wrapper:
 
      ```
+     git fetch --quiet <remote>                                        # when creating
      wt switch --create <branch> --base <base> --no-cd --format=json   # or
      wt switch <branch> --no-cd --format=json                          # existing
      cd <the worktree that switch reported> && <agent> <prompt>
@@ -147,8 +148,9 @@ require("rex-config").setup{
   agent_args = {},                         -- extra arguments before the prompt
   bead_prompt = "/brainstorming for bead {id}",  -- {id}, {title}, {branch}, {project}
   no_bead_prompt = "/brainstorming",       -- used when the flow ran without a bead
-  base = "@",                              -- what --create branches from ("@" = the
-                                           -- main worktree); false lets worktrunk choose
+  base = nil,                              -- what --create branches from: nil = the
+                                           -- remote's default branch, resolved;
+                                           -- false lets worktrunk choose
   bounds = { 0.15, 0.1, 0.7, 0.8 },        -- picker float, fractions of the window
   script = "/…/rex-config/new-work.sh",  -- new-work.sh beside init.lua (the default)
 }
