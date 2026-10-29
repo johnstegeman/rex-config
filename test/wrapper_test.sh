@@ -332,7 +332,7 @@ fi
 interrupt_run() {
   local agent_name=$1
   shift
-  rm -f "$tmp/ready" "$tmp/got-int"
+  rm -f "$tmp/ready" "$tmp/got-int" "$tmp/no-group"
   (
     cd "$start" || exit 1
     set -m
@@ -347,24 +347,48 @@ interrupt_run() {
       sleep 0.1
       waited=$((waited + 1))
     done
-    kill -INT -"$child" 2>/dev/null || kill -INT "$child" 2>/dev/null
+    # The signal has to reach the whole group, the way a terminal's ^C does.
+    # Signalling only the process is no longer a workable fallback -- the
+    # wrapper ignores INT, so the run would sit here until the agent's sleep
+    # ran out, and then pass for the wrong reason. A group that cannot be
+    # signalled means `set -m` did not take, and the run says so by name.
+    if ! kill -INT -"$child" 2>/dev/null; then
+      printf 'kill -INT -%s failed: set -m did not put the run in its own process group\n' \
+        "$child" >"$tmp/no-group"
+      exit 1
+    fi
     wait "$child"
   ) >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
+}
+
+# The run, plus its own precondition: an INT that never reached the group would
+# leave the assertions below to fail for whatever the missing signal caused --
+# or, worse, to pass because the run finished some other way -- so the delivery
+# is asserted by name before they look at the result.
+interrupt() {
+  local agent_name=$1
+  shift
+  interrupt_run "$agent_name" "$@"
+  ran=$((ran + 1))
+  if [ -e "$tmp/no-group" ]; then
+    fail "the ^C reaches the whole process group ($agent_name, ${RUN_SHELL:-$sh_bin})" \
+      "$(cat "$tmp/no-group")"
+  fi
 }
 
 for run_shell in $shells; do
   shell_name=${run_shell##*/}
 
   ran=$((ran + 1))
-  RUN_SHELL=$run_shell interrupt_run agent-killed "/brainstorming"
+  RUN_SHELL=$run_shell interrupt agent-killed "/brainstorming"
   if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
     fail "a ^C that kills the agent still leaves the shell ($shell_name)" \
       "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
   fi
 
   ran=$((ran + 1))
-  RUN_SHELL=$run_shell interrupt_run agent-trapping "/brainstorming"
+  RUN_SHELL=$run_shell interrupt agent-trapping "/brainstorming"
   if [ ! -e "$tmp/got-int" ]; then
     fail "the ^C reaches the agent itself ($shell_name)" \
       "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"

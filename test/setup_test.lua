@@ -17,27 +17,64 @@ local function show(value)
   if type(value) == "table" then
     local parts = {}
     for i = 1, #value do parts[i] = show(value[i]) end
+    -- A map table has no array part at all, so its keys have to be shown too:
+    -- otherwise every map prints as {} and a failure names nothing.
+    local keys = {}
+    for key in pairs(value) do
+      if type(key) ~= "number" then keys[#keys + 1] = key end
+    end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, key in ipairs(keys) do
+      parts[#parts + 1] = tostring(key) .. " = " .. show(value[key])
+    end
     return "{" .. table.concat(parts, ", ") .. "}"
   end
   if type(value) == "string" then return string.format("%q", value) end
   return tostring(value)
 end
 
+-- Whether two values are the same. Tables are compared key by key, not just
+-- element by element: a map table carries no array part, so looking only at
+-- its elements compares every two maps equal -- which is how a declaration
+-- that lost its `type`, or changed it, passed anyway.
+local function same(got, want)
+  if type(got) ~= type(want) then return false end
+  if type(want) ~= "table" then return got == want end
+  if #got ~= #want then return false end
+  for i = 1, #want do
+    if not same(got[i], want[i]) then return false end
+  end
+  for key, value in pairs(want) do
+    if not same(got[key], value) then return false end
+  end
+  for key in pairs(got) do
+    if want[key] == nil then return false end
+  end
+  return true
+end
+
 local function eq(name, got, want)
   count = count + 1
-  local ok
-  if type(want) == "table" then
-    ok = type(got) == "table" and #got == #want
-    if ok then
-      for i = 1, #want do
-        if got[i] ~= want[i] then ok = false end
-      end
-    end
-  else
-    ok = got == want
+  if not same(got, want) then
+    fails = fails + 1
+    io.stderr:write("FAIL " .. name .. "\n  got:  " .. show(got) .. "\n  want: " .. show(want) .. "\n")
   end
-  if not ok then fails = fails + 1; io.stderr:write("FAIL " .. name .. "\n  got:  " .. show(got) .. "\n  want: " .. show(want) .. "\n") end
 end
+
+-- The guard on the guard, as in action_test.lua: a map table whose value
+-- changed, and one that lost its only key, each have to compare unequal, so
+-- the comparison cannot quietly go back to element lists.
+local function not_eq(name, got, want)
+  count = count + 1
+  if same(got, want) then
+    fails = fails + 1
+    io.stderr:write("FAIL " .. name .. "\n  got and want compared equal: " .. show(got) .. "\n")
+  end
+end
+
+not_eq("a map whose value changed does not compare equal",
+  { type = "string" }, { type = "boolean" })
+not_eq("a map that lost its key does not compare equal", {}, { type = "boolean" })
 
 -- For messages, where only the part that names the problem matters.
 local function contains(name, text, needle)

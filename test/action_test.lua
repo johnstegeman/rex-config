@@ -17,27 +17,65 @@ local function show(value)
   if type(value) == "table" then
     local parts = {}
     for i = 1, #value do parts[i] = show(value[i]) end
+    -- A map table has no array part at all, so its keys have to be shown too:
+    -- otherwise every map prints as {} and a failure names nothing.
+    local keys = {}
+    for key in pairs(value) do
+      if type(key) ~= "number" then keys[#keys + 1] = key end
+    end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, key in ipairs(keys) do
+      parts[#parts + 1] = tostring(key) .. " = " .. show(value[key])
+    end
     return "{" .. table.concat(parts, ", ") .. "}"
   end
   if type(value) == "string" then return string.format("%q", value) end
   return tostring(value)
 end
 
+-- Whether two values are the same. Tables are compared key by key, not just
+-- element by element: a map table carries no array part, so looking only at
+-- its elements compares every two maps equal -- which is how a declaration
+-- that lost its `type`, or changed it, passed anyway.
+local function same(got, want)
+  if type(got) ~= type(want) then return false end
+  if type(want) ~= "table" then return got == want end
+  if #got ~= #want then return false end
+  for i = 1, #want do
+    if not same(got[i], want[i]) then return false end
+  end
+  for key, value in pairs(want) do
+    if not same(got[key], value) then return false end
+  end
+  for key in pairs(got) do
+    if want[key] == nil then return false end
+  end
+  return true
+end
+
 local function eq(name, got, want)
   count = count + 1
-  local ok
-  if type(want) == "table" then
-    ok = type(got) == "table" and #got == #want
-    if ok then
-      for i = 1, #want do
-        if got[i] ~= want[i] then ok = false end
-      end
-    end
-  else
-    ok = got == want
+  if not same(got, want) then
+    fails = fails + 1
+    io.stderr:write("FAIL " .. name .. "\n  got:  " .. show(got) .. "\n  want: " .. show(want) .. "\n")
   end
-  if not ok then fails = fails + 1; io.stderr:write("FAIL " .. name .. "\n  got:  " .. show(got) .. "\n  want: " .. show(want) .. "\n") end
 end
+
+-- The guard on the guard: a map table whose value changed, and one that lost
+-- its only key, each have to compare unequal. Without this the comparison
+-- above could quietly go back to element lists and every map assertion in
+-- this file would pass no matter what it was handed.
+local function not_eq(name, got, want)
+  count = count + 1
+  if same(got, want) then
+    fails = fails + 1
+    io.stderr:write("FAIL " .. name .. "\n  got and want compared equal: " .. show(got) .. "\n")
+  end
+end
+
+not_eq("a map whose value changed does not compare equal",
+  { type = "string" }, { type = "boolean" })
+not_eq("a map that lost its key does not compare equal", {}, { type = "boolean" })
 
 -- For messages, where only the part that names the problem matters.
 local function contains(name, text, needle)
@@ -395,7 +433,9 @@ do
   eq("the main tab is a shell", window.layout.block.flavor, "com.superlogical.terminal.shell")
 end
 eq("the session is attached to", request_of(stub, "session.attach").session_id, "session:iris")
-eq("the attach's view is what the tabs are read from", #calls_to(stub, "session.view"), 0)
+-- The tabs come from that reply, not from a second session.view call: an
+-- unstubbed rex.call raises, so the attach assertion above is what proves it
+-- -- a view request here would abort this file, not assert.
 
 -- The bead is claimed from the main worktree, through the login shell that has
 -- bd on its PATH.
@@ -433,8 +473,14 @@ do
     "/brainstorming for bead " .. BEAD)
   -- The login shell the wrapper leaves behind is the tab's last program, so the
   -- pane closes when the shell exits; a kept-open pane with no program in it is
-  -- the dead tab this task exists to remove.
-  eq("the tab is not kept open after the agent exits", options.exit, nil)
+  -- the dead tab this task exists to remove. Asserted as a property, not as
+  -- "nothing is set": what the requirement forbids is a pane outliving its
+  -- program, which is what an exit of on_completion = false asks for. A future
+  -- exit setting that still closes the pane with its program is not this
+  -- regression, and is not refused here.
+  local exit = options.exit
+  eq("the tab is not kept open after the agent exits",
+    exit == nil or exit.on_completion ~= false, true)
 end
 
 -- Showing it: the app client is asked, and asked for the tab rather than just
@@ -608,6 +654,43 @@ local ok_no_project, no_project = pcall(M.work_new_go, { origin = "cli" }, { bra
 eq("a hand-back with no project fails", ok_no_project, false)
 contains("the failure names the project", no_project, "project")
 eq("a hand-back with no project makes nothing", #stub.calls, 0)
+
+-- The hand-back's paths are the one part of it that Rex resolves against its
+-- own working directory rather than the float's, so a relative one has to be
+-- refused where it arrives. new-work.sh refuses them for the picker's own
+-- runs; this action is also a `rex do` entry point, so it checks for itself.
+for _, name in ipairs({ "main", "root" }) do
+  stub = new_branch_stub()
+  local ok_relative, relative = pcall(M.work_new_go, { origin = "cli" }, payload{
+    [name] = "pmm-iris/main",
+  })
+  eq("a relative " .. name .. " fails", ok_relative, false)
+  contains("a relative " .. name .. " is named", relative, "relative " .. name)
+  eq("a relative " .. name .. " makes nothing", #stub.calls, 0)
+  eq("a relative " .. name .. " claims nothing", #stub.exec_calls, 0)
+end
+
+-- The bead is claimed before the tab is made, so a tab that cannot be made is
+-- the one failure that leaves a claim behind: the error has to say how to
+-- give it back, or the bead stays in progress with nothing working on it.
+stub = new_branch_stub()
+stub.call_replies["session.new_window"] = function() return nil, "no such session" end
+local ok_no_tab, no_tab = pcall(M.work_new_go, { origin = "cli" }, payload())
+eq("a tab that cannot be made fails", ok_no_tab, false)
+contains("the failure says what Rex said", no_tab, "no such session")
+contains("the failure says the bead is claimed", no_tab, "still claimed")
+contains("the failure says how to release the claim", no_tab,
+  'bd update ' .. BEAD .. ' --status open --assignee ""')
+
+-- With no bead there is no claim to release, so the remedy has no business
+-- in the message.
+stub = new_branch_stub()
+stub.call_replies["session.new_window"] = function() return nil, "no such session" end
+local ok_no_tab_no_bead, no_tab_no_bead = pcall(M.work_new_go, { origin = "cli" },
+  payload{ bead = "", title = "" })
+eq("a tab that cannot be made fails without a bead too", ok_no_tab_no_bead, false)
+contains("no bead means no claim to release", no_tab_no_bead, "no such session")
+eq("no bead means no release advice", tostring(no_tab_no_bead):find("bd update", 1, true), nil)
 
 -- The action's declaration ----------------------------------------------------
 

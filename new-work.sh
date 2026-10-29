@@ -360,6 +360,11 @@ pick_branch() {
   # read fails at EOF; that is an empty answer rather than a reason to stop, so
   # it must not end the run here under `set -e`.
   IFS= read -r answer || true
+  # A pasted name usually arrives with whitespace around it, and whitespace is
+  # part of no branch: trimmed, so space-then-Enter is Enter -- accepting the
+  # suggestion -- rather than a `git check-ref-format` refusal naming a branch
+  # that looks perfectly valid on screen.
+  answer=$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
   if [ -z "$answer" ]; then
     answer=$suggestion
   fi

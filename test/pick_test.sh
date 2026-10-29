@@ -285,6 +285,29 @@ else
   assert_json "typed branch: create is true" "$json" '.create == true'
 fi
 
+# (d3b) A pasted answer arrives with whitespace around it, and whitespace is part
+# of no branch: it is trimmed, so the name that is checked and handed back is
+# the one the user meant -- and space-then-Enter is Enter, accepting the
+# suggestion rather than failing `git check-ref-format` on "feat/58h " with the
+# reason invisible.
+run_pick_answer '  feat/spaced  ' test/fixtures/ready.json --bead '' --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a padded branch answer prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a padded branch answer is trimmed" "$json" \
+    '.branch == "feat/spaced" and .create == true'
+fi
+
+run_pick_answer '   ' test/fixtures/ready.json --bead pmm-iris-58h --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "space-then-Enter prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "space-then-Enter accepts the suggestion" "$json" \
+    '.branch == "feat/58h"'
+fi
+
 # (d4) A typed name that exactly matches a candidate still switches to the
 # worktree that has it: the list is no longer shown, but it still decides.
 run_pick_answer 'feat/abc123' test/fixtures/ready.json --bead '' --dry-run

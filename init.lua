@@ -645,6 +645,18 @@ function M.work_new_go(ctx, args)
       error("the picker's answer has no " .. name, 0)
     end
   end
+
+  -- Rex reads the paths against its own working directory rather than the
+  -- picker's, so a relative one would make the tab somewhere else entirely, and
+  -- fail there with nothing on screen to explain it. new-work.sh refuses them
+  -- for a picker run; this action is also a public `rex do` entry point, so it
+  -- checks for itself.
+  for _, name in ipairs({ "root", "main" }) do
+    if args[name]:sub(1, 1) ~= "/" then
+      error("the picker's answer has a relative " .. name .. ": " .. args[name], 0)
+    end
+  end
+
   local project, main, branch = args.project, args.main, args.branch
 
   local session, session_reason = session_to_use(project, main)
@@ -694,8 +706,17 @@ function M.work_new_go(ctx, args)
     },
   })
   if created == nil then
+    -- The claim was taken before the tab, so this is the one failure that can
+    -- leave a bead in progress with nothing working on it. Saying how to give
+    -- it back is the remedy; without it the bead would have to be found and
+    -- released by hand.
+    local release = ""
+    if type(args.bead) == "string" and args.bead ~= "" then
+      release = "; the bead is still claimed, so release it with: bd update "
+        .. args.bead .. ' --status open --assignee ""'
+    end
     error("could not make the " .. branch .. " tab in the " .. project .. " session: "
-      .. create_reason, 0)
+      .. create_reason .. release, 0)
   end
 
   -- The tab exists from here on: failing to show it is reported, and the tab

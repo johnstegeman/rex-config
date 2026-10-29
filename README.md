@@ -75,6 +75,11 @@ looked up through your shell):
 | your agent | default `pi`; anything that takes a prompt argument works |
 | `bat` | optional, for the bead preview |
 | `git` | project resolution |
+| `bash` | `new-work.sh` is a bash script (`pipefail`, process substitution) |
+
+`git` and `bash` are the exceptions to that: they run under Rex's own `PATH` —
+the picker is started by its `#!/usr/bin/env bash` shebang — so they only need
+to be where Rex can find them.
 
 Also needed:
 
@@ -124,9 +129,12 @@ require("rex-config").setup{
   base = "@",                              -- what --create branches from ("@" = the
                                            -- main worktree); false lets worktrunk choose
   bounds = { 0.15, 0.1, 0.7, 0.8 },        -- picker float, fractions of the window
-  script = nil,                            -- new-work.sh's path, when not beside init.lua
+  script = "/…/rex-config/new-work.sh",  -- new-work.sh beside init.lua (the default)
 }
 ```
+
+`script` is derived from where the module itself lives, so a clone beside Rex's
+`init.lua` needs nothing here; set it only to run some other copy.
 
 `agent`, `agent_args` and the prompts are what the new tab's command line is
 built from, so `agent = "claude"` starts Claude instead of `pi` without any
@@ -165,6 +173,9 @@ the branch name exactly as typed (`bug/58h`).
   one-line error naming the branch on the tab.
 - The tab was made but the app could not be switched to it: the error says the
   tab was created and names what failed. The tab is still there.
+- The tab could not be made at all: the error names what Rex said, and — since
+  the bead was already claimed before the tab — how to hand the claim back
+  (`bd update <id> --status open --assignee ""`).
 
 ## Layout
 
