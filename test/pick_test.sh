@@ -732,6 +732,197 @@ elif [ "$elapsed" -ge 5 ]; then
 elif ! grep -qF 'new-work.sh: Rex could not finish the hand-back' "$tmp/err"; then
   fail "no terminal: the failure is still printed" "stderr: $(cat "$tmp/err")"
 fi
+# (n) What fzf's reply to the bead question means, read from the reply alone.
+# fzf needs a terminal, so this is the one part of that question a pipe can
+# reach: the three shapes below are the ones fzf really produces, measured on
+# 0.74.5 with --print-query.
+check_answer() {
+  local name=$1 status=$2 reply=$3 want=$4
+  ran=$((ran + 1))
+  printf '%s' "$reply" | ./new-work.sh fzf-answer "$status" >"$tmp/out" 2>"$tmp/err"
+  local got=$?
+  if [ "$got" -ne 0 ]; then
+    fail "$name exits 0" "exit $got: $(cat "$tmp/err")"
+  elif [ "$(cat "$tmp/out")" != "$want" ]; then
+    fail "$name" "want [$want], got [$(cat "$tmp/out")]"
+  fi
+}
+
+# A query with a row selected: the row is the answer and the query is not.
+check_answer 'a selected row is the bead' 0 \
+  $'flak\npmm-iris-58h\tFix the flaky guard\n' "pmm-iris-58h"$'\t'
+# A bare Enter takes the row the cursor is on, with an empty query above it.
+check_answer 'a bare enter is the row under the cursor' 0 \
+  $'\npmm-iris-58h\tFix the flaky guard\n' "pmm-iris-58h"$'\t'
+# The prompt row's marker comes back where a bead id would be: it is the
+# answer "write a prompt", not a bead.
+check_answer 'the prompt row is its marker' 0 \
+  $'\n✎\twrite a prompt instead\n' "✎"$'\t'
+# Text that matched nothing is the prompt itself, and no bead at all.
+check_answer 'unmatched text is the prompt' 1 \
+  $'why is the guard flaky?\n' $'\twhy is the guard flaky?'
+# esc: no bead, no prompt -- the no-bead flow.
+check_answer 'esc is no answer' 130 '' $'\t'
+# fzf can be configured to exit 0 on a query that matched nothing
+# (FZF_DEFAULT_OPTS=--exit-0), and then the reply is a query with no row under
+# it: the text typed is still the prompt, not something to throw away.
+check_answer 'a query with no row under it is still the prompt' 0 \
+  $'why is the guard flaky?\n' $'\twhy is the guard flaky?'
+
+# An fzf that failed did not answer anything: a picker that could not run is
+# not a person deciding to start no work.
+ran=$((ran + 1))
+if ./new-work.sh fzf-answer 2 >"$tmp/out" 2>"$tmp/err"; then
+  fail "fzf failing is not an answer" "exit 0: $(cat "$tmp/out")"
+elif ! grep -qF 'the bead picker failed (fzf exit 2)' "$tmp/err"; then
+  fail "fzf failing is named" "stderr: $(cat "$tmp/err")"
+elif [ -s "$tmp/out" ]; then
+  fail "fzf failing prints no answer" "stdout: $(cat "$tmp/out")"
+fi
+
+# (o) A prompt instead of a bead: the typed text is the prompt, verbatim, and
+# it is the only answer in the payload -- no bead, no title.
+run_pick test/fixtures/ready.json --prompt 'why is the guard flaky?' \
+  --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a typed prompt prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a typed prompt is the prompt" "$json" \
+    '.prompt == "why is the guard flaky?"'
+  assert_json "a typed prompt replaces the bead" "$json" \
+    '.bead == "" and .title == ""'
+  assert_json "a typed prompt is the only new key" "$json" \
+    'keys == ["bead", "branch", "create", "main", "project", "prompt", "root", "title"]'
+fi
+
+# A prompt with quotes and runs of spaces survives as one value: it travels to
+# jq as an argument, never built into a command line.
+run_pick test/fixtures/ready.json --prompt 'say "hi"  there' --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a quoted prompt prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  ran=$((ran + 1))
+  if [ "$(printf '%s\n' "$json" | jq -r '.prompt')" != 'say "hi"  there' ]; then
+    fail "a quoted prompt survives the shell" "in: $json"
+  fi
+fi
+
+# A prompt of nothing but spaces is no answer at all: it would replace the
+# configured no-bead prompt with whitespace, so it is read as the blank answer a
+# stray space and Enter is.
+run_pick test/fixtures/ready.json --prompt '   ' --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a whitespace prompt prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a whitespace prompt is no prompt" "$json" \
+    '.prompt == "" and .bead == ""'
+fi
+
+# A bead and a prompt are two answers to one question.
+run_pick test/fixtures/ready.json --bead pmm-iris-a4l --prompt 'x' \
+  --branch feat/x --dry-run
+if [ "$status" -ne 2 ]; then
+  fail "a bead and a prompt together exit 2" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF 'new-work.sh: pick: --bead and --prompt answer the same question' \
+  "$tmp/err"; then
+  fail "a bead and a prompt together say so" "stderr: $(cat "$tmp/err")"
+fi
+
+# (p) The agent question. The list is the configuration's, and the answer rides
+# back in the payload: the name chosen, or an empty string for "none". Without
+# a terminal there is nobody to ask, so the list's first name is the answer --
+# the default the picker would have offered.
+run_pick test/fixtures/ready.json --agents pi --agents claude \
+  --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "the agent question prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "the agent list leads with its default" "$json" '.agent == "pi"'
+  assert_json "the agent question asks nobody off a terminal" "$json" \
+    'keys == ["agent", "bead", "branch", "create", "main", "project", "root", "title"]'
+fi
+
+run_pick test/fixtures/ready.json --agents pi --agent claude \
+  --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--agent prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "--agent is the answer" "$json" '.agent == "claude"'
+fi
+
+# "none" is an empty agent, and it has to be in the payload: an absent field
+# means "the picker did not ask", which starts the configured agent.
+run_pick test/fixtures/ready.json --agents pi --agent '' \
+  --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--agent '' prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "no agent is an empty agent, not an absent one" "$json" \
+    'has("agent") and .agent == ""'
+fi
+
+# No agent list means no agent question: the payload says nothing about the
+# agent and the plugin's configured one stays in charge.
+run_pick test/fixtures/ready.json --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "no agent list prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "no agent list asks nothing about the agent" "$json" \
+    '(has("agent") | not) and .agent == null'
+fi
+
+# gum is asked for only where a question it owns will be asked: with no
+# terminal the agent answer is the list's first name and the branch is read, so
+# a run must reach the hand-back with neither gum nor fzf installed.
+ran=$((ran + 1))
+PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --agents pi --branch feat/no-gum --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "no terminal needs no gum" "exit $status: $(cat "$tmp/err")"
+elif grep -q 'not found on PATH' "$tmp/err"; then
+  fail "no terminal needs no gum" "stderr: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "no terminal needs no gum: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "no terminal needs no gum: the agent" "$json" '.agent == "pi"'
+fi
+
+# An --agents with no name is a question with a blank row, so it is refused
+# rather than asked.
+run_pick test/fixtures/ready.json --agents '' --branch feat/x --dry-run
+if [ "$status" -ne 2 ]; then
+  fail "an empty --agents is refused" "exit $status: $(cat "$tmp/err")"
+fi
+
+# (q) The prompt row's preview is not a bead: it says what picking it does
+# instead of asking bd about an id that cannot exist. Every tool in this stand-
+# in directory leaves a mark when it is run, so "bd was never asked" is a
+# missing file.
+ran=$((ran + 1))
+rm -f "$tmp/called"
+PATH="$tmp/watch-bin" CALLED_FILE=$tmp/called "${BASH:-bash}" ./new-work.sh preview '✎' \
+  --main . >"$tmp/out" 2>"$tmp/err"
+if [ $? -ne 0 ]; then
+  fail "the prompt row's preview explains itself" "stderr: $(cat "$tmp/err")"
+elif ! grep -qF 'Picking this row writes the prompt in a field of its own.' "$tmp/out"; then
+  fail "the prompt row's preview explains itself" "stdout: $(cat "$tmp/out")"
+elif [ -e "$tmp/called" ]; then
+  fail "the prompt row's preview asks bd nothing" \
+    "called: $(sort -u "$tmp/called" 2>/dev/null)"
+fi
+
 
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"

@@ -22,22 +22,38 @@ commands:
   candidates --main DIR [--wt-json FILE] [--refs FILE]
       print the branch names that already exist, one per line, worktree
       branches first
+  fzf-answer STATUS
+      read fzf's --print-query reply on stdin and print what it means as one
+      "bead<TAB>prompt" row; STATUS is the status fzf exited with
   pick --main DIR --root PATH --project NAME [--base B]
-       [--bead ID] [--branch NAME] [--dry-run]
-      ask for a bead, then a branch, and hand the answer to Rex as one JSON
-      object; exit 3 when no branch was chosen, exit 2 when the name typed for
-      a new branch is not a valid ref
+       [--bead ID | --prompt TEXT] [--agents NAME]... [--agent NAME]
+       [--branch NAME] [--dry-run]
+      ask which bead (or prompt), which agent, and which branch, and hand the
+      answer to Rex as one JSON object; exit 3 when no branch or agent was
+      chosen, exit 2 when the name typed for a new branch is not a valid ref
 
 --bd-json, --wt-json and --refs read saved tool output instead of asking the
 tools, which is how the tests and dry runs work: --bd-json stands in for bd, and
 --wt-json with --refs for both of the lookups --main would be read for, so a run
 given all three never touches --main at all.
 
-pick's --bead and --branch answer a question instead of asking it, and an
-empty value means none. The branch question is typed, with the bead's name
-offered in the prompt: an empty answer accepts that name, or cancels when
-there is none. With no terminal on stdin the bead question is skipped and the
-branch question reads an empty answer, rather than waiting for either.
+The first question is one screen: the ready beads, with "✎  write a prompt
+instead" pinned on top. Text typed at the fzf prompt that matches no row is the
+prompt itself (--print-query: the query is line 1, the selected row line 2 when
+there is one), and picking the prompt row opens a prompt field for text that
+would be awkward to type there. esc means no bead, and a blank answer falls back
+to the configured no-bead prompt.
+
+The second question is the agent: the --agents names, with "none" last. none
+starts nothing, so the tab is the new worktree and a login shell, and the prompt
+it could not deliver is printed above that shell rather than dropped. The third
+is the branch, typed with the bead's name already in the field, so a bare Enter
+accepts it.
+
+pick's --bead, --prompt, --agent and --branch answer a question instead of
+asking it, and an empty value means none. With no terminal on stdin nothing is
+asked: the bead question is skipped, the agent falls back to the first --agents
+name, and the branch reads an empty answer, rather than waiting for any of them.
 --main and --root must be absolute: Rex resolves them against its own working
 directory, not this one.
 EOF
@@ -86,6 +102,18 @@ wait_for_key() {
 # the float closes on it the way esc always did. The usage text above says the
 # same number in prose, because a quoted heredoc cannot interpolate this one.
 cancelled=3
+
+# The first row of the bead question: not a bead, but the way to write a prompt
+# when the text would match a bead or needs more than fzf's one line. It carries
+# no id -- a marker no bead id can be -- so field 1 alone tells it from every
+# bead row. A tab separates the fields, as in every other row.
+prompt_row_marker='✎'
+prompt_row=$prompt_row_marker$'\t''write a prompt instead'
+
+# The last row of the agent question: the answer that starts no agent at all.
+# Its label is prose, so what was chosen is read back against the configured
+# names rather than by matching this text.
+none_agent_row='none — no agent, just the tab'
 
 # On the way out of pick -- usage_error's 2, die's 1, a missing tool's 1, rex's
 # own status -- hold the float with the failure still on screen. A cancelled
@@ -346,6 +374,14 @@ cmd_preview() {
 
   [ -n "$id" ] || usage_error 'preview: need ID'
   [ -n "$main" ] || usage_error 'preview: need --main DIR'
+
+  # The prompt row is not a bead: picking it opens a prompt field, so its preview
+  # says so rather than asking bd about an id that cannot exist.
+  if [ "$id" = "$prompt_row_marker" ]; then
+    printf 'Picking this row writes the prompt in a field of its own.\n\nText typed at the "%s" line that matches no bead is the prompt as well. A blank answer starts the no-bead flow.\n' '> '
+    return 0
+  fi
+
   need bd
 
   if command -v bat >/dev/null 2>&1; then
@@ -361,47 +397,145 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-# The bead question: the ready list in fzf, with `preview` in the pane so a
-# long description never crowds the rows. Aborting (esc, ctrl-c) is a real
-# answer -- it means no bead -- so it prints nothing and succeeds. The chosen
-# row comes back whole, as "id<TAB>title".
+# The bead question, in one screen: the ready list with the prompt row pinned on
+# top, and `preview` in the pane below so a long description never crowds the
+# rows. --print-query is what makes bead-or-text-or-blank expressible at all --
+# the query is line 1, the selected row line 2 when there is one -- so what
+# comes back here is fzf's own reply and status, and fzf_answer reads it.
+#
+# The pane is a bottom one rather than a right-hand split: at the real float
+# size (80x24) a side split leaves about 36 columns for the list, which truncates
+# every bead title, and about 42 for the preview, which cuts prose mid-word. A
+# bottom pane is full width for both, and the preview wraps.
+#
+# The cursor starts on the first bead rather than on the prompt row, so a bare
+# Enter still takes the bead the list leads with; with no beads to lead with it
+# stays on the prompt row, which is then the only answer worth offering. That is
+# the load event's pos(1-based number), not --cursor: this fzf has no such flag,
+# and the start event fires before the list exists. The preview is refreshed in
+# the same breath, because it renders against the row the cursor started on and
+# would otherwise describe the prompt row until the first keypress.
 pick_bead() {
-  local main=$1 rows=$2
+  local main=$1 rows=$2 pos=1
   local script main_q
   script=$(printf '%q' "$0")
   main_q=$(printf '%q' "$main")
+  if [ -n "$rows" ]; then
+    pos=2
+  fi
 
-  printf '%s\n' "$rows" |
+  {
+    printf '%s\n' "$prompt_row"
+    if [ -n "$rows" ]; then
+      printf '%s\n' "$rows"
+    fi
+  } |
     fzf --delimiter='\t' \
       --with-nth=1,2 \
+      --print-query \
+      --bind "load:pos($pos)+refresh-preview" \
       --reverse \
-      --header 'pick a bead · esc = no bead' \
-      --preview "$script preview {1} --main $main_q" || return 0
+      --header 'pick a bead · type to write a prompt · esc = no bead' \
+      --preview-window 'down,60%' \
+      --preview "$script preview {1} --main $main_q"
+}
+
+# What fzf's reply to the bead question means, as one "id<TAB>prompt" row.
+# The three answers fzf can give, measured:
+#
+#   0, two lines    a row was selected; the query above it is not an answer
+#   1, one line     nothing matched, so the text typed is the prompt itself
+#   130             esc or ctrl-c: no bead, no prompt -- the no-bead flow
+#
+# The selected row's id is field 1 of the row, and the prompt row's marker is
+# what tells a prompt from a bead. Both halves are printed with the tab between
+# them, empty where there is no answer, so the caller never counts lines. Any
+# other status is fzf failing rather than answering, and is reported as such:
+# a picker that could not run is not a decision to start no work.
+fzf_answer() {
+  local status=$1 query='' row=''
+  case $status in
+    0)
+      IFS= read -r query || true
+      IFS= read -r row || true
+      # A query with no row under it is the same answer status 1 gives: fzf's
+      # own options can make it exit 0 on a query that matched nothing
+      # (--exit-0 is the common one), and the text typed then is still the
+      # prompt rather than something to throw away.
+      if [ -z "$row" ]; then
+        printf '\t%s\n' "$query"
+      else
+        printf '%s\t\n' "${row%%$'\t'*}"
+      fi
+      ;;
+    1)
+      IFS= read -r query || true
+      printf '\t%s\n' "$query"
+      ;;
+    130)
+      printf '\t\n'
+      ;;
+    *)
+      printf '%s: the bead picker failed (fzf exit %s)\n' "$PROG" "$status" >&2
+      return 1
+      ;;
+  esac
+}
+
+# `new-work.sh fzf-answer STATUS` (fzf's reply on stdin)
+#
+# That reading, as a subcommand of its own: fzf needs a terminal and cannot be
+# driven from a pipe, so this is the one part of the bead question a test can
+# drive -- the three answers are pinned against the bytes fzf really produces.
+cmd_fzf_answer() {
+  [ $# -eq 1 ] || usage_error 'fzf-answer: need the status fzf exited with'
+  case $1 in
+    '' | *[!0-9]*) usage_error "fzf-answer: $1 is not an exit status" ;;
+  esac
+  fzf_answer "$1"
+}
+
+# The agent question: the names the configuration offers, with the no-agent row
+# last. gum choose prints the row it landed on, prose and all, so the caller
+# reads the answer back against the configured names. ctrl-c -- all gum listens
+# to, as it ignores esc -- ends it non-zero, which the caller turns into the same
+# cancelled exit as everywhere else.
+pick_agent() {
+  local choices=$1
+  {
+    printf '%s\n' "$choices"
+    printf '%s\n' "$none_agent_row"
+  } | gum choose --header 'start which agent?'
 }
 
 # The branch question: a typed answer, not a picker. Creating a branch is the
 # usual case and a list of names that already exist offers nothing for a name
 # that does not exist yet, so the answer is typed -- with the name derived from
-# the bead shown in the prompt, where a bare Enter accepts it. Whatever is
+# the bead already in the field, where a bare Enter accepts it. Whatever is
 # typed is the branch, exactly as typed; the candidate list decides afterwards
 # whether that name is an existing worktree to switch to or one to create.
 #
-# The prompt goes to stderr because stdout carries the hand-back, and only to a
-# terminal: a pipe is answered, never asked. EOF -- a pipe that has ended, or a
-# terminal closed with ctrl-d -- is an empty answer, which pick turns into
-# exit 3 the way esc used to.
+# gum input asks it in the float. Off a terminal -- a pipe, a script, the tests
+# -- there is nobody to ask, so the answer is read from stdin instead, which is
+# what keeps this path reachable without a pty. A failed ask (ctrl-c) and EOF
+# are both an empty answer, which pick turns into exit 3 the way esc used to.
 pick_branch() {
-  local suggestion=$1 prompt='branch> ' answer=''
+  local suggestion=$1 answer=''
 
-  if [ -n "$suggestion" ]; then
-    prompt="branch [$suggestion]> "
-  fi
   if [ -t 0 ]; then
-    printf '%s' "$prompt" >&2
+    if [ -n "$suggestion" ]; then
+      answer=$(gum input --value "$suggestion" \
+        --header 'branch: Enter accepts the name shown') || return 1
+    else
+      answer=$(gum input --header 'branch') || return 1
+    fi
+  else
+    # Nothing is printed for a pipe: nobody is reading a prompt there, and it
+    # would land in the middle of a script's output. read fails at EOF, which is
+    # an empty answer rather than a reason to stop, so it must not end the run
+    # here under `set -e`.
+    IFS= read -r answer || true
   fi
-  # read fails at EOF; that is an empty answer rather than a reason to stop, so
-  # it must not end the run here under `set -e`.
-  IFS= read -r answer || true
   # A pasted name usually arrives with whitespace around it, and whitespace is
   # part of no branch: trimmed, so space-then-Enter is Enter -- accepting the
   # suggestion -- rather than a `git check-ref-format` refusal naming a branch
@@ -443,15 +577,18 @@ valid_branch_name() {
 }
 
 # `new-work.sh pick --main DIR --root PATH --project NAME [--base B]`
-#       `[--bead ID] [--branch NAME] [--dry-run]`
+#       `[--bead ID | --prompt TEXT] [--agents NAME]... [--agent NAME]`
+#       `[--branch NAME] [--dry-run]`
 #
-# The two questions behind ctrl+space>n: which bead, then which branch. The
-# answer goes back to Rex as one JSON object, built by jq so no value is ever
-# interpolated into a command line. --bead and --branch answer a question
-# without asking it, which is how the tests and scripts drive the picker.
+# The three questions behind ctrl+space>n: which bead (or prompt), which agent,
+# then which branch. The answer goes back to Rex as one JSON object, built by jq
+# so no value is ever interpolated into a command line. --bead, --prompt, --agent
+# and --branch answer a question without asking it, which is how the tests and
+# scripts drive the picker.
 cmd_pick() {
   local main='' root='' project='' base='' bead='' branch=''
-  local bead_set=0 branch_set=0 dry_run=0
+  local prompt='' agent='' agent_choices=''
+  local bead_set=0 prompt_set=0 agent_set=0 branch_set=0 dry_run=0
   local bd_json='' wt_json='' refs=''
 
   while [ $# -gt 0 ]; do
@@ -480,6 +617,25 @@ cmd_pick() {
         [ $# -ge 2 ] || usage_error 'pick: --bead needs an id'
         bead=$2
         bead_set=1
+        shift 2
+        ;;
+      --prompt)
+        [ $# -ge 2 ] || usage_error 'pick: --prompt needs a value'
+        prompt=$2
+        prompt_set=1
+        shift 2
+        ;;
+      # One --agents per name, in the order the agent question should offer
+      # them: the first is the one an unasked question takes.
+      --agents)
+        [ $# -ge 2 ] && [ -n "$2" ] || usage_error 'pick: --agents needs a name'
+        agent_choices=${agent_choices:+$agent_choices$'\n'}$2
+        shift 2
+        ;;
+      --agent)
+        [ $# -ge 2 ] || usage_error 'pick: --agent needs a name'
+        agent=$2
+        agent_set=1
         shift 2
         ;;
       --branch)
@@ -515,6 +671,13 @@ cmd_pick() {
   [ -n "$root" ] || usage_error 'pick: need --root PATH'
   [ -n "$project" ] || usage_error 'pick: need --project NAME'
 
+  # A bead and a prompt are two answers to the same question, so both at once is
+  # a script that cannot mean what it says: the tab would carry a bead's prompt
+  # and a prompt of its own.
+  if [ "$bead_set" -eq 1 ] && [ "$prompt_set" -eq 1 ]; then
+    usage_error 'pick: --bead and --prompt answer the same question'
+  fi
+
   # The hand-back's paths are read by the Rex server, whose working directory is
   # not this one, so they have to say where they are. The Lua side derives both
   # from git and they are always absolute; this is the guard for a hand-run.
@@ -530,13 +693,25 @@ cmd_pick() {
     [ -d "$main" ] || die "pick: no such directory: $main"
   fi
 
-  # The picker's own requirements, before any work. fzf is asked for only where
-  # the bead question will really be asked -- in the float, where stdin is a
-  # terminal -- so a scripted run is not stopped by a tool it would never call:
-  # the branch question is typed and needs nothing but stdin. Saved tool output
-  # stands in for the tools it replaces.
-  if [ -t 0 ] && [ "$bead_set" -eq 0 ]; then
-    need fzf
+  # The picker's own requirements, before any work, and only for the questions
+  # that will really be asked -- in the float, where stdin is a terminal -- so a
+  # scripted run is not stopped by a tool it would never call: off a terminal the
+  # bead question is skipped, the agent question takes the first name and the
+  # branch question reads stdin. Saved tool output stands in for the tools it
+  # replaces.
+  if [ -t 0 ]; then
+    if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ]; then
+      need fzf
+    fi
+    # gum asks the agent question and the branch question, and it writes the
+    # prompt in the field the bead question's prompt row opens -- a path of that
+    # same question -- so it is needed wherever one of the three is really asked.
+    # No agent list means no agent question.
+    if [ "$branch_set" -eq 0 ] ||
+      { [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; } ||
+      { [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ]; }; then
+      need gum
+    fi
   fi
   [ -n "$wt_json" ] || need wt
   need jq
@@ -555,24 +730,58 @@ cmd_pick() {
   fi
 
   local note=''
-  if [ "$bead_set" -eq 0 ]; then
+  if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ]; then
     if [ -z "$rows" ]; then
-      # Nothing to offer: say so, and let the branch question carry the note,
-      # because an empty picker asks for a choice that does not exist.
+      # Nothing to offer: say so, and let the branch question carry the note --
+      # the prompt row is still worth asking, but a list with no beads in it is
+      # not the reason to keep quiet about.
       note='no ready beads'
-    elif [ ! -t 0 ]; then
+    fi
+    if [ ! -t 0 ]; then
       # A pipe or a script, never the Rex float: asking would wait forever, so
       # take no bead and move on with the branch instead.
       printf '%s: skipping the bead question: stdin is not a terminal\n' \
         "$PROG" >&2
     else
-      local picked
-      picked=$(pick_bead "$main" "$rows")
-      if [ -n "$picked" ]; then
-        bead=${picked%%$'\t'*}
+      local reply='' asked=0 answer=''
+      reply=$(pick_bead "$main" "$rows") || asked=$?
+      if ! answer=$(printf '%s\n' "$reply" | fzf_answer "$asked"); then
+        exit 1
+      fi
+      # Field 1 is the row's id -- the prompt row's marker when that row was
+      # picked -- and field 2 the text typed when nothing matched. Only one of
+      # the two can be non-empty.
+      bead=${answer%%$'\t'*}
+      prompt=${answer#*$'\t'}
+      if [ "$bead" = "$prompt_row_marker" ]; then
+        # The prompt row hands over to a field of its own: fzf's query line is
+        # one line long, with no room to see what is being typed into it.
+        bead=''
+        if ! prompt=$(gum input --header 'prompt for the agent'); then
+          printf '%s: no prompt given, nothing to start\n' "$PROG" >&2
+          exit "$cancelled"
+        fi
+      fi
+      # Only text that was really typed is an answer: an empty one leaves the
+      # configured no-bead prompt to speak, which is what a blank first question
+      # has always meant.
+      if [ -n "$prompt" ]; then
+        prompt_set=1
       fi
     fi
   fi
+
+  # A prompt with nothing in it but spaces is no prompt at all: a stray space
+  # before Enter produces one, and sending it would replace the configured
+  # no-bead prompt with whitespace. It is read as the empty answer it is -- and
+  # one that was given with --prompt stays an answered question, the way
+  # --agent '' is an answered agent question, because "no prompt" and "the picker
+  # was never asked" are different answers.
+  case $prompt in
+    '') ;;
+    *[![:space:]]*) prompt_set=1 ;;
+    *) prompt='' ;;
+  esac
 
   # The title is read from the ready list rather than from the row, so quotes
   # and whitespace arrive as the database has them. Only whitespace is
@@ -594,6 +803,31 @@ cmd_pick() {
           ([.[] | select(.id == $id)][0]) as $b
           | ($b.issue_type // ""),
             (($b.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))')
+  fi
+
+  # The agent question, asked before the branch and after everything derived from
+  # the bead: nothing about it is derived from anything.
+  if [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; then
+    if [ -t 0 ]; then
+      local chosen='' chosen_status=0
+      chosen=$(pick_agent "$agent_choices") || chosen_status=$?
+      if [ "$chosen_status" -ne 0 ]; then
+        printf '%s: no agent chosen, nothing to start\n' "$PROG" >&2
+        exit "$cancelled"
+      fi
+      # The no-agent row's label is prose, so the answer is read back against
+      # the names that were offered: anything else is none.
+      agent=''
+      if printf '%s\n' "$agent_choices" | grep -Fxq -- "$chosen"; then
+        agent=$chosen
+      fi
+      agent_set=1
+    else
+      # Nobody to ask: the list leads with the default, which is the answer an
+      # unasked question takes -- the same agent the configuration names.
+      agent=$(printf '%s\n' "$agent_choices" | sed -n 1p)
+      agent_set=1
+    fi
   fi
 
   local candidates
@@ -619,7 +853,9 @@ cmd_pick() {
     if [ -n "$note" ]; then
       printf '%s: %s\n' "$PROG" "$note" >&2
     fi
-    branch=$(pick_branch "$suggestion")
+    # A failed ask -- gum's ctrl-c -- is no branch, which is the same cancelled
+    # pick an EOF on the typed answer has always been.
+    branch=$(pick_branch "$suggestion") || branch=''
   elif [ -n "$note" ]; then
     printf '%s\n' "$note" >&2
   fi
@@ -646,6 +882,9 @@ cmd_pick() {
     exit 2
   fi
 
+  # prompt and agent travel only when they were answered: an absent prompt leaves
+  # the plugin's own template to say what the flow is, and an absent agent is one
+  # the plugin still knows better than the picker does.
   local payload
   payload=$(jq -cn \
     --arg project "$project" \
@@ -655,8 +894,14 @@ cmd_pick() {
     --arg bead "$bead" \
     --arg title "$title" \
     --argjson create "$create" \
+    --arg prompt "$prompt" \
+    --argjson prompt_set "$prompt_set" \
+    --arg agent "$agent" \
+    --argjson agent_set "$agent_set" \
     '{project: $project, root: $root, main: $main, branch: $branch,
-      bead: $bead, title: $title, create: $create}')
+      bead: $bead, title: $title, create: $create}
+     + (if $prompt_set == 1 then {prompt: $prompt} else {} end)
+     + (if $agent_set == 1 then {agent: $agent} else {} end)')
 
   if [ "$dry_run" -eq 1 ]; then
     printf 'rex do work_new_go --args %s\n' "$(shell_quote "$payload")"
@@ -690,6 +935,10 @@ case ${1:-} in
   preview)
     shift
     cmd_preview "$@"
+    ;;
+  fzf-answer)
+    shift
+    cmd_fzf_answer "$@"
     ;;
   pick)
     shift
