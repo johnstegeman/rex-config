@@ -843,6 +843,38 @@ else
     'has("blank") == false'
 fi
 
+# (n3) The blank answer without a terminal. ctrl-n can only be pressed at fzf,
+# which needs a terminal, so --blank is how a script hands the picker that same
+# answer -- and it is the answer itself, not a note about it: a JSON true with
+# no prompt field, which is what the tab reads as "an agent, and nothing to
+# say". An absent blank (n2) is still "the picker was never asked".
+run_pick test/fixtures/ready.json --blank --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--blank prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "--blank is a boolean true" "$json" \
+    '.blank == true and (.blank | type) == "boolean"'
+  assert_json "--blank sends no prompt" "$json" '(has("prompt") | not)'
+  assert_json "--blank picks no bead and no title" "$json" \
+    '.bead == "" and .title == ""'
+  assert_json "--blank's keys are the flag and nothing else" "$json" \
+    'keys == ["base", "base_remote", "bead", "blank", "branch", "create",
+              "main", "project", "root", "title"]'
+fi
+
+# The three answers to the bead question are three answers to one question, so
+# two at once is a script that cannot mean what it says -- the same refusal
+# --bead and --prompt already get.
+for other in --prompt --bead; do
+  run_pick test/fixtures/ready.json --blank "$other" x --branch feat/x --dry-run
+  if [ "$status" -ne 2 ]; then
+    fail "--blank with $other is refused" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -q 'answer the same question' "$tmp/err"; then
+    fail "--blank with $other says why" "stderr: $(cat "$tmp/err")"
+  fi
+done
+
 # (o) A prompt instead of a bead: the typed text is the prompt, verbatim, and
 # it is the only answer in the payload -- no bead, no title.
 run_pick test/fixtures/ready.json --prompt 'why is the guard flaky?' \

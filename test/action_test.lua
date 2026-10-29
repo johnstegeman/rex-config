@@ -796,10 +796,68 @@ do
   end
   eq("work_new_go is registered", type(go), "table")
   eq("work_new_go declares its arguments", sorted_keys(go and go.args and go.args.properties),
-    { "agent", "bead", "branch", "create", "main", "project", "prompt", "root", "title" })
+    { "agent", "base", "base_remote", "bead", "blank", "branch", "create",
+      "main", "project", "prompt", "root", "title" })
   eq("work_new_go requires what the picker always sends",
     go and go.args.required, { "project", "root", "main", "branch" })
   eq("the arguments are typed", go and go.args.properties.create, { type = "boolean" })
+  eq("blank is declared a boolean", go and go.args.properties.blank,
+    { type = "boolean" })
+  eq("base admits both the ref and the wt-default sentinel",
+    go and go.args.properties.base, { type = { "string", "boolean" } })
+  eq("base_remote is declared a string", go and go.args.properties.base_remote,
+    { type = "string" })
+end
+
+-- The answers the last two tasks added, taken through Rex rather than handed
+-- to the action directly. An action only sees the pairs its schema declares --
+-- `rex do work_new_go blank=true` is refused outright without the declaration,
+-- and a payload filtered against it loses the field -- so a field the picker
+-- sends but the action never names can be gone before new_tab_argv sees it, and
+-- the flow then falls back to the old behaviour (a configured base, the no-bead
+-- prompt) with nothing on screen to show for it. Filtering the payload through
+-- the registered declaration pins the declaration and the tab's argv together.
+local function as_rex_passes(name, args)
+  local declared = {}
+  for _, spec in ipairs(rex_stub.actions) do
+    if spec.name == name then
+      declared = (spec.args and spec.args.properties) or {}
+    end
+  end
+  local typed = {}
+  for key, value in pairs(args or {}) do
+    if declared[key] ~= nil then typed[key] = value end
+  end
+  return typed
+end
+
+stub = new_branch_stub()
+pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
+  base = "upstream/main", base_remote = "upstream", blank = true,
+}))
+do
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("the base the picker chose reaches the tab", command[7], "upstream/main")
+  eq("the remote that base lives on reaches the tab", command[8], "upstream")
+  eq("a blank answer appends no prompt word", #command, 9)
+  eq("a blank answer leaves the agent last", command[#command], M.options.agent)
+end
+
+-- The wt-default sentinel is false, and it has to stay false all the way: a
+-- configuration naming a base must not undo the picker's answer, and a
+-- declaration that turned it into the string "false" would send `--base false`
+-- to worktrunk.
+do
+  local saved = M.options.base
+  M.options.base = "main"
+  stub = new_branch_stub()
+  pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
+    base = false,
+  }))
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("the wt-default sentinel reaches the tab as no base", command[7], "")
+  eq("the wt-default sentinel carries no remote", command[8], "")
+  M.options.base = saved
 end
 
 if fails > 0 then os.exit(1) end

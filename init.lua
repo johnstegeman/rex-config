@@ -972,7 +972,8 @@ function M.setup(opts)
     name = "work_new_go",
     title = "New work: start the branch the picker chose",
     category = "New work",
-    -- Rex drops KEY=VALUE pairs an action does not declare, and the picker
+    -- An action is handed only the pairs it declares -- `rex do work_new_go
+    -- blank=true` is refused outright without the declaration -- and the picker
     -- hands back exactly these, so every one of them is declared here.
     args = {
       type = "object",
@@ -988,6 +989,18 @@ function M.setup(opts)
         bead = { type = "string" },
         title = { type = "string" },
         create = { type = "boolean" },
+        -- What the branch is created from, and the remote that ref lives on.
+        -- The base is three-valued -- a string is the ref, false is worktrunk's
+        -- own default (no --base word at all), and absent means the picker never
+        -- answered -- so both types are declared: a `string` alone would call
+        -- the picker's sentinel an illegal value, and a validator that took that
+        -- at its word would drop it and let a configured base speak instead.
+        -- The remote is present only for a remote-tracking ref.
+        base = { type = { "string", "boolean" } },
+        base_remote = { type = "string" },
+        -- ctrl-n: an agent, and nothing to say. Not a prompt and not the
+        -- configured template, so a payload without it keeps the template.
+        blank = { type = "boolean" },
       },
       required = { "project", "root", "main", "branch" },
     },

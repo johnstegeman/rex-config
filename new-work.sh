@@ -27,11 +27,12 @@ commands:
       "ref<TAB>remote" row each, the opening answer first; an empty ref means
       no --base at all, which leaves it to worktrunk
   fzf-answer STATUS
-      read fzf's --print-query reply on stdin and print what it means as one
-      "bead<TAB>prompt" row; STATUS is the status fzf exited with
+      read fzf's --print-query --expect reply on stdin and print what it means
+      as one "bead<TAB>prompt<TAB>blank" row, empty where there is no answer;
+      STATUS is the status fzf exited with
   pick --main DIR --root PATH --project NAME [--base REF | --no-base]
-       [--base-refs FILE] [--bead ID | --prompt TEXT] [--agents NAME]...
-       [--agent NAME] [--branch NAME] [--dry-run]
+       [--base-refs FILE] [--bead ID | --prompt TEXT | --blank]
+       [--agents NAME]... [--agent NAME] [--branch NAME] [--dry-run]
       ask which bead (or prompt), which agent, and which branch, and hand the
       answer to Rex as one JSON object, with the base a new branch is created
       from and the remote that base lives on; exit 3 when no branch or agent was
@@ -45,10 +46,12 @@ and --base-refs for the one bases reads, so a run given all four never touches
 
 The first question is one screen: the ready beads, with "✎  write a prompt
 instead" pinned on top. Text typed at the fzf prompt that matches no row is the
-prompt itself (--print-query: the query is line 1, the selected row line 2 when
+prompt itself (--print-query with --expect: the query is line 1, the key that
+was pressed line 2 -- empty when none was -- and the selected row line 3 when
 there is one), and picking the prompt row opens a prompt field for text that
-would be awkward to type there. esc means no bead, and a blank answer falls back
-to the configured no-bead prompt.
+would be awkward to type there. esc means no bead, so the configured no-bead
+prompt says what the flow is; ctrl-n means blank, an agent started with
+nothing said to it at all.
 
 The second question is the agent: the --agents names, with "none" last. none
 starts nothing, so the tab is the new worktree and a login shell, and the prompt
@@ -63,10 +66,13 @@ the tab with the remote it lives on so the tab can fetch that one; a base on no
 remote carries no remote, and nothing is fetched for it. --base-refs reads a
 saved for-each-ref instead of the repository, as bases does.
 
-pick's --bead, --prompt, --agent and --branch answer a question instead of
-asking it, and an empty value means none. With no terminal on stdin nothing is
-asked: the bead question is skipped, the agent falls back to the first --agents
-name, and the branch reads an empty answer, rather than waiting for any of them.
+pick's --bead, --prompt, --blank, --agent and --branch answer a question
+instead of asking it, and an empty value means none. --blank is the answer
+ctrl-n gives -- no bead and nothing said to the agent, which the tab reads as
+no prompt word at all -- and, like the others, it cannot be combined with an
+answer to the same question. With no terminal on stdin nothing is asked: the
+bead question is skipped, the agent falls back to the first --agents name, and
+the branch reads an empty answer, rather than waiting for any of them.
 --main and --root must be absolute: Rex resolves them against its own working
 directory, not this one.
 EOF
@@ -526,7 +532,7 @@ cmd_preview() {
   # The prompt row is not a bead: picking it opens a prompt field, so its preview
   # says so rather than asking bd about an id that cannot exist.
   if [ "$id" = "$prompt_row_marker" ]; then
-    printf 'Picking this row writes the prompt in a field of its own.\n\nText typed at the "%s" line that matches no bead is the prompt as well. A blank answer starts the no-bead flow.\n' '> '
+    printf 'Picking this row writes the prompt in a field of its own.\n\nText typed at the "%s" line that matches no bead is the prompt as well. esc starts the no-bead flow; ctrl-n starts the agent with nothing to say.\n' '> '
     return 0
   fi
 
@@ -749,15 +755,17 @@ valid_branch_name() {
 
 # `new-work.sh pick --main DIR --root PATH --project NAME`
 #       `[--base REF | --no-base] [--base-refs FILE]`
-#       `[--bead ID | --prompt TEXT] [--agents NAME]...`
+#       `[--bead ID | --prompt TEXT | --blank] [--agents NAME]...`
 #       `[--agent NAME] [--branch NAME] [--dry-run]`
 #
 # The three questions behind ctrl+space>n: which bead (or prompt), which agent,
 # then which branch. The answer goes back to Rex as one JSON object, built by jq
-# so no value is ever interpolated into a command line. --bead, --prompt, --agent
-# and --branch answer a question without asking it, which is how the tests and
-# scripts drive the picker. --base, --no-base and --base-refs answer the base
-# the branch question opens on, which the payload carries to the tab.
+# so no value is ever interpolated into a command line. --bead, --prompt,
+# --blank, --agent and --branch answer a question without asking it, which is how
+# the tests and scripts drive the picker: --blank is ctrl-n's blank answer -- an
+# agent, and nothing to say -- which a pipe cannot press for itself. --base,
+# --no-base and --base-refs answer the base the branch question opens on, which
+# the payload carries to the tab.
 cmd_pick() {
   local main='' root='' project='' base='' bead='' branch=''
   local prompt='' agent='' agent_choices=''
@@ -802,6 +810,13 @@ cmd_pick() {
         prompt=$2
         prompt_set=1
         shift 2
+        ;;
+      # ctrl-n, as a word: the blank answer is the one fzf can only be given by
+      # a keystroke, so a script -- and the test that pins the payload -- needs a
+      # way to say it. It answers the bead question, so it takes no value.
+      --blank)
+        blank_set=1
+        shift
         ;;
       # One --agents per name, in the order the agent question should offer
       # them: the first is the one an unasked question takes.
@@ -861,6 +876,15 @@ cmd_pick() {
     usage_error 'pick: --bead and --prompt answer the same question'
   fi
 
+  # Blank answers that same question -- "which work, and what is said to the
+  # agent" -- so any two of the three at once is a script that cannot mean what
+  # it says: blank is the answer "no bead, and nothing to say", which a bead or
+  # a prompt contradicts.
+  if [ "$blank_set" -eq 1 ] &&
+    { [ "$bead_set" -eq 1 ] || [ "$prompt_set" -eq 1 ]; }; then
+    usage_error 'pick: --blank and --bead/--prompt answer the same question'
+  fi
+
   # A base and no base answer one question too, as they do for bases.
   [ -z "$base" ] || [ "$no_base" -eq 0 ] ||
     usage_error 'pick: --base and --no-base answer the same question'
@@ -888,7 +912,8 @@ cmd_pick() {
   # branch question reads stdin. Saved tool output stands in for the tools it
   # replaces.
   if [ -t 0 ]; then
-    if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ]; then
+    if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
+      [ "$blank_set" -eq 0 ]; then
       need fzf
     fi
     # gum asks the agent question and the branch question, and it writes the
@@ -897,7 +922,8 @@ cmd_pick() {
     # No agent list means no agent question.
     if [ "$branch_set" -eq 0 ] ||
       { [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; } ||
-      { [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ]; }; then
+      { [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
+        [ "$blank_set" -eq 0 ]; }; then
       need gum
     fi
   fi
@@ -918,7 +944,10 @@ cmd_pick() {
   fi
 
   local note=''
-  if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ]; then
+  # The bead question is asked only when it was not answered already: a bead, a
+  # prompt and a blank answer are all answers to it.
+  if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
+    [ "$blank_set" -eq 0 ]; then
     if [ -z "$rows" ]; then
       # Nothing to offer: say so, and let the branch question carry the note --
       # the prompt row is still worth asking, but a list with no beads in it is
