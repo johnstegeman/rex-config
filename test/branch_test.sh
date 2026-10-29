@@ -146,6 +146,22 @@ if [ "$status" -ne 2 ]; then
   fail "candidates without --main exits 2" "exit $status: $(cat "$tmp/err")"
 fi
 
+# A --main that is not there is refused by name, before anything is read from
+# it: left to candidate_rows it surfaces as bash's own `cd` error, which names a
+# line of this script rather than a place on the disk.
+ran=$((ran + 1))
+./new-work.sh candidates --main "$tmp/nowhere" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 1 ]; then
+  fail "candidates with a --main that is not there exits 1" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF "new-work.sh: candidates: no such directory: $tmp/nowhere" "$tmp/err"; then
+  fail "candidates with a --main that is not there is named" "stderr: $(cat "$tmp/err")"
+elif grep -q 'cd:' "$tmp/err"; then
+  fail "candidates with a --main that is not there is named" \
+    "bash's own cd error is still in: $(cat "$tmp/err")"
+fi
+
 # A worktrunk that cannot read the repository: its worktree rows are lost, but
 # git's branches still come through -- and the partial list says so, naming the
 # directory, because a branch missing from it is one the picker would offer to

@@ -87,8 +87,9 @@ elif [ "$(cut -f1 "$tmp/out" | tr '\n' ' ')" != "pmm-iris-t2 pmm-iris-t1 " ]; th
   fail "a title with a tab or newline is flattened" "rows: $(cat "$tmp/out")"
 fi
 
-# Fields a producer left out: a bead with no priority or no id at all is still a
-# row -- one odd record must not cost the picker the whole list, and a null id
+# Fields a producer left out: a record with no id at all is dropped -- there is
+# nothing to hand back for it -- while a bead that simply has no priority is still
+# a row, sorted last. Neither is a reason to lose the whole list, and a null id
 # would otherwise stop jq outright.
 cat >"$tmp/sparse.json" <<'EOF'
 [
@@ -101,11 +102,15 @@ ran=$((ran + 1))
 ./new-work.sh beads --bd-json "$tmp/sparse.json" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "a bead with no priority or id is still a row" "exit $status: $(cat "$tmp/err")"
+  fail "a bead with no id is dropped, one with no priority is not" \
+    "exit $status: $(cat "$tmp/err")"
+elif [ "$(wc -l <"$tmp/out" | tr -d ' ')" != 2 ]; then
+  fail "a bead with no id is dropped, one with no priority is not" \
+    "one row per real bead, got: $(cat "$tmp/out")"
 elif [ "$(sed -n '1p' "$tmp/out")" != "$(printf 'pmm-iris-s3\tone')" ]; then
-  fail "a bead with no priority or id is still a row" "rows: $(cat "$tmp/out")"
-elif [ "$(sed -n '3p' "$tmp/out")" != "$(printf 'pmm-iris-s1\tno priority')" ]; then
-  fail "a bead with no priority or id is still a row" "rows: $(cat "$tmp/out")"
+  fail "a bead with no id is dropped, one with no priority is not" "rows: $(cat "$tmp/out")"
+elif [ "$(sed -n '2p' "$tmp/out")" != "$(printf 'pmm-iris-s1\tno priority')" ]; then
+  fail "a bead with no id is dropped, one with no priority is not" "rows: $(cat "$tmp/out")"
 fi
 
 # A bd that reports no database: bd's own error says what, and the line above

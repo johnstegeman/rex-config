@@ -123,16 +123,18 @@ ready_json() {
 
 # Rows for the beads a person can actually start work on, from `bd ready --json`
 # on stdin. Out go the things that are not work: molecule steps (dotted ids),
-# molecule and gate container beads, and step:* labels. Rows are
-# "id<TAB>title", sorted by priority then id. A title is flattened to one line
-# and a missing id or priority gets a value, so a producer that is not bd itself
-# cannot split a row or stop the listing; what the picker hands back is read from
-# the JSON again, so this is for reading only.
+# molecule and gate container beads, step:* labels, and a record with no id at
+# all, which nothing could pick. Rows are "id<TAB>title", sorted by priority
+# then id. A title is flattened to one line and a missing priority gets a value,
+# so a producer that is not bd itself cannot split a row or stop the listing;
+# what the picker hands back is read from the JSON again, so this is for reading
+# only.
 pickable_rows() {
   jq -r '
     [ .[]
       | .id //= ""
       | .priority //= 999
+      | select(.id != "")
       | select(.id | contains(".") | not)
       | select(.issue_type != "molecule" and .issue_type != "gate")
       | select([.labels[]? | startswith("step:")] | any | not)
@@ -302,6 +304,13 @@ cmd_candidates() {
 
   if [ -z "$main" ] && { [ -z "$wt_json" ] || [ -z "$refs" ]; }; then
     usage_error 'candidates: need --main DIR (or --wt-json FILE and --refs FILE)'
+  fi
+  # --main is where git and wt are read, so a directory that is not there is
+  # refused here, by name: left to candidate_rows it reaches `cd` inside a
+  # subshell, whose failure reads as a line number in this script rather than as
+  # a place that does not exist.
+  if [ -n "$main" ]; then
+    [ -d "$main" ] || die "candidates: no such directory: $main"
   fi
   command -v jq >/dev/null 2>&1 || die 'jq is required but was not found on PATH'
 
