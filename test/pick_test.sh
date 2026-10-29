@@ -29,6 +29,13 @@ fail() {
   fi
 }
 
+# The agent a pick remembers lives in $XDG_STATE_HOME/rex-config/state, so every
+# run here is pointed at a directory under $tmp: none of them may read or write
+# the developer's real ~/.local/state, and a state left behind by one case must
+# never decide what the next case opens on. A case that wants a remembered name
+# writes a directory of its own and names it in front of run_pick.
+export XDG_STATE_HOME=$tmp/state
+
 # Stand-ins for the tools that would otherwise talk to the outside world. rex
 # records its arguments, so "the hand-back never ran" is proven by a missing
 # file rather than by reading the script; fzf leaves a mark when it is started,
@@ -1569,6 +1576,206 @@ if [ -e "$tmp/gum-ran" ]; then
   fail "a blank answer opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
 fi
 
+# (t) The agent a pick chose is remembered for the next one, in
+# $XDG_STATE_HOME/rex-config/state -- a state file outside the configuration,
+# because it is what happened rather than what was asked for. The remembered
+# name is the agent the screen opens on, and off a terminal the agent the
+# payload carries, so the header and the tab agree. It is a convenience at
+# every step: a file that is missing, corrupt, unreadable, or holding a name the
+# list no longer offers falls back to the first --agents name, and neither
+# reading it nor writing it may fail a launch.
+#
+# Each case names a state directory of its own, so no case can answer for the
+# next. The missing-file case is every other run in this file: the harness
+# points XDG_STATE_HOME under $tmp and nothing writes a state file there.
+
+# remember <dir> <content>: the file the pick before this one would have left.
+remember() { # DIR CONTENT
+  rm -rf "$1"
+  mkdir -p "$1/rex-config"
+  printf '%s' "$2" >"$1/rex-config/state"
+}
+
+# A run says nothing about the state file: the one line a terminal-less bead
+# question prints is the only thing on stderr, so a complaint about a file that
+# was not there, not readable or not parseable would be a second line. A
+# fallback is only quiet if nobody had to hear about it.
+quiet_state() { # NAME
+  ran=$((ran + 1))
+  if [ "$(cat "$tmp/err")" != \
+    'new-work.sh: skipping the bead question: stdin is not a terminal' ]; then
+    fail "$1" "stderr: $(cat "$tmp/err")"
+  fi
+}
+
+# A remembered name the list still offers is the answer, in the payload and in
+# the state file the pick leaves behind: the same name, and no key in the
+# payload that a pick with nothing remembered does not have.
+remember "$tmp/st-known" 'agent=claude
+'
+# The header's own field, not just a payload that happens to agree with it: the
+# screen's agent answer is read from the composer state it seeded, which is the
+# same file the header prints from. A remembered name that reaches the payload
+# from that state is therefore the agent the header opened on -- the place the
+# first --agents name has always reached it.
+XDG_STATE_HOME=$tmp/st-known FZF_REPLY=$'\n\n' run_screen \
+  --agents pi --agents claude --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "a remembered agent reaches the screen's agent answer" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a remembered agent prints runnable rex do work_new_go from the screen" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a remembered agent is the header's opening agent" "$json" \
+    '.agent == "claude"'
+fi
+
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-known \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+quiet_state "a remembered agent says nothing about the state file"
+if [ "$status" -ne 0 ]; then
+  fail "a remembered agent exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a remembered agent prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a remembered agent is the payload's agent" "$json" \
+    '.agent == "claude"'
+  assert_json "a remembered agent adds no key to the payload" "$json" \
+    'keys == ["agent", "base", "base_remote", "bead", "branch", "create",
+              "main", "project", "root", "title"]'
+fi
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-known \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "a remembered agent is handed back" \
+    "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/st-known/rex-config/state")" != agent=claude ]; then
+  fail "the pick keeps the agent it opened on" \
+    "state: $(cat "$tmp/st-known/rex-config/state")"
+fi
+
+# A name the list no longer offers is ignored -- the screen's cycle could not
+# step to it, so a header showing it would be a field nothing can change -- and
+# the pick that follows remembers the name it really used, which is how "the
+# writer ran" is told apart from "the file was already right".
+remember "$tmp/st-ghost" 'agent=ghost
+'
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-ghost \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+quiet_state "a stale name says nothing about the state file"
+if [ "$status" -ne 0 ]; then
+  fail "a remembered name no longer offered exits 0" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a remembered name no longer offered prints runnable rex do work_new_go" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a name no longer offered falls back to the first name" "$json" \
+    '.agent == "pi"'
+fi
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-ghost \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "a pick after a stale name is handed back" \
+    "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/st-ghost/rex-config/state")" != agent=pi ]; then
+  fail "a pick remembers the agent it chose" \
+    "state: $(cat "$tmp/st-ghost/rex-config/state")"
+fi
+
+# Garbage in the file -- a line with no key, an empty one, a line with no value
+# -- is a file with nothing to say, not a reason to stop: the first name, and a
+# pick that runs to the hand-back.
+remember "$tmp/st-corrupt" 'garbage
+
+=nonsense
+'
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-corrupt \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+quiet_state "a corrupt state file is not complained about"
+if [ "$status" -ne 0 ]; then
+  fail "a corrupt state file exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a corrupt state file prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a corrupt state file falls back to the first name" "$json" \
+    '.agent == "pi"'
+fi
+
+# A file caught mid-write -- truncated to nothing by the pick before this one --
+# has no line for the key at all, which is the missing key rather than a broken
+# one: the first name, and no complaint.
+remember "$tmp/st-empty" ''
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-empty \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+quiet_state "an empty state file is not complained about"
+if [ "$status" -ne 0 ]; then
+  fail "an empty state file exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "an empty state file prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "an empty state file falls back to the first name" "$json" \
+    '.agent == "pi"'
+fi
+
+# A file the run may not read is the same answer, silently.
+remember "$tmp/st-locked" 'agent=claude
+'
+chmod 000 "$tmp/st-locked/rex-config/state"
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-locked \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+quiet_state "an unreadable state file is not complained about"
+chmod 600 "$tmp/st-locked/rex-config/state"
+if [ "$status" -ne 0 ]; then
+  fail "an unreadable state file exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "an unreadable state file prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "an unreadable state file falls back to the first name" "$json" \
+    '.agent == "pi"'
+fi
+
+# A state directory that cannot be made is a directory the run does without:
+# the remembered name is not worth a failed launch, so the pick still hands its
+# work over.
+printf 'not a directory\n' >"$tmp/st-parent"
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-parent/deeper \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "an uncreatable state directory exits 0" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF work_new_go "$tmp/rex-args"; then
+  fail "an uncreatable state directory still starts the work" \
+    "rex saw: $(sed -n '1,4p' "$tmp/rex-args")"
+fi
+
+# The write comes before the hand-back on purpose: a hand-back Rex refuses
+# still chose an agent, and the next screen should open on it. rex exits 1 here
+# with nothing handed over, and the state file says the agent that was chosen
+# -- not the stale name it replaced.
+remember "$tmp/st-refused" 'agent=ghost
+'
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-refused REX_FAIL='no server' \
+  run_pick test/fixtures/ready.json --agents pi --agents claude --branch feat/x
+if [ "$status" -eq 0 ]; then
+  fail "a refused hand-back still fails" "exit 0: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/st-refused/rex-config/state")" != agent=pi ]; then
+  fail "a refused hand-back still remembers the agent" \
+    "state: $(cat "$tmp/st-refused/rex-config/state")"
+fi
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
   exit 1

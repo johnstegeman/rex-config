@@ -84,8 +84,12 @@ first three opens no screen at all. --blank is the answer
 ctrl-n gives -- no bead and nothing said to the agent, which the tab reads as
 no prompt word at all -- and, like the others, it cannot be combined with an
 answer to the same question. With no terminal on stdin nothing is asked: the
-bead question is skipped, the agent falls back to the first --agents name, and
-the branch reads an empty answer, rather than waiting for any of them.
+bead question is skipped, the agent falls back to the one this picker used last
+and then to the first --agents name, and the branch reads an empty answer,
+rather than waiting for any of them. That remembered name lives in
+$XDG_STATE_HOME/rex-config/state (~/.local/state/rex-config/state when unset),
+is read tolerantly and written before each hand-back, and a name the agent list
+no longer offers is ignored.
 --main and --root must be absolute: Rex resolves them against its own working
 directory, not this one.
 EOF
@@ -612,6 +616,44 @@ state_lines() {
   else
     printf '0\n'
   fi
+}
+
+# What the last pick chose, remembered for the next one: one key=value file
+# outside the configuration, because it is what happened rather than what was
+# asked for. XDG's location, so a run can be pointed at a directory of its own
+# and no test ever reads or writes the developer's real one.
+state_dir() {
+  printf '%s\n' "${XDG_STATE_HOME:-${HOME:-}/.local/state}/rex-config"
+}
+
+# The agent the screen opens on: the name the last pick wrote, when the list
+# still offers it. A name the list no longer offers is ignored rather than
+# shown -- ctrl-a could not step to it, so the header would be a field nothing
+# can change -- and the caller falls back to the first name, the configured
+# default. Every way the file can be wrong is silence: not there, not
+# readable, no line for the key, a line with no value. None of them is worth a
+# word on stderr, let alone a failed launch.
+remembered_agent() { # NAMES: one offered name per line
+  local names=$1 file name=''
+  file=$(state_dir)/state
+  [ -f "$file" ] && [ -r "$file" ] || return 0
+  name=$(sed -n 's/^agent=//p' "$file" 2>/dev/null | sed -n 1p) || name=''
+  [ -n "$name" ] || return 0
+  printf '%s\n' "$names" | grep -Fxq -- "$name" || return 0
+  printf '%s\n' "$name"
+}
+
+# And the answer back into it, tried before the hand-back so a hand-back Rex
+# refuses still remembers the agent that was chosen. The file holds this one
+# key, so it is written whole; a directory that cannot be made and a file that
+# cannot be written are both discarded, because a launch is worth more than the
+# memory of it.
+remember_agent() { # NAME
+  local dir file
+  dir=$(state_dir) || return 0
+  file=$dir/state
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf 'agent=%s\n' "$1" >"$file" 2>/dev/null || return 0
 }
 
 # The cycle entry the screen is showing, as the "ref<TAB>remote" line base_chain
@@ -1296,6 +1338,19 @@ cmd_pick() {
     die "pick: could not read the bead list from ${bd_json:-$main}"
   fi
 
+  # The agent the screen opens on: the one this picker chose last, when the
+  # list still offers it, and the list's first name -- the configured default --
+  # otherwise. Read once, here, because both ways into the screen use it: the
+  # header's field in the float and the answer an unasked question takes off a
+  # terminal, which have to agree or the tab would start an agent the header
+  # never showed.
+  local agent_seed=''
+  if [ -n "$agent_choices" ]; then
+    agent_seed=$(remembered_agent "$agent_choices")
+    [ -n "$agent_seed" ] ||
+      agent_seed=$(printf '%s\n' "$agent_choices" | sed -n 1p)
+  fi
+
   local note=''
   # The screen's state, made here so its keys have somewhere to write while it is
   # up: one directory per run, removed by hold_pick on the way out, so a killed
@@ -1304,11 +1359,10 @@ cmd_pick() {
   # tools it was promised and no temporary directory of its own.
   if [ -t 0 ]; then
     composer_state=$(mktemp -d) || die 'pick: could not make a state directory'
-    # The agent list leads with its default, which is the answer the header opens
-    # on; no list at all is no agent answer, and the payload then says nothing
-    # about the agent.
-    state_put "$composer_state" agent \
-      "$(printf '%s\n' "$agent_choices" | sed -n 1p)"
+    # The agent list leads with its default, or with the name the last pick
+    # chose, which is what the header opens on; no list at all is no agent
+    # answer, and the payload then says nothing about the agent.
+    state_put "$composer_state" agent "$agent_seed"
     # The branch the screen opens on. --branch is an answer already, and one
     # given by hand, so the header shows it and nothing derives it again.
     # Otherwise it is the first pickable row's name: load:pos(2) lands the cursor
@@ -1423,13 +1477,14 @@ cmd_pick() {
 
   # The agent is the header's: ctrl-a cycles it through the list and then none, so
   # there is no second question after the screen to ask. Off a terminal nobody can
-  # press a key, and the list leads with its default -- the same agent the
-  # configuration names, which is the answer an unasked question takes.
+  # press a key, and the answer is the seed the header would have opened on --
+  # the remembered name, or the list's first -- which is what an unasked question
+  # has always taken.
   if [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; then
     if [ -n "$composer_state" ]; then
       agent=$(state_get "$composer_state" agent)
     else
-      agent=$(printf '%s\n' "$agent_choices" | sed -n 1p)
+      agent=$agent_seed
     fi
     agent_set=1
   fi
@@ -1567,6 +1622,15 @@ cmd_pick() {
   if [ "$dry_run" -eq 1 ]; then
     printf 'rex do work_new_go --args %s\n' "$(shell_quote "$payload")"
     return 0
+  fi
+
+  # What this pick chose is remembered here, before the hand-back rather than
+  # after it: a hand-back Rex refuses still chose an agent, and the next screen
+  # should open on it. Only an agent the picker has an answer for is written --
+  # a run with no agent list answered nothing -- and the write cannot fail the
+  # launch.
+  if [ "$agent_set" -eq 1 ]; then
+    remember_agent "$agent"
   fi
 
   # The hand-back is the last thing that can fail here, and the one failure that
