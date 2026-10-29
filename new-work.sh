@@ -62,13 +62,13 @@ itself (--print-query with --expect: the query is line 1, the key that was
 pressed line 2 -- empty when none was -- and the selected row line 3 when there
 is one), and picking the prompt row opens a prompt field for text that would be
 awkward to type there. esc means no bead, so the configured no-bead prompt says
-what the flow is; ctrl-n means blank, an agent started with nothing said to it
-at all; ctrl-a, ctrl-b and ctrl-r cycle the agent, type the branch and cycle the
-base, and each repaints the header alone. The agent cycle is the --agents names
-followed by "none", which starts nothing -- the tab is then the new worktree and
-a login shell, with the prompt it could not deliver printed above that shell
-rather than dropped. The branch starts as the name derived from the bead and a
-bare Enter keeps it.
+what the flow is; ctrl-n means blank, an agent started in the branch the header
+shows and nothing said to it at all; ctrl-a, ctrl-b and ctrl-r cycle the agent,
+type the branch and cycle the base, and each repaints the header alone. The
+agent cycle is the --agents names followed by "none", which starts nothing --
+the tab is then the new worktree and a login shell, with the prompt it could
+not deliver printed above that shell rather than dropped. The branch starts as
+the name derived from the bead and a bare Enter keeps it.
 
 The base field opens on the one --base names, or the one this clone would be
 created from (origin/HEAD's target, then origin/main, origin/master, main,
@@ -80,13 +80,13 @@ instead of the repository, as bases does.
 
 pick's --bead, --prompt, --blank, --agent and --branch answer a question
 instead of asking it, and an empty value means none -- so a run given one of the
-first three opens no screen at all. --blank is the answer
-ctrl-n gives -- no bead and nothing said to the agent, which the tab reads as
-no prompt word at all -- and, like the others, it cannot be combined with an
-answer to the same question. With no terminal on stdin nothing is asked: the
-bead question is skipped, the agent falls back to the one this picker used last
-and then to the first --agents name, and the branch reads an empty answer,
-rather than waiting for any of them. That remembered name lives in
+first three opens no screen at all. --blank is the answer ctrl-n gives -- no
+bead and nothing said to the agent, in the branch the screen was showing, which
+the tab reads as no prompt word at all -- and, like the others, it cannot be
+combined with an answer to the same question. With no terminal on stdin nothing
+is asked: the bead question is skipped, the agent falls back to the one this
+picker used last and then to the first --agents name, and the branch reads an
+empty answer, rather than waiting for any of them. That remembered name lives in
 $XDG_STATE_HOME/rex-config/state (~/.local/state/rex-config/state when unset),
 is read tolerantly and written before each hand-back, and a name the agent list
 no longer offers is ignored.
@@ -1525,12 +1525,19 @@ cmd_pick() {
       # and ctrl-b are answers given before the pick is handed back, and a run
       # off a terminal reads its line of stdin as it always has.
       #
-      # Blank is the exception, and stays the cancelled pick it is today: it is
-      # the answer "an agent, and nothing to say", and a run with nothing to say
-      # has never been asked for a branch. An empty or cancelled field is no
-      # answer either, and falls through to the exit below rather than quietly
-      # taking the seed the field was opened on.
-      if [ -z "$bead" ] && [ "$blank_set" -eq 0 ]; then
+      # Blank is the answer "an agent, and nothing to say" -- somewhere to work
+      # and no prompt -- so it takes the branch the screen was showing: ctrl-b's
+      # edit, when there was one, is handed back by the block above, and
+      # otherwise it is the seed the header opened on, the name derived from the
+      # bead the cursor started on. That is the name the user could read on the
+      # screen while pressing ctrl-n, and creating it is what keeps the screen
+      # honest. A screen with no branch at all -- no ready beads to seed one,
+      # nothing typed -- has nothing to create, and falls through to the exit
+      # below like any other branch-less answer. No field is opened on this path
+      # either: blank is a whole answer, not a question left unanswered.
+      if [ "$blank_set" -eq 1 ]; then
+        branch=$(state_get "$composer_state" branch)
+      elif [ -z "$bead" ]; then
         branch=$(ask_branch "$(state_get "$composer_state" branch)" \
           "$project")
       fi

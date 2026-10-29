@@ -1430,8 +1430,9 @@ chmod +x "$tmp/screen/bin/fzf" "$tmp/screen/bin/gum"
 # run_screen [options...]: a picker run with a screen. What a person would
 # answer is the environment: FZF_REPLY for the screen, GUM_BRANCH and
 # GUM_PROMPT for the two fields it can open, GUM_CANCEL for one that is
-# dismissed. stdin is empty, so a field that was not forced would answer
-# nothing and the run would exit 3 -- the failure mode this section exists for.
+# dismissed, and SCREEN_BEADS for a ready list other than the usual fixture.
+# stdin is empty, so a field that was not forced would answer nothing and the
+# run would exit 3 -- the failure mode this section exists for.
 run_screen() {
   ran=$((ran + 1))
   rm -f "$tmp/gum-ran" "$tmp/rex-args"
@@ -1441,7 +1442,7 @@ run_screen() {
     GUM_CANCEL="${GUM_CANCEL:-}" REX_ARGS_FILE=$tmp/rex-args \
     "$tmp/screen/new-work.sh" pick \
     --main /p/demo/main --root /p/demo --project demo \
-    --bd-json test/fixtures/ready.json \
+    --bd-json "${SCREEN_BEADS:-test/fixtures/ready.json}" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
     --base-refs "$tmp/base-refs" --dry-run "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
@@ -1560,11 +1561,35 @@ if [ -e "$tmp/gum-ran" ]; then
   fail "--branch opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
 fi
 
-# ctrl-n is the answer "an agent, and nothing to say", and a blank answer has
-# never asked for a branch: it is the cancelled pick it is today, with no field
-# opened on the way.
+# ctrl-n is a whole answer: somewhere to work and nothing to say. The branch it
+# carries is the one the screen was showing -- the seed derived from the bead the
+# cursor started on, which is the name the user could read on the header while
+# pressing the key -- so the answer that says no bead still creates a worktree,
+# and no field is opened on the way.
 FZF_REPLY=$'\nctrl-n\npmm-iris-a4l\tTreat index/catalog pages as non-extractable\n' \
   run_screen
+if [ "$status" -ne 0 ]; then
+  fail "a blank answer exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a blank answer prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a blank answer: the flag is the whole prompt answer" "$json" \
+    '.blank == true and (has("prompt") | not)'
+  assert_json "a blank answer: the row under the cursor is not a bead" "$json" \
+    '.bead == "" and .title == ""'
+  assert_json "a blank answer: the header's branch is the branch" "$json" \
+    '.branch == "feat/58h" and .create == true'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gum-ran" ]; then
+  fail "a blank answer opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
+fi
+
+# A screen with no branch at all -- no ready beads to seed one, nothing typed --
+# has nothing to create, so blank is the cancelled pick every other branch-less
+# answer is: exit 3, said out loud, nothing started.
+SCREEN_BEADS=$tmp/empty-beads.json FZF_REPLY=$'\nctrl-n\n' run_screen
 if [ "$status" -ne 3 ]; then
   fail "a blank answer with no branch exits 3" \
     "exit $status: $(cat "$tmp/err")"
@@ -1573,7 +1598,8 @@ elif ! grep -qxF 'new-work.sh: no branch given, nothing to start' "$tmp/err"; th
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/gum-ran" ]; then
-  fail "a blank answer opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
+  fail "a blank answer with no branch opens no field" \
+    "gum was asked: $(cat "$tmp/gum-ran")"
 fi
 
 # (t) The agent a pick chose is remembered for the next one, in

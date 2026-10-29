@@ -29,7 +29,7 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    pmm-iris-a4l  Flaky hook test started failing
    pmm-iris-58h  Add a --dry-run flag
 
-    pmm-iris · agent: pi · branch: bug/58h · base: origin/main
+    pmm-iris · agent: pi · branch: bug/a4l · base: origin/main
    ctrl-a agent  ctrl-b branch  ctrl-r base  ctrl-n blank  enter start  esc no bead
    ```
 
@@ -44,7 +44,7 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    | `ctrl-a` | the next agent, then `none`, then round again |
    | `ctrl-b` | type the branch, in a field opened on the one the header shows |
    | `ctrl-r` | the next base in the short cycle |
-   | `ctrl-n` | **blank**: an agent, and nothing said to it |
+   | `ctrl-n` | **blank**: the header's branch, and an agent with nothing said to it |
    | `enter` | start with what the screen shows |
    | `esc` | no bead: the configured `no_bead_prompt` says what the flow is |
 
@@ -52,21 +52,27 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    prompt that matches no row, `ctrl-n`'s blank, and `esc`'s no bead at all.
    Picking a bead sends `/brainstorming for bead <id>`; the `✎` row opens a field
    for text that would be awkward to type on one line; `ctrl-n` sends no prompt
-   word at all, so the agent starts bare. A preview of the highlighted bead is
+   word at all, so the agent starts bare in the branch the header was showing,
+   and no field is opened to ask for one. A preview of the highlighted bead is
    below the list.
 
    The branch the header shows is the name the leading bead derives —
-   `<prefix>/<short-id>`, e.g. `bug/58h` for `pmm-iris-58h` — so a bare `enter`
-   creates exactly that; a bead picked further down the list derives its own name
-   at the hand-back, and `ctrl-b` types one by hand. A bead-less answer — typed
-   text, or the `✎` row — has no bead to take a name from, so the screen asks for
-   one after it closes, in a field opened on whatever the header held; `enter`
-   there keeps that name, and `esc` cancels the pick. Typing the name of an
-   existing branch or worktree switches to it instead of creating anything;
-   worktrunk's own shortcuts — `^` the default branch, `-` the previous worktree,
-   `@` the current one, `pr:<n>` / `mr:<n>` a pull or merge request's branch —
-   switch too, with no branch created, and the new tab is labelled with what you
-   typed.
+   `<prefix>/<short-id>`, e.g. `bug/a4l` for `pmm-iris-a4l` — so a bare `enter`
+   creates exactly that. A bead picked further down the list derives its own name
+   at the hand-back, and a branch typed at `ctrl-b` wins over both: the name you
+   typed is the one the tab is given. A bead-less answer — typed text, or the `✎`
+   row — has no bead to take a name from, so the screen asks for one after it
+   closes, in a field opened on whatever the header held; `enter` there keeps
+   that name, and `esc` cancels the pick. Typing the name of an existing branch
+   or worktree switches to it instead of creating anything; worktrunk's own
+   shortcuts — `^` the default branch, `-` the previous worktree, `@` the current
+   one, `pr:<n>` / `mr:<n>` a pull or merge request's branch — switch too, with
+   no branch created, and the new tab is labelled with what you typed.
+
+   With no ready beads the list is the `✎` row alone and `no ready beads` is said
+   on stderr. Nothing seeds the header's branch either, so a typed prompt is
+   asked for one — and `ctrl-n`, which takes the branch the header shows, has
+   nothing to create and ends the pick with `no branch given, nothing to start`.
 
    `ctrl-a`'s `none` starts no agent at all: the tab is still made, the worktree
    still created and the bead still claimed, and the pane is a login shell in
@@ -121,7 +127,10 @@ last checked out. The screen opens its base field on the first of these that
 exists — the same order orca uses:
 
 1. the branch `refs/remotes/origin/HEAD` points at, as `origin/main`;
-2. `origin/main`; 3. `origin/master`; 4. `main`; 5. `master`;
+2. `origin/main`;
+3. `origin/master`;
+4. `main`;
+5. `master`;
 
 and on `@` — HEAD, the plugin's old behaviour — when the clone has none of them.
 `ctrl-r` cycles a short list from there: that opening answer, then `@`, then
@@ -286,7 +295,7 @@ worktrunk shortcut was typed).
   screen carries on. Only a field holding an answer the pick cannot do without
   cancels it: the `✎` row's prompt field, and the bead-less branch field that
   asks for the one answer still missing after a typed prompt. Cancelling those
-  starts nothing, as the branch question always did.
+  starts nothing.
 - The bead cannot be claimed: the flow stops before a tab is made, naming what
   `bd` said, so an agent never starts on a bead that is not its own.
 - The fetch fails (offline, a remote that is gone, a credential prompt): one line
