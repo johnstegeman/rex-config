@@ -221,10 +221,18 @@ if ! grep -qx "shell pwd: $start" "$tmp/out"; then
     "output: $(cat "$tmp/out")"
 fi
 
+# The switch failed, so the message names the switch as the step that went wrong
+# -- not a general "no path": the path-reading half has its own wording,
+# asserted below.
 ran=$((ran + 1))
 if ! grep -q "nope/nothing" "$tmp/err" || ! grep -q "not starting" "$tmp/err"; then
   fail "a failed switch says which branch it could not switch to" \
     "stderr: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+if ! grep -q 'wt switch nope/nothing failed (exit' "$tmp/err"; then
+  fail "a failed switch names the switch and its status" "stderr: $(cat "$tmp/err")"
 fi
 
 # The path cannot be read -- jq is missing here, which is the same empty path a

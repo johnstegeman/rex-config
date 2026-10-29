@@ -87,6 +87,20 @@ elif [ "$(cut -f1 "$tmp/out" | tr '\n' ' ')" != "pmm-iris-t2 pmm-iris-t1 " ]; th
   fail "a title with a tab or newline is flattened" "rows: $(cat "$tmp/out")"
 fi
 
+# A title that is not a string at all: gsub cannot match a number, so the row
+# builder stringifies first. Without that the whole listing dies with raw jq
+# text and no row at all -- a producer that is not bd itself is enough to do it.
+printf '[{"id": "pmm-iris-n1", "title": 42, "priority": 1, "issue_type": "task"}]\n' \
+  >"$tmp/numeric-title.json"
+ran=$((ran + 1))
+./new-work.sh beads --bd-json "$tmp/numeric-title.json" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a numeric title is still a row" "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/out")" != "$(printf 'pmm-iris-n1\t42')" ]; then
+  fail "a numeric title is still a row" "rows: $(cat "$tmp/out")"
+fi
+
 # Fields a producer left out: a record with no id at all is dropped -- there is
 # nothing to hand back for it -- while a bead that simply has no priority is still
 # a row, sorted last. Neither is a reason to lose the whole list, and a null id
@@ -113,9 +127,11 @@ elif [ "$(sed -n '2p' "$tmp/out")" != "$(printf 'pmm-iris-s1\tno priority')" ]; 
   fail "a bead with no id is dropped, one with no priority is not" "rows: $(cat "$tmp/out")"
 fi
 
-# A bd that reports no database: bd's own error says what, and the line above
-# it says where, because the directory is the half a person can act on.
-mkdir -p "$tmp/bin"
+# A bd that reports no database: bd's own error says what, and the line above it
+# says where, because the directory is the half a person can act on. The
+# directory has to exist, or the run stops at `cd` inside the subshell and the
+# stand-in bd never speaks at all -- which is what this asserted before.
+mkdir -p "$tmp/bin" "$tmp/nowhere"
 cat >"$tmp/bin/bd" <<'EOF'
 #!/bin/sh
 printf 'Error: no beads database found\nHint: run bd where\n' >&2
@@ -127,8 +143,13 @@ PATH="$tmp/bin:$PATH" ./new-work.sh beads --main "$tmp/nowhere" >"$tmp/out" 2>"$
 status=$?
 if [ "$status" -ne 1 ]; then
   fail "a bd with no database exits 1" "exit $status: $(cat "$tmp/err")"
+elif ! grep -q 'no beads database found' "$tmp/err"; then
+  fail "a bd with no database shows what bd said" "stderr: $(cat "$tmp/err")"
 elif ! grep -qF "beads: could not read the ready beads from $tmp/nowhere" "$tmp/err"; then
   fail "a bd with no database names the directory" "stderr: $(cat "$tmp/err")"
+elif grep -q 'cd:' "$tmp/err"; then
+  fail "a bd with no database names the directory" \
+    "bash's own cd error is still in: $(cat "$tmp/err")"
 fi
 
 if [ "$fails" -ne 0 ]; then

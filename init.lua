@@ -765,15 +765,20 @@ end
 local actions_registered = false
 
 function M.setup(opts)
+  -- Two passes: what cannot be used is refused before anything is applied, so a
+  -- table with one bad value leaves the options as they were rather than half
+  -- set, which assigning as pairs() walks the table would do.
+  for key, value in pairs(opts or {}) do
+    -- agent_args is spread into the tab's argv, so a string here is one step
+    -- from an ipairs over a non-table: refused by name.
+    if key == "agent_args" and type(value) ~= "table" then
+      error(string.format(
+        'rex-config: agent_args must be a list of arguments, not a %s', type(value)), 0)
+    end
+  end
+
   for key, value in pairs(opts or {}) do
     if KNOWN_OPTION[key] then
-      -- agent_args is spread into the tab's argv, so a string here would be one
-      -- option away from an ipairs over a non-table: refused at setup, naming
-      -- the option, rather than raised from the middle of building a tab.
-      if key == "agent_args" and type(value) ~= "table" then
-        error(string.format(
-          'rex-config: agent_args must be a list of arguments, not a %s', type(value)), 0)
-      end
       M.options[key] = value
     else
       rex.log("warn", string.format('rex-config: unknown option "%s" ignored; options are %s',

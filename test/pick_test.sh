@@ -398,6 +398,23 @@ if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
     "stdout: $(cat "$tmp/out")"
 fi
 
+# (d7) A bead whose id no branch name can be built from -- one ending in a dash:
+# the prompt offers no suggestion rather than stopping the pick with a
+# branch-default usage dump. With the suggestion empty the empty answer is the
+# ordinary cancelled pick, which is also how "no suggestion was offered" is
+# proven: a suggestion would have been accepted instead.
+ran=$((ran + 1))
+run_pick test/fixtures/ready.json --bead 'pmm-iris-' --dry-run
+if [ "$status" -ne 3 ]; then
+  fail "a bead id with no name leaves the prompt empty" \
+    "exit $status: $(cat "$tmp/err")"
+elif grep -q 'usage: new-work.sh' "$tmp/err"; then
+  fail "a bead id with no name leaves the prompt empty" \
+    "usage dump in stderr: $(cat "$tmp/err")"
+elif ! grep -q 'no branch given, nothing to start' "$tmp/err"; then
+  fail "a bead id with no name leaves the prompt empty" "stderr: $(cat "$tmp/err")"
+fi
+
 # (e) A title from a database: quotes survive, tabs and newlines become single
 # spaces, nothing is truncated.
 run_pick test/fixtures/ready-quirky-title.json --bead pmm-iris-q1 \

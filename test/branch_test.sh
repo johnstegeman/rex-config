@@ -162,6 +162,23 @@ elif grep -q 'cd:' "$tmp/err"; then
     "bash's own cd error is still in: $(cat "$tmp/err")"
 fi
 
+# ... but only when it will really be read: with both fixtures --wt-json and
+# --refs are the two sources candidates has, so --main is never touched and a
+# directory that is not there costs nothing. The same shape pick accepts, since
+# it is how the tests and dry runs call both commands.
+ran=$((ran + 1))
+./new-work.sh candidates --main "$tmp/nowhere" \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "candidates with both fixtures ignores an unread --main" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
+  fail "candidates with both fixtures ignores an unread --main" \
+    "output differs from the expected branch list"
+fi
+
 # A worktrunk that cannot read the repository: its worktree rows are lost, but
 # git's branches still come through -- and the partial list says so, naming the
 # directory, because a branch missing from it is one the picker would offer to

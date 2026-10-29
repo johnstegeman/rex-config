@@ -59,6 +59,27 @@ not_eq("a map whose value changed does not compare equal",
   { type = "string" }, { type = "boolean" })
 not_eq("a map that lost its key does not compare equal", {}, { type = "boolean" })
 
+-- The guard on eq() itself, as in the other two files: the two proofs above pass
+-- whichever comparison eq() uses, so re-inlining the old element-wise one into
+-- eq() would leave this file passing no matter what it was handed. A probe that
+-- has to fail proves the wiring; its FAIL line is swallowed and the totals are
+-- put back afterwards.
+do
+  local fails_before, count_before = fails, count
+  local saved_stderr, sink = io.stderr, io.open("/dev/null", "w")
+  if sink ~= nil then
+    io.stderr = sink
+  end
+  eq("the eq wiring probe", { type = "string" }, { type = "boolean" })
+  if sink ~= nil then
+    io.stderr = saved_stderr
+    sink:close()
+  end
+  local recorded = fails - fails_before
+  fails, count = fails_before, count_before
+  eq("eq records a map mismatch", recorded, 1)
+end
+
 eq("version", M.version, "0.1.0")
 eq("render_prompt", M.render_prompt("/brainstorming for bead {id} ({title}) {id}", { id = "pmm-iris-58h", title = "Diff path" }),
    "/brainstorming for bead pmm-iris-58h (Diff path) pmm-iris-58h")

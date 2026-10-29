@@ -24,7 +24,11 @@ ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktre
    questions: which ready bead (with a preview of its long description), then
    which branch — typed at a prompt that offers `<prefix>/<short-id>`, e.g.
    `bug/58h` for `pmm-iris-58h`, so a bare Enter accepts it. Typing the name of
-   an existing branch or worktree switches to it instead of creating anything.
+   an existing branch or worktree switches to it instead of creating anything;
+   worktrunk's own shortcuts — `^` the default branch, `-` the previous worktree,
+   `@` the current one, `pr:<n>` / `mr:<n>` a pull or merge request's branch —
+   switch too, with no branch created, and the new tab is labelled with what you
+   typed.
 3. The picker hands its answer back to the action `work_new_go`, which:
    - finds the project's session by label, creating it with a `main` tab in the
      main worktree when it is not there yet;
@@ -149,7 +153,8 @@ kept.
 A **project** is a repository. Rex has one session per project, labelled with the
 project's name (`pmm-iris`), and inside it one tab per worktree: the user's
 `main` tab in the main worktree, and one tab per branch in flight, labelled with
-the branch name exactly as typed (`bug/58h`).
+the branch name exactly as typed (`bug/58h` — or `@`, `^`, `-`, `pr:123` when a
+worktrunk shortcut was typed).
 
 - The session is found by its **label only**. A session called `pmm-iris-2` is
   not the project's, and nothing scans terminal directories or renames a session

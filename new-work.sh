@@ -83,8 +83,8 @@ wait_for_key() {
 }
 
 # The status a cancelled pick leaves with: an answer rather than a failure, so
-# the float closes on it the way esc always did. Named once, because the picker
-# exits with it and hold_pick has to recognise it.
+# the float closes on it the way esc always did. The usage text above says the
+# same number in prose, because a quoted heredoc cannot interpolate this one.
 cancelled=3
 
 # On the way out of pick -- usage_error's 2, die's 1, a missing tool's 1, rex's
@@ -141,7 +141,7 @@ pickable_rows() {
     ]
     | sort_by(.priority, .id)
     | .[]
-    | "\(.id)\t\((.title // "") | gsub("[\\t\\n\\r]+"; " "))"
+    | "\(.id)\t\((.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))"
   '
 }
 
@@ -308,8 +308,9 @@ cmd_candidates() {
   # --main is where git and wt are read, so a directory that is not there is
   # refused here, by name: left to candidate_rows it reaches `cd` inside a
   # subshell, whose failure reads as a line number in this script rather than as
-  # a place that does not exist.
-  if [ -n "$main" ]; then
+  # a place that does not exist. Only when one of those lookups will really be
+  # made: with both fixtures the directory is never read.
+  if [ -z "$wt_json" ] || [ -z "$refs" ]; then
     [ -d "$main" ] || die "candidates: no such directory: $main"
   fi
   command -v jq >/dev/null 2>&1 || die 'jq is required but was not found on PATH'
@@ -584,14 +585,15 @@ cmd_pick() {
       printf '%s: %s is not on the pickable list\n' "$PROG" "$bead" >&2
     fi
     # One lookup for both fields, one per line, so the empty issue_type cannot
-    # be lost to field splitting.
+    # be lost to field splitting. A title that is not a string is stringified
+    # first, as in pickable_rows: gsub cannot match a number.
     {
       read -r issue_type
       read -r title
     } < <(printf '%s\n' "$ready" | jq -r --arg id "$bead" '
           ([.[] | select(.id == $id)][0]) as $b
           | ($b.issue_type // ""),
-            (($b.title // "") | gsub("[\\t\\n\\r]+"; " "))')
+            (($b.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))')
   fi
 
   local candidates
@@ -603,8 +605,11 @@ cmd_pick() {
     local suggestion=''
     if [ -n "$bead" ]; then
       # A bead the list did not describe still gets a name: types outside the
-      # map fall back to feat, like the map itself does.
-      suggestion=$(cmd_branch_default --type "${issue_type:-other}" --id "$bead")
+      # map fall back to feat, like the map itself does. An id no name can be
+      # built from -- one ending in a dash -- is no reason to stop the pick with
+      # a usage dump: the prompt simply offers nothing.
+      suggestion=$(cmd_branch_default --type "${issue_type:-other}" --id "$bead" 2>/dev/null) ||
+        suggestion=''
     fi
     # Told before the prompt rather than packed into it, so the prompt stays one
     # short line whatever the reason for asking.
