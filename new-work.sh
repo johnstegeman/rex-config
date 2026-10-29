@@ -22,6 +22,10 @@ commands:
   candidates --main DIR [--wt-json FILE] [--refs FILE]
       print the branch names that already exist, one per line, worktree
       branches first
+  bases --main DIR [--base-refs FILE] [--base REF | --no-base]
+      print the bases the branch question opens on and cycles through, one
+      "ref<TAB>remote" row each, the opening answer first; an empty ref means
+      no --base at all, which leaves it to worktrunk
   fzf-answer STATUS
       read fzf's --print-query reply on stdin and print what it means as one
       "bead<TAB>prompt" row; STATUS is the status fzf exited with
@@ -32,10 +36,11 @@ commands:
       answer to Rex as one JSON object; exit 3 when no branch or agent was
       chosen, exit 2 when the name typed for a new branch is not a valid ref
 
---bd-json, --wt-json and --refs read saved tool output instead of asking the
-tools, which is how the tests and dry runs work: --bd-json stands in for bd, and
---wt-json with --refs for both of the lookups --main would be read for, so a run
-given all three never touches --main at all.
+--bd-json, --wt-json, --refs and --base-refs read saved tool output instead of
+asking the tools, which is how the tests and dry runs work: --bd-json stands in
+for bd, --wt-json with --refs for both of the lookups --main would be read for,
+and --base-refs for the one bases reads, so a run given all four never touches
+--main at all.
 
 The first question is one screen: the ready beads, with "✎  write a prompt
 instead" pinned on top. Text typed at the fzf prompt that matches no row is the
@@ -344,6 +349,141 @@ cmd_candidates() {
   command -v jq >/dev/null 2>&1 || die 'jq is required but was not found on PATH'
 
   candidate_rows "$main" "$wt_json" "$refs"
+}
+
+# The ref records `git for-each-ref` prints for refs/remotes and refs/heads, one
+# per line: the fixture when one is given (tests and dry runs), else the lookup.
+# A NUL cannot live in a shell variable, so it becomes the tab separating a
+# record's two fields -- no refname and no symref target can contain one.
+base_ref_records() {
+  local main=$1 fixture=$2
+  if [ -n "$fixture" ]; then
+    tr '\0' '\t' <"$fixture"
+  else
+    ( cd "$main" && git for-each-ref --format='%(refname)%00%(symref)' \
+        refs/remotes refs/heads ) | tr '\0' '\t'
+  fi
+}
+
+# The base cycle for --main: one "ref<TAB>remote" row each, the answer the
+# screen opens on first. One for-each-ref call settles every "does this ref
+# exist" question, and it is answered by whole refnames, so refs/heads/main/topic
+# cannot stand in for refs/heads/main. remote is the remote a ref lives on and
+# is empty for everything else, and it is the ref record that says so rather
+# than a slash in the name: feat/x is a local branch and nothing to fetch.
+base_chain() {
+  local main=$1 fixture=$2 base=$3 no_base=$4
+  local records
+
+  if ! records=$(base_ref_records "$main" "$fixture"); then
+    die "bases: could not read the refs of ${fixture:-$main}"
+  fi
+
+  printf '%s\n' "$records" | awk -F'\t' -v base="$base" -v no_base="$no_base" '
+    {
+      # An empty line is what an empty record list prints, not a ref.
+      if ($1 == "") next
+      refs[$1] = 1
+      symref[$1] = $2
+      if ($1 ~ /^refs\/remotes\//) {
+        short = $1
+        sub(/^refs\/remotes\//, "", short)
+        slash = index(short, "/")
+        if (slash > 1) remote_of[short] = substr(short, 1, slash - 1)
+      }
+    }
+
+    END {
+      # The answer the screen opens on. --no-base is the worktrunk default and
+      # --base names it outright, so neither asks the refs for one; otherwise
+      # origin/HEAD -- the branch this clone says it is a clone of -- is asked
+      # before any fixed name. Exact refname equality throughout, so a branch
+      # named main/something is not main.
+      if (no_base == "1") {
+        open = ""
+      } else if (base != "") {
+        open = base
+      } else if ("refs/remotes/origin/HEAD" in refs \
+                 && symref["refs/remotes/origin/HEAD"] != "") {
+        open = symref["refs/remotes/origin/HEAD"]
+        sub(/^refs\/remotes\//, "", open)
+      } else if ("refs/remotes/origin/main" in refs) {
+        open = "origin/main"
+      } else if ("refs/remotes/origin/master" in refs) {
+        open = "origin/master"
+      } else if ("refs/heads/main" in refs) {
+        open = "main"
+      } else if ("refs/heads/master" in refs) {
+        open = "master"
+      } else {
+        open = "@"
+      }
+
+      # The cycle: the opening answer first, then @, then main and master once
+      # this clone has them. @ is always offered -- it is what the branch
+      # question did before there was a cycle -- and first sighting wins.
+      n = 0
+      cand[++n] = open
+      cand[++n] = "@"
+      if ("refs/heads/main" in refs) cand[++n] = "main"
+      if ("refs/heads/master" in refs) cand[++n] = "master"
+
+      for (i = 1; i <= n; i++) {
+        if (cand[i] in seen) continue
+        seen[cand[i]] = 1
+        printf "%s\t%s\n", cand[i], ((cand[i] in remote_of) ? remote_of[cand[i]] : "")
+      }
+    }
+  '
+}
+
+# `new-work.sh bases --main DIR [--base-refs FILE] [--base REF | --no-base]`
+#
+# The bases the branch question cycles through, the one it opens on first, as
+# "ref<TAB>remote" rows. --base-refs reads a saved for-each-ref instead of
+# asking the repository, which is how the tests and dry runs work.
+cmd_bases() {
+  local main='' base_refs='' base='' no_base=''
+
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --main)
+        [ $# -ge 2 ] || usage_error 'bases: --main needs a directory'
+        main=$2
+        shift 2
+        ;;
+      --base-refs)
+        [ $# -ge 2 ] || usage_error 'bases: --base-refs needs a file'
+        base_refs=$2
+        shift 2
+        ;;
+      --base)
+        [ $# -ge 2 ] || usage_error 'bases: --base needs a value'
+        base=$2
+        shift 2
+        ;;
+      --no-base)
+        no_base=1
+        shift
+        ;;
+      *) usage_error "bases: unknown option $1" ;;
+    esac
+  done
+
+  if [ -z "$main" ] && [ -z "$base_refs" ]; then
+    usage_error 'bases: need --main DIR (or --base-refs FILE)'
+  fi
+  [ -z "$base" ] || [ -z "$no_base" ] ||
+    usage_error 'bases: --base and --no-base answer the same question'
+  # The refs are read from --main, so a directory that is not there is refused
+  # here, by name: left to base_chain it reaches `cd` inside a subshell, whose
+  # failure reads as a line number in this script rather than as a place that
+  # does not exist. With --base-refs the directory is never read.
+  if [ -z "$base_refs" ]; then
+    [ -d "$main" ] || die "bases: no such directory: $main"
+  fi
+
+  base_chain "$main" "$base_refs" "$base" "$no_base"
 }
 
 # `new-work.sh preview ID --main DIR`
@@ -931,6 +1071,10 @@ case ${1:-} in
   candidates)
     shift
     cmd_candidates "$@"
+    ;;
+  bases)
+    shift
+    cmd_bases "$@"
     ;;
   preview)
     shift

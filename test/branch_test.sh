@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# `new-work.sh branch-default` and `new-work.sh candidates`.
+# `new-work.sh branch-default`, `new-work.sh candidates` and `new-work.sh bases`.
 #
 # branch-default turns a bead's issue_type and id into the branch name the
 # picker offers; candidates collects the branch names that already exist so the
-# picker can offer them too. Both run without fzf.
+# picker can offer them too. bases resolves the ref a new branch starts from and
+# the short cycle of bases around it. All three run without fzf.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -200,6 +201,127 @@ elif ! grep -qx 'feat/real-one' "$tmp/out"; then
   fail "a failed wt list still lists git's branches" "output: $(cat "$tmp/out")"
 elif ! grep -qF "could not read the worktrees of $tmp/repo" "$tmp/err"; then
   fail "a failed wt list is said out loud" "stderr: $(cat "$tmp/err")"
+fi
+
+# The refs of a pretend repository, as bases reads them: exactly what
+#
+#   git for-each-ref --format='%(refname)%00%(symref)' refs/remotes refs/heads
+#
+# prints, one record per line -- the refname, a NUL, then that ref's symref
+# target, empty for everything but origin/HEAD. Arguments come in pairs, the
+# refname then the symref.
+base_refs_file() {
+  local file=$1
+  shift
+  : >"$file"
+  while [ $# -gt 0 ]; do
+    printf '%s\0%s\n' "$1" "$2" >>"$file"
+    shift 2
+  done
+}
+
+# bases <case name> <expected stdout> [args...]
+#
+# The whole of stdout is compared, so a row gained or lost fails the case. A
+# command substitution drops the closing newline, so each expectation ends with
+# the last row's two fields, and %q prints the tabs it holds as \t.
+run_bases() {
+  local name=$1 want=$2 got status
+  shift 2
+  ran=$((ran + 1))
+  got=$(./new-work.sh bases "$@" 2>"$tmp/err")
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "bases: $name" "exit $status: $(cat "$tmp/err")"
+    return
+  fi
+  if [ "$got" != "$want" ]; then
+    fail "bases: $name" "want $(printf '%q' "$want"), got $(printf '%q' "$got")"
+  fi
+}
+
+# The shape most cases start from: a clone of origin/main with both of the local
+# branches the cycle's tail offers.
+base_refs_file "$tmp/refs.base" \
+  refs/remotes/origin/main '' refs/heads/main '' refs/heads/master ''
+
+# origin/HEAD is the clone's own idea of the branch it tracks, so it is asked
+# before any fixed name.
+base_refs_file "$tmp/refs.head" \
+  refs/remotes/origin/HEAD refs/remotes/origin/trunk \
+  refs/remotes/origin/trunk '' refs/heads/main '' refs/heads/master ''
+run_bases 'origin/HEAD decides the opening answer' \
+  $'origin/trunk\torigin\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.head"
+
+# Without origin/HEAD the order is origin/main, origin/master, main, master.
+base_refs_file "$tmp/refs.origin-main" \
+  refs/remotes/origin/master '' refs/remotes/origin/main '' \
+  refs/heads/main '' refs/heads/master ''
+run_bases 'origin/main comes before origin/master' \
+  $'origin/main\torigin\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.origin-main"
+
+base_refs_file "$tmp/refs.origin-master" \
+  refs/remotes/origin/master '' refs/heads/main '' refs/heads/master ''
+run_bases 'origin/master is the opening answer when there is no origin/main' \
+  $'origin/master\torigin\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.origin-master"
+
+# The candidates are compared as whole refnames, so a branch that merely looks
+# like main -- or sits under it -- leaves nothing resolvable and @ opens.
+base_refs_file "$tmp/refs.maint" refs/heads/maint ''
+run_bases 'a local maint is not the main entry' \
+  $'@\t' --base-refs "$tmp/refs.maint"
+
+base_refs_file "$tmp/refs.topic" refs/heads/main/topic ''
+run_bases 'refs/heads/main/topic is not main' \
+  $'@\t' --base-refs "$tmp/refs.topic"
+
+base_refs_file "$tmp/refs.none"
+run_bases 'no refs at all opens on @, and @ is the whole cycle' \
+  $'@\t' --base-refs "$tmp/refs.none"
+
+# A configured base is the opening answer whatever it names, and the remote it
+# carries comes from the ref record -- upstream/main is on upstream, not origin.
+base_refs_file "$tmp/refs.upstream" \
+  refs/remotes/upstream/main '' refs/heads/main '' refs/heads/master ''
+run_bases '--base is the opening answer, on its own remote' \
+  $'upstream/main\tupstream\n@\t\nmain\t\nmaster\t' \
+  --base-refs "$tmp/refs.upstream" --base upstream/main
+
+# A slash is not what makes a ref remote-tracking: feat/x is a local branch and
+# carries no remote, so the tab does not try to fetch it.
+base_refs_file "$tmp/refs.feat" refs/heads/feat/x '' refs/heads/main '' refs/heads/master ''
+run_bases 'a local branch keeps an empty remote, slash or no slash' \
+  $'feat/x\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.feat" --base feat/x
+
+# A base this clone has not fetched, or has just deleted, is still the answer:
+# the picker does not get to refuse it, and main and master are still offered.
+run_bases 'an --base that resolves to nothing is still the answer' \
+  $'refresh\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.base" --base refresh
+
+# --no-base is the wt default sentinel: an empty ref field, then the same
+# cycle, because ctrl-r still moves off it.
+run_bases '--no-base opens on an empty ref' \
+  $'\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.base" --no-base
+
+# --base-refs is the whole source, so --main is never opened -- and a directory
+# that is not there therefore costs nothing. The mirror of the candidates case.
+run_bases '--base-refs is read instead of --main' \
+  $'origin/main\torigin\n@\t\nmain\t\nmaster\t' \
+  --main "$tmp/nowhere" --base-refs "$tmp/refs.base"
+
+# Reading the refs out of a real repository: --main with no fixture. Its one
+# branch is trunk, which is none of the names the chain knows.
+ran=$((ran + 1))
+git init -q "$tmp/base-repo" && git -C "$tmp/base-repo" -c user.email=t@example.com \
+  -c user.name=t commit -q --allow-empty -m init &&
+  git -C "$tmp/base-repo" branch -m trunk
+printf '@\t\n' >"$tmp/base.expected"
+./new-work.sh bases --main "$tmp/base-repo" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'bases from a repository' "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'bases from a repository' 'output differs from the expected cycle'
 fi
 
 if [ "$fails" -ne 0 ]; then
