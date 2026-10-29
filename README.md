@@ -74,12 +74,15 @@ looked up through your shell):
 | `bd` | beads, for `bd ready` and claiming the picked bead |
 | your agent | default `pi`; anything that takes a prompt argument works |
 | `bat` | optional, for the bead preview |
-| `git` | project resolution |
-| `bash` | `new-work.sh` is a bash script (`pipefail`, process substitution) |
 
 `git` and `bash` are the exceptions to that: they run under Rex's own `PATH` —
 the picker is started by its `#!/usr/bin/env bash` shebang — so they only need
 to be where Rex can find them.
+
+| Tool | Why |
+|---|---|
+| `git` | project resolution, branch-name checks and the branch candidate list |
+| `bash` | `new-work.sh` is a bash script (`pipefail`, process substitution) |
 
 Also needed:
 
@@ -175,7 +178,7 @@ the branch name exactly as typed (`bug/58h`).
   tab was created and names what failed. The tab is still there.
 - The tab could not be made at all: the error names what Rex said, and — since
   the bead was already claimed before the tab — how to hand the claim back
-  (`bd update <id> --status open --assignee ""`).
+  (`bd unclaim <id>`).
 
 ## Layout
 

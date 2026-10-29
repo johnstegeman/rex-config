@@ -77,6 +77,28 @@ not_eq("a map whose value changed does not compare equal",
   { type = "string" }, { type = "boolean" })
 not_eq("a map that lost its key does not compare equal", {}, { type = "boolean" })
 
+-- The guard on eq() itself, not only on same(): the two proofs above pass
+-- whichever comparison eq() uses, so re-inlining the old element-wise one into
+-- eq() would leave every map assertion in this file passing no matter what it
+-- was handed. A probe that has to fail proves the wiring. Its own FAIL line is
+-- sent to /dev/null -- a green run should not print one -- and the totals are
+-- put back, so the probe leaves no trace in them.
+do
+  local fails_before, count_before = fails, count
+  local saved_stderr, sink = io.stderr, io.open("/dev/null", "w")
+  if sink ~= nil then
+    io.stderr = sink
+  end
+  eq("the eq wiring probe", { type = "string" }, { type = "boolean" })
+  if sink ~= nil then
+    io.stderr = saved_stderr
+    sink:close()
+  end
+  local recorded = fails - fails_before
+  fails, count = fails_before, count_before
+  eq("eq records a map mismatch", recorded, 1)
+end
+
 -- For messages, where only the part that names the problem matters.
 local function contains(name, text, needle)
   count = count + 1
@@ -576,6 +598,21 @@ eq("a session with no windows still gets its tab", ok_empty, true)
 eq("a session with no windows makes the tab", field(empty, "created"), true)
 eq("a session with no windows still claims the bead", #stub.exec_calls, 1)
 
+-- A windows field that is there and is not a list is a shape this cannot read,
+-- not a session with no tabs: refused by name, so a second press cannot make a
+-- second tab and take a second claim.
+stub = new_branch_stub()
+stub.call_replies["session.attach"] = {
+  client_id = "client:app",
+  view = { session_id = "session:iris", windows = "main, tab" },
+}
+local ok_bad_windows, bad_windows = pcall(M.work_new_go, { origin = "cli" }, payload())
+eq("a view whose windows are not a list fails", ok_bad_windows, false)
+contains("the failure names what the windows were", bad_windows, "windows are a string")
+contains("the failure still names the tab list", bad_windows, "list of tabs")
+eq("a view whose windows are not a list makes no tab", #calls_to(stub, "session.new_window"), 0)
+eq("a view whose windows are not a list claims nothing", #stub.exec_calls, 0)
+
 -- A bead that cannot be claimed stops the flow before a tab is made: an agent
 -- started on an unclaimed bead is worse than an error.
 stub = new_branch_stub()
@@ -679,8 +716,7 @@ local ok_no_tab, no_tab = pcall(M.work_new_go, { origin = "cli" }, payload())
 eq("a tab that cannot be made fails", ok_no_tab, false)
 contains("the failure says what Rex said", no_tab, "no such session")
 contains("the failure says the bead is claimed", no_tab, "still claimed")
-contains("the failure says how to release the claim", no_tab,
-  'bd update ' .. BEAD .. ' --status open --assignee ""')
+contains("the failure says how to release the claim", no_tab, 'bd unclaim ' .. BEAD)
 
 -- With no bead there is no claim to release, so the remedy has no business
 -- in the message.
@@ -690,7 +726,7 @@ local ok_no_tab_no_bead, no_tab_no_bead = pcall(M.work_new_go, { origin = "cli" 
   payload{ bead = "", title = "" })
 eq("a tab that cannot be made fails without a bead too", ok_no_tab_no_bead, false)
 contains("no bead means no claim to release", no_tab_no_bead, "no such session")
-eq("no bead means no release advice", tostring(no_tab_no_bead):find("bd update", 1, true), nil)
+eq("no bead means no release advice", tostring(no_tab_no_bead):find("bd unclaim", 1, true), nil)
 
 -- The action's declaration ----------------------------------------------------
 

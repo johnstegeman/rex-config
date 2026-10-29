@@ -76,6 +76,27 @@ not_eq("a map whose value changed does not compare equal",
   { type = "string" }, { type = "boolean" })
 not_eq("a map that lost its key does not compare equal", {}, { type = "boolean" })
 
+-- The guard on eq() itself, not only on same(), as in action_test.lua: the two
+-- proofs above pass whichever comparison eq() uses, so re-inlining the old
+-- element-wise one into eq() would leave every map assertion here passing no
+-- matter what it was handed. A probe that has to fail proves the wiring; its
+-- FAIL line is swallowed and the totals are put back afterwards.
+do
+  local fails_before, count_before = fails, count
+  local saved_stderr, sink = io.stderr, io.open("/dev/null", "w")
+  if sink ~= nil then
+    io.stderr = sink
+  end
+  eq("the eq wiring probe", { type = "string" }, { type = "boolean" })
+  if sink ~= nil then
+    io.stderr = saved_stderr
+    sink:close()
+  end
+  local recorded = fails - fails_before
+  fails, count = fails_before, count_before
+  eq("eq records a map mismatch", recorded, 1)
+end
+
 -- For messages, where only the part that names the problem matters.
 local function contains(name, text, needle)
   count = count + 1
@@ -218,7 +239,7 @@ end
 
 -- setup() -------------------------------------------------------------------
 
-eq("setup returns the module", M.setup{}, M)
+eq("setup returns the module", M.setup{} == M, true)
 eq("agent default", M.options.agent, "pi")
 eq("agent_args default", M.options.agent_args, {})
 eq("bead_prompt default", M.options.bead_prompt, "/brainstorming for bead {id}")
@@ -249,6 +270,13 @@ contains("the warning names the option", rex_stub.warns[#rex_stub.warns].message
 eq("an unknown option is not kept", M.options.nope, nil)
 eq("an unknown option leaves the others alone", M.options.agent, "claude")
 eq("a repeated setup registers nothing new", #rex_stub.actions, 2)
+
+-- A string where a list belongs is one ipairs away from failing in the middle of
+-- building a tab, so setup refuses it by name.
+local ok_args, args_message = pcall(M.setup, { agent_args = "--thinking high" })
+eq("a non-table agent_args is refused", ok_args, false)
+contains("a non-table agent_args names the option", args_message, "agent_args")
+eq("a refused agent_args leaves the option a list", type(M.options.agent_args), "table")
 
 -- The login shell -------------------------------------------------------
 --
@@ -329,6 +357,14 @@ stub = project_stub()
 stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "", stderr = "" }
 eq("empty listing message", select(2, M.project_for("/x/pmm-iris/main")),
   "could not read the worktrunk listing for /x/pmm-iris: rex.json.decode: text is not valid JSON")
+
+-- Valid JSON that is not an object -- a string, a number, null -- decodes without
+-- a reason, so the message has to say what arrived instead of claiming there was
+-- no value at all.
+stub = project_stub()
+stub.json_replies["wt list"] = "just a string"
+eq("a listing that is not an object message", select(2, M.project_for("/x/pmm-iris/main")),
+  "could not read the worktrunk listing for /x/pmm-iris: the listing decoded to a string, not an object")
 
 -- has_beads() ---------------------------------------------------------------
 

@@ -248,6 +248,24 @@ if ! grep -qx "shell pwd: $start" "$tmp/out" || ! grep -q jq "$tmp/err"; then
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 
+# The switch itself worked, so the failing step is reading the path out of its
+# reply: the message names that step rather than reporting a bare "exit 0", which
+# would send a reader looking for a switch that never failed.
+ran=$((ran + 1))
+if ! grep -q 'could not read the worktree path' "$tmp/err"; then
+  fail "a reply with no readable path names the failing step" "stderr: $(cat "$tmp/err")"
+fi
+
+# A worktree path that starts with a dash: `cd -dash` is a bad option to every
+# shell, so the wrapper has to end the options before handing the path over.
+ran=$((ran + 1))
+mkdir -p "$start/-dash"
+TEST_WT_PATH=-dash run_wrapper 0 feat/x1 "" agent "/brainstorming"
+if ! grep -qx "agent pwd: $start/-dash" "$tmp/out"; then
+  fail "a worktree path starting with a dash is entered" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
 # A path worktrunk reported but the shell cannot enter -- the worktree going away
 # between the switch and the cd. The agent must not run there either, and the
 # pane still gets its shell, in the tab's directory.

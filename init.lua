@@ -27,7 +27,10 @@ end
 -- project at all, so a relative input returns nil instead of empty strings --
 -- callers must ask git for the absolute form and handle nil.
 function M.project_from_common_dir(common_dir)
-  local dir = (common_dir or ""):gsub("/+$", "")
+  if type(common_dir) ~= "string" then
+    return nil
+  end
+  local dir = common_dir:gsub("/+$", "")
   if not dir:match("^/") then
     return nil
   end
@@ -61,7 +64,10 @@ function M.main_worktree(list_json)
       else
         path, is_main = item.path, item.is_main
       end
-      if is_main == true and type(path) == "string" then
+      -- A literal true is what rex.json.decode gives for `"main": true`; the
+      -- string form is read the same way, because a producer that quoted the
+      -- flag would otherwise lose the main worktree and refuse the project.
+      if (is_main == true or is_main == "true") and type(path) == "string" then
         return path
       end
     end
@@ -191,12 +197,23 @@ if [ "$switched" -eq 0 ]; then
 fi
 
 if [ -z "$path" ]; then
-  printf 'rex-config: wt switch %s reported no worktree path (exit %s); not starting %s\n' \
-    "$branch" "$switched" "$agent" >&2
+  # Two steps can leave no path: a switch that failed, whose own message is already
+  # on this pane, or a switch that worked and a reply whose path cannot be read
+  # (jq missing, or no path in it). Naming the step that went wrong is the point of
+  # the line, so neither case says "no path (exit 0)".
+  if [ "$switched" -eq 0 ]; then
+    printf 'rex-config: could not read the worktree path of %s from the switch reply (jq missing, or no path in it); not starting %s\n' \
+      "$branch" "$agent" >&2
+  else
+    printf 'rex-config: wt switch %s failed (exit %s); not starting %s\n' \
+      "$branch" "$switched" "$agent" >&2
+  fi
   leave_shell
 fi
 
-cd "$path" || {
+# `cd --` ends the options: a path that starts with a dash is a directory like
+# any other, not a flag the shell refuses.
+cd -- "$path" || {
   printf 'rex-config: could not enter %s; not starting %s\n' "$path" "$agent" >&2
   leave_shell
 }
@@ -357,13 +374,19 @@ function M.project_for(cwd)
       .. first_line(listed and listed.stderr or list_reason)
   end
 
-  -- main_worktree compares the main flag with true, so it needs the decoded
-  -- document; raw JSON text is never a boolean. rex.json.decode reports bad text
-  -- by returning nil and a reason rather than raising, so the value decides.
+  -- main_worktree reads the decoded document, not raw text: raw JSON is never a
+  -- table. rex.json.decode reports bad text by returning nil and a reason rather
+  -- than raising, so the value decides -- and what it is, when it is not an
+  -- object, is what the message names.
   local decoded, decode_reason = rex.json.decode(listed.stdout or "")
   if type(decoded) ~= "table" then
-    return nil, "could not read the worktrunk listing for " .. project.root .. ": "
-      .. (decode_reason and tostring(decode_reason) or "no JSON value")
+    local why
+    if decode_reason ~= nil then
+      why = tostring(decode_reason)
+    else
+      why = "the listing decoded to a " .. type(decoded) .. ", not an object"
+    end
+    return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. why
   end
   local main = M.main_worktree(decoded)
   if main == nil then
@@ -523,14 +546,22 @@ local function attach_session(session_id)
   if type(attached) ~= "table" or type(attached.view) ~= "table" then
     return nil, "session.attach returned no view, so there is no list of tabs"
   end
-  if type(attached.view.windows) ~= "table" then
-    -- A view without windows is a session with none: the server leaves an empty
-    -- list out (measured: a session created with no windows answers attach with
-    -- label, revision and session_id only), so this is where the first tab comes
-    -- from. Only a missing view means the list cannot be known.
+  -- A view without windows is a session with none: the server leaves an empty
+  -- list out (measured: a session created with no windows answers attach with
+  -- label, revision and session_id only), so this is where the first tab comes
+  -- from. A windows field that is there and is not a list is a third thing -- a
+  -- shape this cannot read -- so it is refused by name rather than counted as
+  -- an empty session: otherwise every press would make another tab and another
+  -- claim.
+  local windows = attached.view.windows
+  if windows == nil then
     return {}
   end
-  return attached.view.windows
+  if type(windows) ~= "table" then
+    return nil, "session.attach returned a view whose windows are a " .. type(windows)
+      .. ", so there is no list of tabs"
+  end
+  return windows
 end
 
 -- The project's session, made when it is not there yet with one tab called
@@ -709,11 +740,11 @@ function M.work_new_go(ctx, args)
     -- The claim was taken before the tab, so this is the one failure that can
     -- leave a bead in progress with nothing working on it. Saying how to give
     -- it back is the remedy; without it the bead would have to be found and
-    -- released by hand.
+    -- released by hand. `bd unclaim` is bd's own word for exactly that, with no
+    -- quoting to mistype.
     local release = ""
     if type(args.bead) == "string" and args.bead ~= "" then
-      release = "; the bead is still claimed, so release it with: bd update "
-        .. args.bead .. ' --status open --assignee ""'
+      release = "; the bead is still claimed, so release it with: bd unclaim " .. args.bead
     end
     error("could not make the " .. branch .. " tab in the " .. project .. " session: "
       .. create_reason .. release, 0)
@@ -736,6 +767,13 @@ local actions_registered = false
 function M.setup(opts)
   for key, value in pairs(opts or {}) do
     if KNOWN_OPTION[key] then
+      -- agent_args is spread into the tab's argv, so a string here would be one
+      -- option away from an ipairs over a non-table: refused at setup, naming
+      -- the option, rather than raised from the middle of building a tab.
+      if key == "agent_args" and type(value) ~= "table" then
+        error(string.format(
+          'rex-config: agent_args must be a list of arguments, not a %s', type(value)), 0)
+      end
       M.options[key] = value
     else
       rex.log("warn", string.format('rex-config: unknown option "%s" ignored; options are %s',

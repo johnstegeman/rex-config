@@ -100,11 +100,11 @@ directory, as a tab in the project's own session.
 >
 > - **The branch question is a typed prompt, not a picker.** There is no
 >   `fzf --print-query` stage: `new-work.sh` prints `branch [bug/58h]> `, a bare
->   Enter accepts the bead-derived name (so a new name is kept, which a picker
->   over existing branches could not offer), and anything typed is the branch
->   exactly as typed, trimmed of surrounding whitespace. The candidate list is
->   still consulted — afterwards — to decide whether the name is a worktree to
->   switch to or one to create.
+>   Enter accepts the bead-derived name (so the typed name is the branch, with
+>   nothing to reconcile between a query and a selection), and anything typed is
+>   the branch exactly as typed, trimmed of surrounding whitespace. The candidate
+>   list is still consulted — afterwards — to decide whether the name is a
+>   worktree to switch to or one to create.
 > - **The tab runs a `sh` wrapper, with no `-x` and no kept-open pane.** It is
 >   `wt switch [--create <branch> --base <base>] --no-cd --format=json` → read
 >   `.path` with `jq` → `cd` there → the agent with its prompt →
@@ -144,7 +144,9 @@ directory, as a tab in the project's own session.
      *Superseded: the branch question is a typed prompt — see “Superseded (owner
      decisions after this design)” above.*
 5. `new-work.sh` hands back:
-   `rex do work_new_go project=… root=… main=… branch=… bead=… type=… title=…`
+   `rex do work_new_go --args '<json>'`, one JSON object with the keys `project`,
+   `root`, `main`, `branch`, `bead`, `title` and `create`, so no value is ever
+   interpolated into a command line
 6. `work_new_go` (Lua):
    - resolves the project session by label = project name, creating it (with a
      `main` tab in the main worktree) when absent;
@@ -306,7 +308,8 @@ The repository is cloned into Rex's configuration directory, the way
 ```
 ~/.config/rex/rex-config/      # git clone of this repo
   init.lua                     # module: actions, config, project/session logic
-  new-work.sh                  # fzf pickers; hands back with `rex do work_new_go`
+  new-work.sh                  # the bead picker and the branch prompt; hands back
+                               # with `rex do work_new_go --args <json>`
   test/                        # shell tests
   docs/superpowers/specs/      # this design
   README.md
@@ -325,6 +328,8 @@ The repo's `.beads/` directory travels with the clone and is inert there.
 
 - Exact `fzf` bindings, header text, and the look of the two prompts — including
   whether the bead and branch questions read as two steps or one screen.
+  *Superseded: the bead question is the picker and the branch question a typed
+  prompt — see “Superseded (owner decisions after this design)”.*
 - How the Lua module quotes and assembles the `wt switch … -x … -- <prompt>`
   command for `rex window new` (argument boundaries matter; the prompt contains
   spaces and slashes). *Superseded: the tab's command is the `sh` wrapper above,

@@ -6,6 +6,12 @@
 # driven without a terminal, so it is bypassed with --bead or served by saved
 # tool output (--bd-json/--wt-json/--refs). The branch question is typed, so its
 # answers arrive on stdin like a person's would.
+#
+# Three things are outside what a pipe can reach, so a pty and a hand are what
+# verify them: the prompt text `branch [name]> ` as it appears on a terminal, the
+# rule that it is printed only to a terminal, and the float's hold-on-failure (a
+# keypress is waited for once, with stdin a terminal). Everything else here runs
+# the real code path.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -199,6 +205,52 @@ if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
     "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
 fi
 
+# (b4) The worktrunk shortcuts are answers, not names: ^ is the default branch,
+# - the previous worktree, @ the current one, pr:N a pull request's branch. None
+# of them is a ref to create and git refuses most of them, so they are handed to
+# worktrunk as the switch they are.
+pick_shortcut() {
+  local name=$1 branch=$2 filter=$3
+  ran=$((ran + 1))
+  run_pick test/fixtures/ready.json --bead '' --branch "$branch" --dry-run
+  if [ "$status" -ne 0 ]; then
+    fail "the $name shortcut is accepted" "exit $status: $(cat "$tmp/err")"
+    return
+  fi
+  if ! json=$(payload_of "$(cat "$tmp/out")"); then
+    fail "the $name shortcut prints runnable rex do work_new_go --args" \
+      "stdout: $(cat "$tmp/out")"
+    return
+  fi
+  assert_json "the $name shortcut is handed over as typed" "$json" "$filter"
+  assert_json "the $name shortcut is a switch" "$json" '.create == false'
+}
+pick_shortcut 'default branch' '^' '.branch == "^"'
+pick_shortcut 'previous worktree' '-' '.branch == "-"'
+pick_shortcut 'current worktree' '@' '.branch == "@"'
+pick_shortcut 'pull request' 'pr:123' '.branch == "pr:123"'
+
+# A pr: that is not a number is not a shortcut, and no branch name either.
+ran=$((ran + 1))
+run_pick test/fixtures/ready.json --bead '' --branch 'pr:abc' --dry-run
+if [ "$status" -ne 2 ]; then
+  fail "a pr: without a number exits 2" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF 'new-work.sh: not a valid branch name: pr:abc' "$tmp/err"; then
+  fail "a pr: without a number says so" "stderr: $(cat "$tmp/err")"
+fi
+
+# (b5) `git check-ref-format --branch` *expands* a name like @{-1} and prints
+# what it resolved to, so the check on its own would let the literal through and
+# worktrunk would try to create a branch called @{-1}. The reply has to be the
+# name that went in.
+ran=$((ran + 1))
+run_pick test/fixtures/ready.json --bead '' --branch '@{-1}' --dry-run
+if [ "$status" -ne 2 ]; then
+  fail "a name git only expands exits 2" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF 'new-work.sh: not a valid branch name: @{-1}' "$tmp/err"; then
+  fail "a name git only expands says so" "stderr: $(cat "$tmp/err")"
+fi
+
 # (c) --bead '' answers the bead question with "none": the bead stage is not
 # asked at all, so no fzf runs and the payload carries no bead and no title.
 rm -f "$tmp/fzf-ran"
@@ -390,6 +442,28 @@ elif ! grep -qx 'jq not found on PATH — press any key' "$tmp/err"; then
   fail "missing tool is named" "stderr: $(cat "$tmp/err")"
 fi
 
+# git is load-bearing on the create path -- check-ref-format decides whether a
+# name can be made, for-each-ref is the branch list -- so a missing one is named
+# rather than every name coming back "not a valid branch name".
+mkdir -p "$tmp/no-git-bin"
+for tool in bash cat cut grep sed awk tr jq; do
+  found=$(command -v "$tool") || continue
+  ln -sf "$found" "$tmp/no-git-bin/$tool"
+done
+ran=$((ran + 1))
+PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --bead pmm-iris-a4l --branch feat/needs-git --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 1 ]; then
+  fail "a missing git exits 1" "exit $status: $(cat "$tmp/err")"
+elif ! grep -q 'git not found on PATH' "$tmp/err"; then
+  fail "a missing git is named" "stderr: $(cat "$tmp/err")"
+fi
+
 # Every tool the run needs except fzf: with no terminal nothing is asked, so the
 # run must reach the empty-branch exit instead of complaining about fzf.
 mkdir -p "$tmp/no-fzf-bin"
@@ -448,6 +522,22 @@ pick_no
 pick_no --main /p/demo/main
 pick_no --main /p/demo/main --root /p/demo
 pick_no --main /p/demo/main --root /p/demo --project demo --nope
+
+# (h2) A --main that is not there is refused by name, before anything is read
+# from it: left to the pipelines it surfaces as bash's own `cd` error, which
+# names a line of this script rather than a place on the disk.
+ran=$((ran + 1))
+./new-work.sh pick --main "$tmp/nowhere" --root /p/demo --project demo \
+  --bead '' --branch feat/x --dry-run </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 1 ]; then
+  fail "a --main that is not there exits 1" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF "new-work.sh: pick: no such directory: $tmp/nowhere" "$tmp/err"; then
+  fail "a --main that is not there is named" "stderr: $(cat "$tmp/err")"
+elif grep -q 'cd:' "$tmp/err"; then
+  fail "a --main that is not there is named" \
+    "bash's own cd error is still in: $(cat "$tmp/err")"
+fi
 
 # (i) preview: `bd show` reads better through bat, and still works without it.
 mkdir -p "$tmp/preview-bin"
@@ -575,8 +665,8 @@ if [ "$status" -eq 0 ]; then
   fail "a refused hand-back exits non-zero" "exit 0: $(cat "$tmp/err")"
 elif ! grep -qF 'could not claim pmm-iris-58h' "$tmp/err"; then
   fail "a refused hand-back shows rex's reason" "stderr: $(cat "$tmp/err")"
-elif ! grep -qF 'new-work.sh: Rex did not start the work' "$tmp/err"; then
-  fail "a refused hand-back says nothing was started" \
+elif ! grep -qF 'new-work.sh: Rex could not finish the hand-back' "$tmp/err"; then
+  fail "a refused hand-back says it did not finish" \
     "stderr: $(cat "$tmp/err")"
 fi
 ran=$((ran + 1))
@@ -589,8 +679,9 @@ if [ -s "$tmp/out" ]; then
 fi
 
 # (m) The same failure with no terminal returns at once: the hold would wait
-# for a key that is never coming. stdin is a pipe that stays open and silent,
-# so a read of it would block for the whole five seconds.
+# for a key that is never coming. stdin is a pipe that stays open and silent for
+# ten seconds, so a read of it would block for all ten -- the threshold is half
+# of that, so a loaded machine cannot make a real wait pass for a return.
 start=$SECONDS
 rm -f "$tmp/rex-args"
 PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args REX_FAIL='no server' \
@@ -598,15 +689,15 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args REX_FAIL='no server' \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
   --bead pmm-iris-a4l --branch bug/a4l \
-  >"$tmp/out" 2>"$tmp/err" < <(sleep 5)
+  >"$tmp/out" 2>"$tmp/err" < <(sleep 10)
 status=$?
 elapsed=$((SECONDS - start))
 ran=$((ran + 1))
 if [ "$status" -eq 0 ]; then
   fail "no terminal: a refused hand-back still fails" "exit 0"
-elif [ "$elapsed" -ge 3 ]; then
+elif [ "$elapsed" -ge 5 ]; then
   fail "no terminal never waits for a keypress" "waited ${elapsed}s"
-elif ! grep -qF 'new-work.sh: Rex did not start the work' "$tmp/err"; then
+elif ! grep -qF 'new-work.sh: Rex could not finish the hand-back' "$tmp/err"; then
   fail "no terminal: the failure is still printed" "stderr: $(cat "$tmp/err")"
 fi
 

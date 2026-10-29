@@ -29,7 +29,9 @@ commands:
       a new branch is not a valid ref
 
 --bd-json, --wt-json and --refs read saved tool output instead of asking the
-tools, which is how the tests and dry runs work.
+tools, which is how the tests and dry runs work: --bd-json stands in for bd, and
+--wt-json with --refs for both of the lookups --main would be read for, so a run
+given all three never touches --main at all.
 
 pick's --bead and --branch answer a question instead of asking it, and an
 empty value means none. The branch question is typed, with the bead's name
@@ -80,13 +82,17 @@ wait_for_key() {
   read -r -s -n 1 _ || true
 }
 
+# The status a cancelled pick leaves with: an answer rather than a failure, so
+# the float closes on it the way esc always did. Named once, because the picker
+# exits with it and hold_pick has to recognise it.
+cancelled=3
+
 # On the way out of pick -- usage_error's 2, die's 1, a missing tool's 1, rex's
 # own status -- hold the float with the failure still on screen. A cancelled
-# pick (3) is an answer rather than a failure, so esc closes the picker the way
-# it always did.
+# pick is an answer rather than a failure, so it is left alone.
 hold_pick() {
   local status=$?
-  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && [ "$held" -eq 0 ]; then
+  if [ "$status" -ne 0 ] && [ "$status" -ne "$cancelled" ] && [ "$held" -eq 0 ]; then
     wait_for_key
   fi
   exit "$status"
@@ -118,17 +124,22 @@ ready_json() {
 # Rows for the beads a person can actually start work on, from `bd ready --json`
 # on stdin. Out go the things that are not work: molecule steps (dotted ids),
 # molecule and gate container beads, and step:* labels. Rows are
-# "id<TAB>title", sorted by priority then id.
+# "id<TAB>title", sorted by priority then id. A title is flattened to one line
+# and a missing id or priority gets a value, so a producer that is not bd itself
+# cannot split a row or stop the listing; what the picker hands back is read from
+# the JSON again, so this is for reading only.
 pickable_rows() {
   jq -r '
     [ .[]
+      | .id //= ""
+      | .priority //= 999
       | select(.id | contains(".") | not)
       | select(.issue_type != "molecule" and .issue_type != "gate")
       | select([.labels[]? | startswith("step:")] | any | not)
     ]
     | sort_by(.priority, .id)
     | .[]
-    | "\(.id)\t\(.title)"
+    | "\(.id)\t\((.title // "") | gsub("[\\t\\n\\r]+"; " "))"
   '
 }
 
@@ -159,7 +170,14 @@ cmd_beads() {
   fi
   command -v jq >/dev/null 2>&1 || die 'jq is required but was not found on PATH'
 
-  ready_json "$main" "$fixture" | pickable_rows
+  # bd's own error above says what went wrong; this line says where, since the
+  # directory is the half of it that a person can act on.
+  local ready
+  if ! ready=$(ready_json "$main" "$fixture"); then
+    die "beads: could not read the ready beads from ${fixture:-$main}"
+  fi
+
+  printf '%s\n' "$ready" | pickable_rows
 }
 
 # `new-work.sh branch-default --type TYPE --id ID`
@@ -190,7 +208,7 @@ cmd_branch_default() {
   [ -n "$type" ] || usage_error 'branch-default: need --type TYPE'
   [ -n "$id" ] || usage_error 'branch-default: need --id ID'
 
-  local prefix
+  local prefix short
   case $type in
     bug) prefix=bug ;;
     chore) prefix=chore ;;
@@ -199,7 +217,13 @@ cmd_branch_default() {
     *) prefix=feat ;;
   esac
 
-  printf '%s/%s\n' "$prefix" "${id##*-}"
+  # Only the last dash-separated segment is kept, and an id that ends in a dash,
+  # or is nothing but dashes, leaves no segment at all: "feat/" is not a ref, so
+  # it is refused here rather than handed to worktrunk.
+  short=${id##*-}
+  [ -n "$short" ] || usage_error "branch-default: --id $id leaves no name to use"
+
+  printf '%s/%s\n' "$prefix" "$short"
 }
 
 # Branch names out of `wt list --format=json`. Schema 2 puts the branch on the
@@ -220,14 +244,22 @@ wt_branches() {
 # first sighting wins.
 candidate_rows() {
   local main=$1 wt_json=$2 refs=$3
+  local listing
 
   {
     if [ -n "$wt_json" ]; then
       wt_branches <"$wt_json"
     elif [ -n "$main" ]; then
-      # A repository worktrunk cannot read still has branches git can name,
-      # so a broken `wt` costs the picker its worktree rows, not the command.
-      ( cd "$main" && wt list --format=json ) 2>/dev/null | wt_branches || true
+      # A repository worktrunk cannot read still has branches git can name, so a
+      # broken `wt` costs the picker its worktree rows, not the command. The loss
+      # is said out loud, naming the directory: a branch left out of the list is
+      # one the picker would offer to create rather than switch to.
+      if listing=$( cd "$main" && wt list --format=json ); then
+        printf '%s\n' "$listing" | wt_branches
+      else
+        printf '%s: could not read the worktrees of %s; only its git branches are listed\n' \
+          "$PROG" "$main" >&2
+      fi
     fi
 
     if [ -n "$refs" ]; then
@@ -371,6 +403,35 @@ pick_branch() {
   printf '%s\n' "$answer"
 }
 
+# The shortcuts `wt switch` resolves itself -- ^ the default branch, - the previous
+# worktree, @ the current one, pr:N and mr:N the branch of a pull or merge
+# request -- are answers rather than names to create: they are neither refs that
+# could be made nor names `git check-ref-format` accepts, and worktrunk is the one
+# that knows what they mean.
+is_wt_shortcut() {
+  case $1 in
+    '^' | '-' | '@') return 0 ;;
+    pr:* | mr:*)
+      case ${1#*:} in
+        '' | *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+# Whether worktrunk could create a branch with this name.
+# `git check-ref-format --branch` is the test, with one twist: it *expands* a
+# name like @{-1} and prints what that resolved to, so only an answer equal to
+# the input means the input itself is a branch name. Without the comparison the
+# literal @{-1} would pass the check and be created as a branch so named.
+valid_branch_name() {
+  local resolved
+  resolved=$(git check-ref-format --branch "$1" 2>/dev/null) || return 1
+  [ "$resolved" = "$1" ]
+}
+
 # `new-work.sh pick --main DIR --root PATH --project NAME [--base B]`
 #       `[--bead ID] [--branch NAME] [--dry-run]`
 #
@@ -450,6 +511,15 @@ cmd_pick() {
   need_absolute 'pick: --main' "$main"
   need_absolute 'pick: --root' "$root"
 
+  # --main is where bd, wt and git are read, so a directory that is not there is
+  # refused here, by name: left to the pipelines below it reaches `cd` inside a
+  # subshell, whose failure reads as a line number in this script rather than as a
+  # place that does not exist. Only when one of those lookups will really be made:
+  # a run given all three fixtures never touches --main.
+  if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ]; then
+    [ -d "$main" ] || die "pick: no such directory: $main"
+  fi
+
   # The picker's own requirements, before any work. fzf is asked for only where
   # the bead question will really be asked -- in the float, where stdin is a
   # terminal -- so a scripted run is not stopped by a tool it would never call:
@@ -461,6 +531,10 @@ cmd_pick() {
   [ -n "$wt_json" ] || need wt
   need jq
   [ -n "$bd_json" ] || need bd
+  # check-ref-format keeps an uncreatable name out of the new tab and
+  # for-each-ref is the branch list, so git is not optional either: without it
+  # every name would come back "not a valid branch name".
+  need git
 
   local ready rows
   if ! ready=$(ready_json "$main" "$bd_json"); then
@@ -538,20 +612,22 @@ cmd_pick() {
 
   if [ -z "$branch" ]; then
     printf '%s: no branch given, nothing to start\n' "$PROG" >&2
-    exit 3
+    exit "$cancelled"
   fi
 
-  # An exact match is a worktree that already exists: switch to it. Anything
-  # else is a name to create, even when it looks like something on the list.
+  # An exact match is a worktree that already exists: switch to it. So is a
+  # worktrunk shortcut -- worktrunk resolves what ^, -, @, pr:N and mr:N mean --
+  # and neither is a name to check or a ref to create. Anything else is a name to
+  # create, even when it looks like something on the list.
   local create=true
-  if printf '%s\n' "$candidates" | grep -Fxq -- "$branch"; then
+  if is_wt_shortcut "$branch" ||
+    printf '%s\n' "$candidates" | grep -Fxq -- "$branch"; then
     create=false
   fi
 
   # A name to create has to be one worktrunk can actually create: better to say
   # so here, where the float is still on screen, than in the new tab's output.
-  if [ "$create" = true ] &&
-    ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+  if [ "$create" = true ] && ! valid_branch_name "$branch"; then
     printf '%s: not a valid branch name: %s\n' "$PROG" "$branch" >&2
     exit 2
   fi
@@ -575,12 +651,12 @@ cmd_pick() {
 
   # The hand-back is the last thing that can fail here, and the one failure that
   # used to leave nothing on screen: rex prints why it refused on this terminal,
-  # and a line of ours says nothing was started even when rex says nothing at
-  # all. hold_pick keeps it there while the float still exists.
+  # and a line of ours says the hand-back did not finish even when rex says
+  # nothing at all. hold_pick keeps it there while the float still exists.
   local handed=0
   rex do work_new_go --args "$payload" || handed=$?
   if [ "$handed" -ne 0 ]; then
-    die "Rex did not start the work: rex exited $handed"
+    die "Rex could not finish the hand-back: rex exited $handed"
   fi
 }
 

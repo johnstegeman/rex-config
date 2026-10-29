@@ -62,6 +62,17 @@ run_branch_default_missing() {
   fi
 }
 run_branch_default_missing --type bug
+
+# An id ending in a dash leaves no last segment, so the name would be "bug/":
+# not a ref, and refused by name rather than handed to worktrunk.
+ran=$((ran + 1))
+./new-work.sh branch-default --type bug --id pmm-iris- >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 2 ]; then
+  fail "an id ending in a dash exits 2" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF 'branch-default: --id pmm-iris- leaves no name to use' "$tmp/err"; then
+  fail "an id ending in a dash says why" "stderr: $(cat "$tmp/err")"
+fi
 run_branch_default_missing --id pmm-iris-a4l
 run_branch_default_missing
 
@@ -133,6 +144,29 @@ ran=$((ran + 1))
 status=$?
 if [ "$status" -ne 2 ]; then
   fail "candidates without --main exits 2" "exit $status: $(cat "$tmp/err")"
+fi
+
+# A worktrunk that cannot read the repository: its worktree rows are lost, but
+# git's branches still come through -- and the partial list says so, naming the
+# directory, because a branch missing from it is one the picker would offer to
+# create rather than switch to.
+mkdir -p "$tmp/bad-wt"
+cat >"$tmp/bad-wt/wt" <<'EOF'
+#!/bin/sh
+printf 'wt: not a worktrunk repository\n' >&2
+exit 1
+EOF
+chmod +x "$tmp/bad-wt/wt"
+ran=$((ran + 1))
+PATH="$tmp/bad-wt:$PATH" ./new-work.sh candidates --main "$tmp/repo" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a failed wt list still lists git's branches" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qx 'feat/real-one' "$tmp/out"; then
+  fail "a failed wt list still lists git's branches" "output: $(cat "$tmp/out")"
+elif ! grep -qF "could not read the worktrees of $tmp/repo" "$tmp/err"; then
+  fail "a failed wt list is said out loud" "stderr: $(cat "$tmp/err")"
 fi
 
 if [ "$fails" -ne 0 ]; then
