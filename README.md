@@ -37,7 +37,10 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    branch and the base a new branch is created from — and a key repaints it in
    place. The list, the text typed at the prompt and every answer a key did not
    touch stay as they were; the cursor starts on the bead the list leads with —
-   the prompt row when there is no bead — so a bare `enter` takes it.
+   the prompt row when there is no bead — so a bare `enter` takes it. One field
+   is only ever seeded: the branch is the leading bead's name and moving the
+   cursor does not recompute it, so a bead picked lower down hands back the name
+   that bead derives instead (below).
 
    | Key | What it does |
    |---|---|
@@ -60,11 +63,13 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    `<prefix>/<short-id>`, e.g. `bug/a4l` for `pmm-iris-a4l` — so a bare `enter`
    creates exactly that. A bead picked further down the list derives its own name
    at the hand-back, and a branch typed at `ctrl-b` wins over both: the name you
-   typed is the one the tab is given. A bead-less answer — typed text, or the `✎`
-   row — has no bead to take a name from, so the screen asks for one after it
-   closes, in a field opened on whatever the header held; `enter` there keeps
-   that name, and `esc` cancels the pick. Typing the name of an existing branch
-   or worktree switches to it instead of creating anything; worktrunk's own
+   typed is the one the tab is given, and it is not asked for again. A bead-less
+   answer — typed text, the `✎` row, or `esc`'s no bead — has no bead to take a
+   name from, so the screen asks for one after it closes, in a field that opens
+   empty: the header's branch belongs to the bead the list leads with, which is
+   not the bead you picked, so it is not offered. A name typed there is the
+   branch; an empty answer cancels the pick. Typing the name of an existing
+   branch or worktree switches to it instead of creating anything; worktrunk's own
    shortcuts — `^` the default branch, `-` the previous worktree, `@` the current
    one, `pr:<n>` / `mr:<n>` a pull or merge request's branch — switch too, with
    no branch created, and the new tab is labelled with what you typed.
@@ -134,8 +139,10 @@ exists — the same order orca uses:
 
 and on `@` — HEAD, the plugin's old behaviour — when the clone has none of them.
 `ctrl-r` cycles a short list from there: that opening answer, then `@`, then
-`main` and `master` where this clone has them, deduplicated and with anything
-that does not resolve dropped.
+`main` and `master` where this clone has them, deduplicated. The opening answer
+is never dropped, even when the ref does not resolve: a base you name in
+configuration is the answer the field starts on, and the tab then starts from it
+exactly as it is.
 
 The tab is what fetches, and only when a branch is being created from a ref that
 lives on a remote: that ref's own remote is fetched first (`upstream`, not
@@ -251,12 +258,14 @@ it to offer a choice; `agent_args` travel to whichever agent is started.
 The agent the screen opens on is the one you used last. The picker remembers it
 in `$XDG_STATE_HOME/rex-config/state` (`~/.local/state/rex-config/state` when
 `XDG_STATE_HOME` is unset), a `key=value` file holding one `agent=<name>` line,
-so the second launch of the same kind of work is a bare `enter`. The file is
-read tolerantly: missing, unreadable, corrupt, and a name `agents` no longer
-offers all fall back to the first name on the list, and a write that fails is
-never a reason to fail a launch. It is written before the hand-back, so a
-launch Rex refuses still counts as the agent you chose. Nothing else is
-remembered — not the base, not the branch.
+so the second launch of the same kind of work is a bare `enter`. `ctrl-a`'s
+`none` is remembered too, as an empty value (`agent=`), so a pick that started
+no agent is not followed by a screen that offers the first name again. The file
+is read tolerantly: missing or unreadable, no `agent=` line at all, a corrupt
+line, and a name `agents` no longer offers all fall back to the first name on
+the list, and a write that fails is never a reason to fail a launch. It is
+written before the hand-back, so a launch Rex refuses still counts as the agent
+you chose. Nothing else is remembered — not the base, not the branch.
 
 `base` is the cycle's first entry and nothing more. A string opens the field on
 that ref, so `base = "@"` keeps the old local-HEAD answer within reach; `false`
@@ -333,4 +342,7 @@ The Lua tests stub the `rex` global, so they need no Rex server, and the shell
 tests read saved tool output instead of asking `bd`, `fzf`, `wt` or the
 repository, drive the screen's own subcommands (`composer header`, `cycle-agent`,
 `cycle-base`, `fzf-answer`) through pipes, and pipe the branch answer instead of
-typing it at the prompt.
+typing it at the prompt. The screen's own paths — the ones that exist only where
+stdin is a terminal — are run with `PICK_SCREEN=1`, the script's answer for a run
+with no terminal to hand, so they are the script itself rather than a patched
+copy of it, with `fzf` and `gum` stand-ins answering for the person.

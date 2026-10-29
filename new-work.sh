@@ -41,7 +41,7 @@ commands:
   composer rows --state DIR
   composer header --state DIR --project NAME [--no-base]
   composer cycle-agent --state DIR --project NAME [--agents NAME]...
-  composer cycle-base --state DIR --project NAME --main DIR
+  composer cycle-base --state DIR --project NAME [--main DIR]
            [--base-refs FILE] [--base REF | --no-base]
   composer branch-field --state DIR [--project NAME]
       the one screen's answers, one verb each, kept in DIR so a key can read and
@@ -52,8 +52,9 @@ commands:
 --bd-json, --wt-json, --refs and --base-refs read saved tool output instead of
 asking the tools, which is how the tests and dry runs work: --bd-json stands in
 for bd, --wt-json with --refs for both of the lookups --main would be read for,
-and --base-refs for the one bases reads, so a run given all four never touches
---main at all.
+--base-refs for the one bases reads, so a run given all four never touches
+--main at all. PICK_SCREEN=1 in the environment says the run has the float's
+terminal, which is how the screen's own paths are driven without one.
 
 The one screen asks everything at once: the ready beads with "✎  write a prompt
 instead" pinned on top, and the agent, the branch and the base in its header, a
@@ -123,6 +124,17 @@ die() {
 # waited on twice: need pauses for its own message, and hold_pick covers every
 # other way the picker can stop.
 held=0
+
+# Whether this run has the float's terminal. The screen, the fields it opens and
+# the state directory they share exist only where stdin is a terminal, and a
+# pipe, a script and the tests have none. PICK_SCREEN=1 says "this is the
+# float" to a run with no terminal to hand, the way --bd-json and --wt-json
+# say "no tool is consulted for this": the seam lives here, in the script
+# itself, so the screen's own paths are run through this file rather than
+# through a patched copy of it.
+on_screen() {
+  [ -n "${PICK_SCREEN:-}" ] || [ -t 0 ]
+}
 
 # The directory this run keeps the one screen's answers in, empty until pick
 # makes one. Declared out here rather than inside pick because hold_pick removes
@@ -626,28 +638,38 @@ state_dir() {
   printf '%s\n' "${XDG_STATE_HOME:-${HOME:-}/.local/state}/rex-config"
 }
 
-# The agent the screen opens on: the name the last pick wrote, when the list
+# The agent the screen opens on: the answer the last pick wrote, when the list
 # still offers it. A name the list no longer offers is ignored rather than
 # shown -- ctrl-a could not step to it, so the header would be a field nothing
 # can change -- and the caller falls back to the first name, the configured
-# default. Every way the file can be wrong is silence: not there, not
-# readable, no line for the key, a line with no value. None of them is worth a
-# word on stderr, let alone a failed launch.
+# default. A line with nothing after the `=` is a different answer: it is the
+# remembered "none", which the caller must not replace with the default, so
+# "nothing remembered" is said with the exit status rather than with an empty
+# answer. Every way the file can be wrong is silence: not there, not readable,
+# no line for the key. None of them is worth a word on stderr, let alone a
+# failed launch.
 remembered_agent() { # NAMES: one offered name per line
   local names=$1 file name=''
   file=$(state_dir)/state
-  [ -f "$file" ] && [ -r "$file" ] || return 0
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  # Whether the key is there at all, asked before its value is read: an
+  # `agent=` line and a file with no `agent=` line read the same way once the
+  # prefix is stripped, and they are two different answers.
+  grep -q '^agent=' "$file" 2>/dev/null || return 1
   name=$(sed -n 's/^agent=//p' "$file" 2>/dev/null | sed -n 1p) || name=''
+  # The remembered "none": an answer, printed as nothing.
   [ -n "$name" ] || return 0
-  printf '%s\n' "$names" | grep -Fxq -- "$name" || return 0
+  printf '%s\n' "$names" | grep -Fxq -- "$name" || return 1
   printf '%s\n' "$name"
 }
 
 # And the answer back into it, tried before the hand-back so a hand-back Rex
 # refuses still remembers the agent that was chosen. The file holds this one
-# key, so it is written whole; a directory that cannot be made and a file that
-# cannot be written are both discarded, because a launch is worth more than the
-# memory of it.
+# key, so it is written whole, and the cycle's "none" is written as the empty
+# value -- `agent=` -- because that is an answer the next screen has to open on
+# rather than have replaced by the configured default. A directory that cannot
+# be made and a file that cannot be written are both discarded, because a
+# launch is worth more than the memory of it.
 remember_agent() { # NAME
   local dir file
   dir=$(state_dir) || return 0
@@ -762,7 +784,7 @@ composer_cycle_base() {
 # `git check-ref-format` on one that looks perfectly valid on screen.
 ask_branch() {
   local prefill=$1 project=${2:-} answer=''
-  if [ -t 0 ]; then
+  if on_screen; then
     local header='branch: Enter accepts the name shown'
     [ -z "$project" ] || header="$project · $header"
     if [ -n "$prefill" ]; then
@@ -889,42 +911,67 @@ cmd_composer() {
   esac
 }
 
-# The rows fzf is given, as they are.
-cmd_composer_rows() {
-  local state=''
+# The two options every composer verb takes, parsed once for all five. Each verb
+# reports under its own name, so the name is asked for rather than counted, and
+# what is left of the command line -- the verb's own options, and anything it
+# does not know -- is handed back in composer_rest for the caller to read. An
+# unknown option is therefore not an error here: only the verb knows which
+# options it has. The caller picks the rest up with
+#
+#   set -- ${composer_rest[@]+"${composer_rest[@]}"}
+#
+# whose `+` is not decoration: an empty array's expansion is an unbound variable
+# to the `set -u` this script runs under, on the bash 3.2 a Mac ships.
+composer_opt_state=''
+composer_opt_project=''
+composer_rest=()
+
+composer_common_args() { # VERB [--state DIR] [--project NAME] [the rest...]
+  local verb=$1
+  shift
+  composer_opt_state=''
+  composer_opt_project=''
+  composer_rest=()
   while [ $# -gt 0 ]; do
     case $1 in
       --state)
-        [ $# -ge 2 ] || usage_error 'composer rows: --state needs a directory'
-        state=$2
+        [ $# -ge 2 ] || usage_error "$verb: --state needs a directory"
+        composer_opt_state=$2
         shift 2
         ;;
-      *) usage_error "composer rows: unknown option $1" ;;
+      --project)
+        [ $# -ge 2 ] || usage_error "$verb: --project needs a name"
+        composer_opt_project=$2
+        shift 2
+        ;;
+      *)
+        composer_rest+=("$1")
+        shift
+        ;;
     esac
   done
-  [ -n "$state" ] || usage_error 'composer rows: need --state DIR'
+}
+
+# The rows fzf is given, as they are.
+cmd_composer_rows() {
+  composer_common_args 'composer rows' "$@"
+  set -- ${composer_rest[@]+"${composer_rest[@]}"}
+  [ $# -eq 0 ] || usage_error "composer rows: unknown option $1"
+  [ -n "$composer_opt_state" ] || usage_error 'composer rows: need --state DIR'
   # A screen whose rows were never written is an empty list rather than a
   # failure: the list is the one thing there is nothing to do about from here.
-  if [ -r "$state/rows" ]; then
-    cat "$state/rows"
+  if [ -r "$composer_opt_state/rows" ]; then
+    cat "$composer_opt_state/rows"
   fi
 }
 
 # The two header lines, as the screen shows them.
 cmd_composer_header() {
-  local state='' project='' no_base=0
+  local no_base=0
+  composer_common_args 'composer header' "$@"
+  set -- ${composer_rest[@]+"${composer_rest[@]}"}
   while [ $# -gt 0 ]; do
     case $1 in
-      --state)
-        [ $# -ge 2 ] || usage_error 'composer header: --state needs a directory'
-        state=$2
-        shift 2
-        ;;
-      --project)
-        [ $# -ge 2 ] || usage_error 'composer header: --project needs a name'
-        project=$2
-        shift 2
-        ;;
       --no-base)
         no_base=1
         shift
@@ -932,28 +979,19 @@ cmd_composer_header() {
       *) usage_error "composer header: unknown option $1" ;;
     esac
   done
-  [ -n "$state" ] || usage_error 'composer header: need --state DIR'
-  [ -n "$project" ] || usage_error 'composer header: need --project NAME'
-  composer_header_lines "$state" "$project" "$no_base"
+  [ -n "$composer_opt_state" ] || usage_error 'composer header: need --state DIR'
+  [ -n "$composer_opt_project" ] ||
+    usage_error 'composer header: need --project NAME'
+  composer_header_lines "$composer_opt_state" "$composer_opt_project" "$no_base"
 }
 
 # The header again, after the agent moved on.
 cmd_composer_cycle_agent() {
-  local state='' project='' names=''
+  local names=''
+  composer_common_args 'composer cycle-agent' "$@"
+  set -- ${composer_rest[@]+"${composer_rest[@]}"}
   while [ $# -gt 0 ]; do
     case $1 in
-      --state)
-        [ $# -ge 2 ] ||
-          usage_error 'composer cycle-agent: --state needs a directory'
-        state=$2
-        shift 2
-        ;;
-      --project)
-        [ $# -ge 2 ] ||
-          usage_error 'composer cycle-agent: --project needs a name'
-        project=$2
-        shift 2
-        ;;
       --agents)
         [ $# -ge 2 ] && [ -n "$2" ] ||
           usage_error 'composer cycle-agent: --agents needs a name'
@@ -963,35 +1001,31 @@ cmd_composer_cycle_agent() {
       *) usage_error "composer cycle-agent: unknown option $1" ;;
     esac
   done
-  [ -n "$state" ] || usage_error 'composer cycle-agent: need --state DIR'
-  [ -n "$project" ] || usage_error 'composer cycle-agent: need --project NAME'
-  composer_cycle_agent "$state" "$project" "$names"
+  [ -n "$composer_opt_state" ] ||
+    usage_error 'composer cycle-agent: need --state DIR'
+  [ -n "$composer_opt_project" ] ||
+    usage_error 'composer cycle-agent: need --project NAME'
+  composer_cycle_agent "$composer_opt_state" "$composer_opt_project" "$names"
 }
 
-# The header again, after the base moved on.
+# The header again, after the base moved on. --main and --base-refs are
+# alternatives, as they are for bases: the refs are read from one or the other,
+# and a state that already holds a cycle reads neither.
 cmd_composer_cycle_base() {
-  local state='' project='' main='' base_refs='' base='' no_base=0
+  local main='' base_refs='' base='' no_base=0
+  composer_common_args 'composer cycle-base' "$@"
+  set -- ${composer_rest[@]+"${composer_rest[@]}"}
   while [ $# -gt 0 ]; do
     case $1 in
-      --state)
-        [ $# -ge 2 ] ||
-          usage_error 'composer cycle-base: --state needs a directory'
-        state=$2
-        shift 2
-        ;;
-      --project)
-        [ $# -ge 2 ] ||
-          usage_error 'composer cycle-base: --project needs a name'
-        project=$2
-        shift 2
-        ;;
       --main)
-        [ $# -ge 2 ] || usage_error 'composer cycle-base: --main needs a directory'
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-base: --main needs a directory'
         main=$2
         shift 2
         ;;
       --base-refs)
-        [ $# -ge 2 ] || usage_error 'composer cycle-base: --base-refs needs a file'
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-base: --base-refs needs a file'
         base_refs=$2
         shift 2
         ;;
@@ -1007,36 +1041,26 @@ cmd_composer_cycle_base() {
       *) usage_error "composer cycle-base: unknown option $1" ;;
     esac
   done
-  [ -n "$state" ] || usage_error 'composer cycle-base: need --state DIR'
-  [ -n "$project" ] || usage_error 'composer cycle-base: need --project NAME'
-  [ -n "$main" ] || usage_error 'composer cycle-base: need --main DIR'
+  [ -n "$composer_opt_state" ] ||
+    usage_error 'composer cycle-base: need --state DIR'
+  [ -n "$composer_opt_project" ] ||
+    usage_error 'composer cycle-base: need --project NAME'
+  [ -n "$main" ] || [ -n "$base_refs" ] ||
+    usage_error 'composer cycle-base: need --main DIR (or --base-refs FILE)'
   [ -z "$base" ] || [ "$no_base" -eq 0 ] ||
     usage_error 'composer cycle-base: --base and --no-base answer the same question'
-  composer_cycle_base "$state" "$project" "$main" "$base_refs" "$base" "$no_base"
+  composer_cycle_base "$composer_opt_state" "$composer_opt_project" "$main" \
+    "$base_refs" "$base" "$no_base"
 }
 
 # The branch field: it writes an answer and prints none.
 cmd_composer_branch_field() {
-  local state='' project=''
-  while [ $# -gt 0 ]; do
-    case $1 in
-      --state)
-        [ $# -ge 2 ] ||
-          usage_error 'composer branch-field: --state needs a directory'
-        state=$2
-        shift 2
-        ;;
-      --project)
-        [ $# -ge 2 ] ||
-          usage_error 'composer branch-field: --project needs a name'
-        project=$2
-        shift 2
-        ;;
-      *) usage_error "composer branch-field: unknown option $1" ;;
-    esac
-  done
-  [ -n "$state" ] || usage_error 'composer branch-field: need --state DIR'
-  composer_branch_field "$state" "$project"
+  composer_common_args 'composer branch-field' "$@"
+  set -- ${composer_rest[@]+"${composer_rest[@]}"}
+  [ $# -eq 0 ] || usage_error "composer branch-field: unknown option $1"
+  [ -n "$composer_opt_state" ] ||
+    usage_error 'composer branch-field: need --state DIR'
+  composer_branch_field "$composer_opt_state" "$composer_opt_project"
 }
 
 # What fzf's reply to the bead question means, as one "id<TAB>prompt<TAB>blank"
@@ -1315,7 +1339,7 @@ cmd_pick() {
   # asked, the bead question is skipped, the agent falls back to the first name
   # and the branch reads stdin. Saved tool output stands in for the tools it
   # replaces.
-  if [ -t 0 ] && [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
+  if on_screen && [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
     [ "$blank_set" -eq 0 ]; then
     # fzf is the screen and gum is every field it opens: the prompt row's and
     # ctrl-b's.
@@ -1338,17 +1362,26 @@ cmd_pick() {
     die "pick: could not read the bead list from ${bd_json:-$main}"
   fi
 
-  # The agent the screen opens on: the one this picker chose last, when the
-  # list still offers it, and the list's first name -- the configured default --
-  # otherwise. Read once, here, because both ways into the screen use it: the
-  # header's field in the float and the answer an unasked question takes off a
-  # terminal, which have to agree or the tab would start an agent the header
-  # never showed.
-  local agent_seed=''
-  if [ -n "$agent_choices" ]; then
-    agent_seed=$(remembered_agent "$agent_choices")
-    [ -n "$agent_seed" ] ||
+  # The agent the screen opens on: --agent's answer when one was given, and the
+  # one this picker chose last -- the list's first name, the configured
+  # default, when nothing was remembered -- otherwise. Read once, here, because
+  # both ways into the screen use it: the header's field in the float and the
+  # answer an unasked question takes off a terminal, which have to agree or the
+  # tab would start an agent the header never showed. --agent is an answer
+  # already, so the header opens on it rather than on a name the payload would
+  # then overrule.
+  local agent_seed='' remembered=''
+  if [ "$agent_set" -eq 1 ]; then
+    agent_seed=$agent
+  elif [ -n "$agent_choices" ]; then
+    # Nothing remembered -- no file, no agent= line, or a name the list no
+    # longer offers -- falls back to the first name; a remembered "none" is an
+    # answer, and stays none.
+    if remembered=$(remembered_agent "$agent_choices"); then
+      agent_seed=$remembered
+    else
       agent_seed=$(printf '%s\n' "$agent_choices" | sed -n 1p)
+    fi
   fi
 
   local note=''
@@ -1357,7 +1390,7 @@ cmd_pick() {
   # float leaves nothing behind and two picker runs cannot collide. Only the float
   # gets one -- off a terminal nothing is asked, and a scripted run keeps the
   # tools it was promised and no temporary directory of its own.
-  if [ -t 0 ]; then
+  if on_screen; then
     composer_state=$(mktemp -d) || die 'pick: could not make a state directory'
     # The agent list leads with its default, or with the name the last pick
     # chose, which is what the header opens on; no list at all is no agent
@@ -1397,7 +1430,7 @@ cmd_pick() {
       # not the reason to keep quiet about.
       note='no ready beads'
     fi
-    if [ ! -t 0 ]; then
+    if ! on_screen; then
       # A pipe or a script, never the Rex float: asking would wait forever, so
       # take no bead and move on with the branch instead.
       printf '%s: skipping the bead question: stdin is not a terminal\n' \
@@ -1476,16 +1509,17 @@ cmd_pick() {
   fi
 
   # The agent is the header's: ctrl-a cycles it through the list and then none, so
-  # there is no second question after the screen to ask. Off a terminal nobody can
-  # press a key, and the answer is the seed the header would have opened on --
-  # the remembered name, or the list's first -- which is what an unasked question
-  # has always taken.
-  if [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; then
-    if [ -n "$composer_state" ]; then
-      agent=$(state_get "$composer_state" agent)
-    else
-      agent=$agent_seed
-    fi
+  # there is no second question after the screen to ask. A screen that ran has the
+  # last word -- --agent opened the header on its answer, so a ctrl-a that moved
+  # off it is an answer the header showed and the tab has to honour. Off a
+  # terminal nobody can press a key, and the answer is the seed the header would
+  # have opened on -- the remembered answer, or the list's first -- which is what
+  # an unasked question has always taken.
+  if [ -n "$composer_state" ] && [ -n "$agent_choices" ]; then
+    agent=$(state_get "$composer_state" agent)
+    agent_set=1
+  elif [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; then
+    agent=$agent_seed
     agent_set=1
   fi
 
@@ -1517,13 +1551,12 @@ cmd_pick() {
       # The screen had its chance and the branch was not edited, so it is the one
       # this bead derives -- the name the field would have opened on.
       branch=$suggestion
-      # A bead-less answer -- text that matched no bead, or the prompt row --
+      # A bead-less answer -- text that matched no bead, the prompt row, esc --
       # has no bead to derive a name from, so it is asked the branch question in
-      # the field that question has always been asked in, opened on whatever the
-      # header holds: Enter accepts that name, and anything typed replaces it.
-      # Only this path pays for the field. A bead carries its own name, --branch
-      # and ctrl-b are answers given before the pick is handed back, and a run
-      # off a terminal reads its line of stdin as it always has.
+      # the field that question has always been asked in, and that field opens
+      # empty. Only this path pays for the field. A bead carries its own name,
+      # --branch is an answer given before the pick, and a run off a terminal
+      # reads its line of stdin as it always has.
       #
       # Blank is the answer "an agent, and nothing to say" -- somewhere to work
       # and no prompt -- so it takes the branch the screen was showing: ctrl-b's
@@ -1538,8 +1571,12 @@ cmd_pick() {
       if [ "$blank_set" -eq 1 ]; then
         branch=$(state_get "$composer_state" branch)
       elif [ -z "$bead" ]; then
-        branch=$(ask_branch "$(state_get "$composer_state" branch)" \
-          "$project")
+        # Nothing is carried into it. The header's branch is the leading bead's,
+        # and a bead nobody picked is no name to hand back; ctrl-b's answer
+        # never gets here at all, because a branch edited by hand is already
+        # branch_set -- handed back by the block above -- and this ask is only
+        # for the answer that still has no branch.
+        branch=$(ask_branch '' "$project")
       fi
     else
       # Nobody to ask: the answer is a line of stdin, and an empty one is the

@@ -1338,6 +1338,66 @@ elif [ "$(cat "$tmp/out")" != "$(cat "$tmp/cs7/rows")" ]; then
   fail "rows prints the rows verbatim" "stdout: $(cat "$tmp/out")"
 fi
 
+# The five verbs share one parse of --state and --project and still say what went
+# wrong under their own name, so the words are pinned here: moving the parse
+# around is a refactor, and a refactor that changed what a person reads in the
+# float is a regression.
+usage_case() { # NAME WANT_LINE args...
+  local name=$1 want=$2
+  shift 2
+  run_composer "$@"
+  if [ "$status" -ne 2 ]; then
+    fail "$name exits 2" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -qxF "new-work.sh: $want" "$tmp/err"; then
+    fail "$name says why" "stderr: $(sed -n 1p "$tmp/err")"
+  fi
+}
+usage_case 'rows needs its state' 'composer rows: need --state DIR' \
+  rows --project rex-config
+usage_case 'rows refuses an unknown option' \
+  'composer rows: unknown option --nope' rows --state "$tmp/cs1" --nope
+usage_case 'a state directory needs a value' \
+  'composer rows: --state needs a directory' rows --state
+usage_case 'header needs its project' 'composer header: need --project NAME' \
+  header --state "$tmp/cs1"
+usage_case 'header refuses an unknown option' \
+  'composer header: unknown option --nope' header --state "$tmp/cs1" \
+  --project rex-config --nope
+usage_case 'cycle-agent refuses an unknown option' \
+  'composer cycle-agent: unknown option --nope' cycle-agent \
+  --state "$tmp/cs1" --project rex-config --nope
+usage_case 'cycle-agent needs a name after --agents' \
+  'composer cycle-agent: --agents needs a name' cycle-agent \
+  --state "$tmp/cs1" --project rex-config --agents ''
+usage_case 'cycle-base refuses an unknown option' \
+  'composer cycle-base: unknown option --nope' cycle-base \
+  --state "$tmp/cs1" --project rex-config --main "$tmp/nowhere" --nope
+usage_case 'branch-field needs its state' \
+  'composer branch-field: need --state DIR' branch-field --project rex-config
+usage_case 'branch-field refuses an unknown option' \
+  'composer branch-field: unknown option --nope' branch-field \
+  --state "$tmp/cs1" --nope
+
+# ctrl-r reads its cycle from --base-refs when the state holds none, as `bases`
+# does: the two arguments are alternatives -- one of them names the refs -- and
+# neither is a --main the other merely decorates.
+composer_state "$tmp/cs9" pi 'feat/one' 1
+: >"$tmp/cs9/bases"
+run_composer cycle-base --state "$tmp/cs9" --project rex-config \
+  --base-refs "$tmp/base-refs"
+if [ "$status" -ne 0 ]; then
+  fail "cycle-base takes --base-refs on its own" "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/out")" != \
+  "$(heading rex-config pi feat/one '@')" ]; then
+  fail "cycle-base resolves its cycle from --base-refs" "stdout: $(cat "$tmp/out")"
+elif [ "$(cat "$tmp/cs9/base_index")" != 2 ]; then
+  fail "cycle-base moves to the second entry" \
+    "base_index: $(cat "$tmp/cs9/base_index")"
+fi
+usage_case 'cycle-base needs one of --main and --base-refs' \
+  'composer cycle-base: need --main DIR (or --base-refs FILE)' cycle-base \
+  --state "$tmp/cs9" --project rex-config
+
 
 # (t) A bead-less answer asks for its branch. Typed text that matches no bead,
 # the prompt row and ctrl-n all say "no bead", and none of them has a branch to
@@ -1385,30 +1445,48 @@ if [ -e "$tmp/gum-ran" ]; then
 fi
 
 # The field is part of the screen, and the screen exists only where stdin is a
-# terminal, which a test may not have. So the runs below are the real script with
-# that one answer forced: the copy differs from new-work.sh in the four places
-# that ask whether stdin is a terminal, and in nothing else -- line-anchored, so
-# a rewrite of one of them fails the check below instead of quietly testing the
-# path a pipe takes. fzf and gum are stand-ins that answer for the person who is
-# not there, and gum records what it was asked, which is how "no field was
-# opened" and "the field opened on the header's branch" are both proven.
+# terminal, which a test may not have. PICK_SCREEN=1 is the script's own answer
+# to that -- "this run has the float's terminal" -- so these runs are ./new-work.sh
+# itself, byte for byte, with that one answer given: the seam is in the script
+# next to the fixtures that stand in for bd and wt, not in a copy of the script
+# patched here. fzf and gum are stand-ins that answer for the person who is not
+# there; gum records what it was asked and fzf records the lines it was given, so
+# "no field was opened", "the field opened empty" and "the header opened on this
+# agent" are a line or a missing file rather than a reading of the script.
 mkdir -p "$tmp/screen/bin"
-sed -e 's/^  if \[ -t 0 \]; then$/  if [ -n "${PICK_SCREEN:-}" ] || [ -t 0 ]; then/' \
-  -e 's/^    if \[ ! -t 0 \]; then$/    if [ -z "${PICK_SCREEN:-}" ]; then/' \
-  -e 's/^  if \[ -t 0 \] && /  if [ -n "${PICK_SCREEN:-}" ] \&\& /' \
-  new-work.sh >"$tmp/screen/new-work.sh"
-chmod +x "$tmp/screen/new-work.sh"
-ran=$((ran + 1))
-if [ "$(grep -c 'PICK_SCREEN' "$tmp/screen/new-work.sh")" -ne 4 ]; then
-  fail "the screen copy forces the four places that ask for a terminal" \
-    "$(grep -c 'PICK_SCREEN' "$tmp/screen/new-work.sh") of 4 patched"
-fi
 
 cat >"$tmp/screen/bin/fzf" <<'EOF'
 #!/bin/sh
-# The screen's reply, in fzf's own order: query, key, row.
+# The screen's reply, in fzf's own order: query, key, row -- and the status fzf
+# exits with, which is 0 unless a case is pinning esc (130). FZF_MARKER keeps
+# every line fzf was given, which is how the header a person would have read is
+# checked.
+if [ -n "${FZF_MARKER:-}" ]; then printf '%s\n' "$@" >>"$FZF_MARKER"; fi
 cat >/dev/null
+# ctrl-b, played by hand. The binding fzf was given names the state directory the
+# pick keeps its answers in, and the key's own verb is what a keystroke runs, so
+# running it there is the keystroke: whatever it writes is what the pick goes on
+# to read.
+if [ -n "${FZF_CTRL_B:-}" ]; then
+  for arg in "$@"; do
+    case $arg in
+      *"composer branch-field --state "*)
+        state=${arg#*composer branch-field --state }
+        state=${state%% *}
+        state=${state#\'}
+        state=${state%\'}
+        # PICK_SCREEN is this run's claim, not the keystroke's: the verb here
+        # is a field answered from a pipe, which is the answer a person would
+        # have typed into gum.
+        printf '%s\n' "$FZF_CTRL_B" |
+          PICK_SCREEN='' ./new-work.sh composer branch-field \
+            --state "$state" --project demo
+        ;;
+    esac
+  done
+fi
 printf '%s' "$FZF_REPLY"
+exit "${FZF_STATUS:-0}"
 EOF
 cat >"$tmp/screen/bin/gum" <<'EOF'
 #!/bin/sh
@@ -1428,19 +1506,21 @@ EOF
 chmod +x "$tmp/screen/bin/fzf" "$tmp/screen/bin/gum"
 
 # run_screen [options...]: a picker run with a screen. What a person would
-# answer is the environment: FZF_REPLY for the screen, GUM_BRANCH and
-# GUM_PROMPT for the two fields it can open, GUM_CANCEL for one that is
-# dismissed, and SCREEN_BEADS for a ready list other than the usual fixture.
-# stdin is empty, so a field that was not forced would answer nothing and the
-# run would exit 3 -- the failure mode this section exists for.
+# answer is the environment: FZF_REPLY for the screen and FZF_STATUS for the
+# status it exits with, FZF_CTRL_B for a ctrl-b pressed before it answered,
+# GUM_BRANCH and GUM_PROMPT for the two fields it can open, GUM_CANCEL for one
+# that is dismissed, and SCREEN_BEADS for a ready list other than the usual
+# fixture. stdin is empty, so a field that was not forced would answer nothing
+# and the run would exit 3 -- the failure mode this section exists for.
 run_screen() {
   ran=$((ran + 1))
-  rm -f "$tmp/gum-ran" "$tmp/rex-args"
+  rm -f "$tmp/gum-ran" "$tmp/rex-args" "$tmp/fzf-ran"
   PATH="$tmp/screen/bin:$PATH" PICK_SCREEN=1 \
-    FZF_REPLY="${FZF_REPLY:-}" GUM_MARKER=$tmp/gum-ran \
+    FZF_REPLY="${FZF_REPLY:-}" GUM_MARKER=$tmp/gum-ran FZF_MARKER=$tmp/fzf-ran \
+    FZF_STATUS="${FZF_STATUS:-}" FZF_CTRL_B="${FZF_CTRL_B:-}" \
     GUM_BRANCH="${GUM_BRANCH:-}" GUM_PROMPT="${GUM_PROMPT:-}" \
     GUM_CANCEL="${GUM_CANCEL:-}" REX_ARGS_FILE=$tmp/rex-args \
-    "$tmp/screen/new-work.sh" pick \
+    ./new-work.sh pick \
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json "${SCREEN_BEADS:-test/fixtures/ready.json}" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
@@ -1450,9 +1530,10 @@ run_screen() {
 }
 
 # Typed text the list could not match: the screen's answer is the text and no
-# bead, so the branch is asked for -- opened on the name the header was showing
-# (the first bead's, seeded before the screen opened), and what comes back is
-# the branch the tab creates.
+# bead, so the branch is asked for, and what comes back is the branch the tab
+# creates. The field opens on nothing: the header's branch is the name the bead
+# the list leads with derives, and a bead nobody picked is no name for this
+# answer.
 FZF_REPLY=$'why is the guard flaky?\n\n' GUM_BRANCH='feat/typed' run_screen
 if [ "$status" -ne 0 ]; then
   fail "typed text with no branch asks for one" \
@@ -1467,8 +1548,11 @@ else
     '.branch == "feat/typed" and .create == true'
 fi
 ran=$((ran + 1))
-if ! grep -qF -- '--value feat/58h' "$tmp/gum-ran" 2>/dev/null; then
-  fail "the branch field opens on the header's branch" \
+if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+  fail "the bead-less answer opens the branch field" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+elif grep -qF -- '--value' "$tmp/gum-ran" 2>/dev/null; then
+  fail "the branch field opens empty, not on the leading bead's name" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 fi
 
@@ -1495,15 +1579,19 @@ if ! grep -qF -- '--header prompt for the agent' "$tmp/gum-ran" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 fi
 ran=$((ran + 1))
-if ! grep -qF -- '--value feat/58h' "$tmp/gum-ran" 2>/dev/null; then
-  fail "the prompt row then opens the branch field on the header's branch" \
+if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+  fail "the prompt row then opens the branch field" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+elif grep -qF -- '--value' "$tmp/gum-ran" 2>/dev/null; then
+  fail "the prompt row's branch field opens empty too" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 fi
 
 # A field dismissed, and a field answered with nothing: both are no answer, and
 # no answer is a cancelled pick -- exit 3, said out loud, nothing started. The
-# field was opened either way, and the seed it opened on is not quietly taken as
-# the answer, which a run that exited 0 with feat/58h would have shown.
+# field was opened either way, and nothing the screen was showing is quietly
+# taken as the answer, which a run that exited 0 with the leading bead's name
+# would have shown.
 no_branch_answer() { # NAME
   local name=$1
   if [ "$status" -ne 3 ]; then
@@ -1517,7 +1605,7 @@ no_branch_answer() { # NAME
       "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
   fi
   ran=$((ran + 1))
-  if ! grep -qF -- '--value feat/58h' "$tmp/gum-ran" 2>/dev/null; then
+  if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
     fail "$name still opened the field" \
       "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
   fi
@@ -1526,6 +1614,52 @@ FZF_REPLY=$'why is the guard flaky?\n\n' GUM_CANCEL=1 run_screen
 no_branch_answer 'a cancelled branch field'
 FZF_REPLY=$'why is the guard flaky?\n\n' GUM_BRANCH='' run_screen
 no_branch_answer 'an empty branch answer'
+
+# esc is the documented "no bead" answer, and it has no branch either. Its field
+# must not open on the leading bead's name: that name belongs to a bead the user
+# did not pick, and Enter there would create it -- a worktree on a branch the
+# screen promised and the person never chose.
+FZF_STATUS=130 GUM_BRANCH='' run_screen
+if [ "$status" -ne 3 ]; then
+  fail "esc with an empty branch answer exits 3" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF 'new-work.sh: no branch given, nothing to start' "$tmp/err"; then
+  fail "esc with an empty branch answer says why" "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+  fail "esc creates nothing without a branch" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+  fail "esc opens the branch field" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+elif grep -qF -- '--value' "$tmp/gum-ran" 2>/dev/null; then
+  fail "esc does not open the field on the leading bead's name" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+fi
+
+# ctrl-b's answer is the exception the other way: a branch typed by hand is an
+# answer already, so the field a bead-less answer would open is never opened and
+# the name the person typed is the branch. FZF_CTRL_B is that keystroke played by
+# the stand-in fzf, which runs the key's own verb against the state the pick made.
+FZF_REPLY=$'why is the guard flaky?\n\n' FZF_CTRL_B='feat/typed' run_screen
+if [ "$status" -ne 0 ]; then
+  fail "a ctrl-b answer and a typed prompt exit 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a ctrl-b answer prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "ctrl-b's answer is the branch a typed prompt creates" "$json" \
+    '.branch == "feat/typed" and .create == true'
+  assert_json "ctrl-b's answer keeps the typed prompt" "$json" \
+    '.prompt == "why is the guard flaky?" and .bead == ""'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gum-ran" ]; then
+  fail "ctrl-b's answer opens no second field" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+fi
 
 # A bead is an answer that carries its own branch, so the screen asks nothing
 # more: the derived name is what the tab creates, and no field is opened.
@@ -1559,6 +1693,23 @@ fi
 ran=$((ran + 1))
 if [ -e "$tmp/gum-ran" ]; then
   fail "--branch opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
+fi
+
+# A tab inside the query is text, not a field separator. --expect is what keeps
+# the query on a line of its own and the answer is split from its end, so the tab
+# a person typed stays in the prompt -- and a reply that shifted its fields would
+# show up here as a bead where there is none, or a title that is half a prompt.
+FZF_REPLY=$'why\tis the guard flaky?\n\n' run_screen --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "a tab in the query exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a tab in the query prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a tab in the query stays in the prompt" "$json" \
+    '.prompt == "why\tis the guard flaky?"'
+  assert_json "a tab in the query leaves the bead and the title empty" "$json" \
+    '.bead == "" and .title == ""'
 fi
 
 # ctrl-n is a whole answer: somewhere to work and nothing to say. The branch it
@@ -1657,6 +1808,28 @@ else
     '.agent == "claude"'
 fi
 
+# --agent is an answer given before the screen opened, so the header opens on it
+# rather than on the name the list would have offered -- the remembered one here,
+# claude, to show that the screen's field is the answer that wins rather than
+# another name the payload would then overrule.
+remember "$tmp/st-agent" 'agent=claude
+'
+XDG_STATE_HOME=$tmp/st-agent FZF_REPLY=$'\n\n' run_screen \
+  --agents pi --agents claude --agent pi --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "--agent exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--agent prints runnable rex do work_new_go from the screen" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "--agent is the payload's agent" "$json" '.agent == "pi"'
+fi
+ran=$((ran + 1))
+if ! grep -qF 'agent: pi' "$tmp/fzf-ran" 2>/dev/null; then
+  fail "--agent is the header's opening agent" \
+    "the header fzf was given: [$(cat "$tmp/fzf-ran" 2>/dev/null)]"
+fi
+
 PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-known \
   run_pick test/fixtures/ready.json \
   --agents pi --agents claude --branch feat/x --dry-run
@@ -1682,6 +1855,55 @@ if [ "$status" -ne 0 ]; then
 elif [ "$(cat "$tmp/st-known/rex-config/state")" != agent=claude ]; then
   fail "the pick keeps the agent it opened on" \
     "state: $(cat "$tmp/st-known/rex-config/state")"
+fi
+
+# The cycle's last answer is none, and it is remembered like any other: `agent=`
+# with nothing after it is the answer "none", which a state file with no
+# `agent=` line at all -- never answered -- is not. Opening on the first name
+# after a pick that chose none would make that answer unkeepable.
+remember "$tmp/st-none" 'agent=
+'
+XDG_STATE_HOME=$tmp/st-none FZF_REPLY=$'\n\n' run_screen \
+  --agents pi --agents claude --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "a remembered none reaches the screen" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a remembered none prints runnable rex do work_new_go from the screen" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a remembered none is the payload's agent" "$json" '.agent == ""'
+fi
+ran=$((ran + 1))
+if ! grep -qF 'agent: none' "$tmp/fzf-ran" 2>/dev/null; then
+  fail "a remembered none is the header's opening agent" \
+    "the header fzf was given: [$(cat "$tmp/fzf-ran" 2>/dev/null)]"
+fi
+
+# And a pick that chooses none writes `agent=` back, so the next screen opens on
+# none: the whole cycle is remembered rather than the names on it.
+remember "$tmp/st-none-twice" 'agent=claude
+'
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-none-twice \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --agent '' --branch feat/x
+quiet_state "a none answer says nothing about the state file"
+if [ "$status" -ne 0 ]; then
+  fail "a none answer exits 0" "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/st-none-twice/rex-config/state")" != 'agent=' ]; then
+  fail "a none answer is remembered" \
+    "state: [$(cat "$tmp/st-none-twice/rex-config/state" 2>/dev/null)]"
+fi
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-none-twice \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+if [ "$status" -ne 0 ]; then
+  fail "the pick after a none answer exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "the pick after a none answer prints runnable rex do work_new_go" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "the screen after a none answer opens on none" "$json" \
+    '.agent == ""'
 fi
 
 # A name the list no longer offers is ignored -- the screen's cycle could not

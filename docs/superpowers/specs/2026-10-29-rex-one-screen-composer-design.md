@@ -123,9 +123,12 @@ One `fzf` invocation replaces `pick_bead`, `pick_agent` and `pick_branch`:
 
 ```
 ✎  write a prompt instead        <- row 1, always
-bead-1a2  P0  ...
-bead-3c4  P2  ...
+bead-1a2<TAB>the first bead's title
+bead-3c4<TAB>the second bead's title
 ```
+
+Rows are `id<TAB>title` and nothing else — `--with-nth=1,2` draws both fields of
+a row that has exactly two, so no priority column is shown.
 
 ```
  `rex-config · agent: pi · branch: bug/58h · base: origin/main`
@@ -204,8 +207,10 @@ those refs (the same trick orca uses: a character class, so `main/topic` cannot
 impersonate `main`), not `rev-parse` per candidate.
 
 **The cycle** is `[default, "@", "main", "master"]`, deduplicated and with
-unresolvable entries dropped, `default` first. `@` is today's behaviour and stays
-reachable two ways: as a cycle entry, and as `base = "@"` in configuration.
+unresolvable entries dropped — the opening answer excepted, because a `base` you
+name is the answer the field starts on even when the ref does not resolve —
+`default` first. `@` is today's behaviour and stays reachable two ways: as a
+cycle entry, and as `base = "@"` in configuration.
 **`base = false` is a cycle entry, not a lock.** Its first entry is a `wt
 default` sentinel meaning "pass no `--base` and let worktrunk decide", followed by
 the same `@`, `main`, `master`; the auto-detected chain is not computed at all
@@ -247,6 +252,11 @@ switch still runs** from the ref's last-known position — orca's own instinct i
   "agent": "pi" | "" }              // as today
 ```
 
+This object is what `pick` emits — the JSON printed after `rex do work_new_go
+--args`. It is not what the action is handed: `work_new_go` receives it **key by
+key**, filtered against the pairs its registered `args.properties` declares, so
+a key the declaration does not name never arrives.
+
 `base` is deliberately three-valued: a string is the ref to create from, `false`
 is the `wt default` sentinel (pass no `--base`), and **absent** means the picker
 never answered — a hand-run `rex do work_new_go --args '…'`, which keeps today's
@@ -254,8 +264,22 @@ behaviour by falling back to `M.options.base` when that is a string. So the
 payload is authoritative when it speaks, and `base = false` survives end to end
 instead of being swallowed by a configuration fallback.
 
-`work_new_go` needs no change: it validates `project`/`root`/`main`/`branch`,
-claims the bead, makes the tab. `new_tab_argv` is the only consumer that changes.
+`work_new_go` needs no logic change — it validates `project`/`root`/`main`/
+`branch`, claims the bead, makes the tab — but it **must declare every payload
+key it forwards**: `base` as `string|boolean`, `base_remote`, and `blank`,
+alongside the fields the picker already sent. An undeclared key is filtered out
+before the action or `new_tab_argv` ever sees it, and the flow then degrades
+silently: the picker's `base = false` becomes the configured base again, and the
+blank answer becomes the configured `no_bead_prompt`. `new_tab_argv` is the only
+consumer whose logic changes.
+
+One thing no real Rex has confirmed: `base = { type = { "string", "boolean" } }`
+(`init.lua:1006`) is the workspace's only array-typed JSON-schema declaration,
+and `test/action_test.lua`'s `as_rex_passes` filters by declared key rather than
+by declared type. A validator that rejected a type union would fail every
+hand-back whose base is the `wt default` sentinel — and the tests would not
+notice, because they filter the way the declaration is documented to work, not
+the way Rex might enforce it.
 
 ### The wrapper
 
@@ -301,11 +325,14 @@ written to the state file. A one-name list still cycles: that name, then none.
 New state, outside the configuration: `$XDG_STATE_HOME/rex-config/state`
 (`~/.local/state/rex-config/state` when unset), a `key=value` file the picker
 reads tolerantly (missing file, missing key, corrupt line → the configured
-default; a write failure is not worth failing a launch). It holds `agent=<name>`
-and is used to choose the header's initial agent (a name no longer in `agents` is
-ignored). **The picker writes it**, immediately before `rex do work_new_go`, so a
-refused hand-back still remembers what was chosen, the write lives in the script
-whose subcommands pipe tests can reach, and Lua gains no filesystem code.
+default; a write failure is not worth failing a launch). It holds `agent=<name>`,
+and `agent=` with no name is the remembered answer *none* — a line for the key
+with nothing after it, which is a different answer from no line at all — so the
+cycle's last answer is kept too. It is used to choose the header's initial agent
+(a name no longer in `agents` is ignored). **The picker writes it**, immediately
+before `rex do work_new_go`, so a refused hand-back still remembers what was
+chosen, the write lives in the script whose subcommands pipe tests can reach,
+and Lua gains no filesystem code.
 
 ## Edge cases and failure behaviour
 
@@ -319,13 +346,14 @@ whose subcommands pipe tests can reach, and Lua gains no filesystem code.
   before that it is recomputed from the bead at each repaint and at hand-back. It
   is **not** recomputed per keystroke: there is no `change` binding, so a typed
   query does not repaint the header on every character.
-- **No bead and no branch** — Enter on a typed prompt, or on the ✎ field, with
-  no branch yet: the screen asks for the branch in a `gum` field, prefilled with
-  whatever the header held (empty when nothing has been derived), and only that
-  path pays for the extra field. This is today's behaviour kept exactly — the
-  bead-less answer has never had a branch to derive — and it means the typed
-  prompt still works without the user knowing about ctrl-b. A cancelled field is
-  a cancelled pick (exit 3), as it is today.
+- **No bead and no branch** — Enter on a typed prompt, on the ✎ field, or esc,
+  with no branch yet: the screen asks for the branch in a `gum` field, and only
+  that path pays for the extra field. The field opens **empty**: the header's
+  branch is the leading bead's name, and handing that back would create a
+  worktree on a branch named after a bead nobody picked. ctrl-b's answer is the
+  exception in the other direction — a branch typed by hand is an answer
+  already, so the field is not opened at all. A cancelled field, or an empty
+  one, is a cancelled pick (exit 3), as it is today.
 - **`base = false`** — the header opens on `base: wt default`, no refs are read,
   and ctrl-r can still move off it.
 - **No base ref resolvable** (no origin, no main) — the cycle is just `@`, the
