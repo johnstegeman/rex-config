@@ -757,8 +757,15 @@ elif ! grep -qF 'new-work.sh: Rex could not finish the hand-back' "$tmp/err"; th
 fi
 # (n) What fzf's reply to the bead question means, read from the reply alone.
 # fzf needs a terminal, so this is the one part of that question a pipe can
-# reach: the three shapes below are the ones fzf really produces, measured on
-# 0.74.5 with --print-query.
+# reach: the shapes below are the ones fzf really produces, measured on 0.74.5
+# with --print-query and --expect. The reply is three lines -- the query, the
+# key that was pressed (empty when none was), and the row under the cursor
+# when there is one -- and the answer printed here is the three fields that
+# reading leaves: bead, prompt, blank, empty where there is no answer.
+#
+# fzf exits 0 on a row and 1 on a query that matched nothing, and with
+# --expect the key line is there either way; a reply with no key line at all
+# is no key pressed rather than an error, and so is a key line that is empty.
 check_answer() {
   local name=$1 status=$2 reply=$3 want=$4
   ran=$((ran + 1))
@@ -773,24 +780,41 @@ check_answer() {
 
 # A query with a row selected: the row is the answer and the query is not.
 check_answer 'a selected row is the bead' 0 \
-  $'flak\npmm-iris-58h\tFix the flaky guard\n' "pmm-iris-58h"$'\t'
+  $'flak\n\npmm-iris-58h\tFix the flaky guard\n' "pmm-iris-58h"$'\t\t'
 # A bare Enter takes the row the cursor is on, with an empty query above it.
 check_answer 'a bare enter is the row under the cursor' 0 \
-  $'\npmm-iris-58h\tFix the flaky guard\n' "pmm-iris-58h"$'\t'
+  $'\n\npmm-iris-58h\tFix the flaky guard\n' "pmm-iris-58h"$'\t\t'
 # The prompt row's marker comes back where a bead id would be: it is the
 # answer "write a prompt", not a bead.
 check_answer 'the prompt row is its marker' 0 \
-  $'\n✎\twrite a prompt instead\n' "✎"$'\t'
-# Text that matched nothing is the prompt itself, and no bead at all.
+  $'\n\n✎\twrite a prompt instead\n' "✎"$'\t\t'
+# ctrl-n over a row is the blank answer: the key line wins over the row, so
+# the bead under the cursor is not picked and nothing is typed either.
+check_answer 'ctrl-n over a bead is blank' 0 \
+  $'\nctrl-n\npmm-iris-58h\tFix the flaky guard\n' $'\t\t1'
+# The same key over the prompt row: still nothing to say, so the field it
+# would have opened is never opened.
+check_answer 'ctrl-n over the prompt row is blank' 0 \
+  $'\nctrl-n\n✎\twrite a prompt instead\n' $'\t\t1'
+# Text that matched nothing is the prompt itself, and no bead at all. This
+# reply carries no key line at all -- fzf's older two-line shape -- which is
+# no key pressed rather than a reason to fail.
 check_answer 'unmatched text is the prompt' 1 \
-  $'why is the guard flaky?\n' $'\twhy is the guard flaky?'
+  $'why is the guard flaky?\n' $'\twhy is the guard flaky?\t'
+# A key line that is there and empty says the same thing as a missing one.
+check_answer 'an empty key line is no key pressed' 1 \
+  $'typed text\n\n' $'\ttyped text\t'
+# A query holding a tab keeps its tab: the fields are read from the answer's
+# own ends, so bead, prompt and blank stay apart whatever the text contains.
+check_answer 'a tab in the query keeps the fields apart' 1 \
+  $'a\tb\n\n' $'\ta\tb\t'
 # esc: no bead, no prompt -- the no-bead flow.
-check_answer 'esc is no answer' 130 '' $'\t'
+check_answer 'esc is no answer' 130 '' $'\t\t'
 # fzf can be configured to exit 0 on a query that matched nothing
 # (FZF_DEFAULT_OPTS=--exit-0), and then the reply is a query with no row under
 # it: the text typed is still the prompt, not something to throw away.
 check_answer 'a query with no row under it is still the prompt' 0 \
-  $'why is the guard flaky?\n' $'\twhy is the guard flaky?'
+  $'why is the guard flaky?\n\n' $'\twhy is the guard flaky?\t'
 
 # An fzf that failed did not answer anything: a picker that could not run is
 # not a person deciding to start no work.
@@ -801,6 +825,22 @@ elif ! grep -qF 'the bead picker failed (fzf exit 2)' "$tmp/err"; then
   fail "fzf failing is named" "stderr: $(cat "$tmp/err")"
 elif [ -s "$tmp/out" ]; then
   fail "fzf failing prints no answer" "stdout: $(cat "$tmp/out")"
+fi
+
+# (n2) Blank and "the picker was never asked" are different answers, and the
+# payload has to say which one it got: a --bead run given no --prompt sends no
+# prompt field and no blank field, so the plugin's own template still speaks --
+# where blank would tell the tab to send the agent no prompt at all.
+run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch bug/a4l \
+  --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a bead with no prompt prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a bead with no prompt sends no prompt" "$json" \
+    'has("prompt") == false'
+  assert_json "a bead with no prompt is not blank" "$json" \
+    'has("blank") == false'
 fi
 
 # (o) A prompt instead of a bead: the typed text is the prompt, verbatim, and

@@ -156,6 +156,53 @@ do
   M.options.base = saved
 end
 
+-- The prompt is the argv's last word -- unless there is nothing to say.
+--
+-- A blank answer is the picker saying "an agent, and nothing to say", which is
+-- neither the configured templates nor an empty word: it sends no prompt
+-- parameter at all, so the argv ends after the agent and its arguments. And a
+-- prompt whose first byte is "-" would be read by the agent as a flag, so it
+-- gains exactly one leading space in front -- here, where the argument contract
+-- lives, rather than in the wrapper that only execs what it was given.
+do
+  local saved_args, saved_base = M.options.agent_args, M.options.base
+  M.options.base = false
+  M.options.agent_args = { "--mode", "plan" }
+
+  local function prompt_argv(prompt)
+    return M.new_tab_argv("proj", { branch = "feat/x1", create = true,
+      prompt = prompt })
+  end
+
+  -- Nine words take the argv to the agent, two more are its own arguments, and
+  -- the prompt is the one after them: so word 12 is where a prompt lands.
+  eq("a prompt is the word after the agent's arguments",
+    prompt_argv("plain")[12], "plain")
+  eq("a prompt that does not start with a dash is untouched",
+    #prompt_argv("plain"), 12)
+  eq("a prompt starting with a dash gains one leading space",
+    prompt_argv("-x")[12], " -x")
+  eq("a prompt of a bare dash gains the same one space",
+    prompt_argv("-")[12], " -")
+  eq("a prompt of two dashes gains the same one space",
+    prompt_argv("--")[12], " --")
+  eq("the dash guard is one space, not two", #prompt_argv("--"), 12)
+  eq("a quoted prompt with a template sequence stays one word",
+    prompt_argv('fix "it" {{ now }}')[12], 'fix "it" {{ now }}')
+
+  -- blank with a prompt set is the interesting case: the payload never carries
+  -- both, but the picker's answer has the last word either way, so a blank
+  -- answer must drop a prompt even when one was handed over.
+  local blank = M.new_tab_argv("proj", { branch = "feat/x1", create = true,
+    prompt = "hello", blank = true })
+  eq("a blank answer appends no prompt word", #blank, 11)
+  eq("a blank answer puts no word after the agent's arguments",
+    { blank[10], blank[11] }, { "--mode", "plan" })
+  eq("a blank answer is not an empty prompt word", blank[12], nil)
+
+  M.options.agent_args, M.options.base = saved_args, saved_base
+end
+
 -- The `wt switch` words themselves are asserted where they are executed:
 -- test/wrapper_test.sh runs the tab's wrapper with a stand-in `wt` and reads
 -- the words it was given, for a create run and for an existing worktree.

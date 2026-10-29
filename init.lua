@@ -320,6 +320,11 @@ leave_shell
 -- configured no-bead prompt. An empty agent is the picker's "none": the wrapper
 -- starts nothing and hands the pane to a login shell. An empty base is "no
 -- --base at all", and an empty remote is "nothing to fetch".
+--
+-- The prompt is not always there: a blank answer sends no prompt parameter at
+-- all, so the argv ends after the agent and its arguments, and a prompt whose
+-- first character is "-" travels with one leading space so the agent reads a
+-- value rather than a flag.
 function M.new_tab_argv(project, args)
   args = args or {}
   assert(type(args.branch) == "string" and args.branch ~= "",
@@ -390,6 +395,21 @@ function M.new_tab_argv(project, args)
     for _, arg in ipairs(M.options.agent_args or {}) do
       argv[#argv + 1] = arg
     end
+  end
+  -- A blank answer is "an agent, and nothing to say": no prompt word at all,
+  -- not an empty one, so the argv ends after the agent and its arguments and
+  -- the templates above do not get to fill the place. That is how blank stays
+  -- distinct from "the picker was never asked", where the template speaks.
+  if args.blank == true then
+    return argv
+  end
+  -- A prompt whose first character is "-" would be read by the agent as a flag.
+  -- Nothing stops a person typing one, so exactly one space goes in front: one,
+  -- because the prompt is still meant to read as what was typed, and here, in
+  -- the builder that owns the argument contract, rather than in the wrapper
+  -- whose whole job is to exec what it was handed.
+  if prompt:sub(1, 1) == "-" then
+    prompt = " " .. prompt
   end
   argv[#argv + 1] = prompt
   return argv

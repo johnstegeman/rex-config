@@ -476,6 +476,61 @@ else
     "words: $(cat "$tmp/wt-words") output: $(cat "$tmp/out")"
 fi
 
+# The words the tab really gets, built by the module rather than written out by
+# hand: everything from argv[5] on -- what follows `sh -c SCRIPT sh` -- one per
+# line, so a case can run the argv new_tab_argv produced. An argument that is the
+# empty string comes back as an empty line, which is exactly how the wrapper
+# needs to receive it.
+build_tab_words() {
+  init="$PWD/init.lua" want_blank=$1 want_prompt=$2 lua -e '
+    local M = dofile(os.getenv("init"))
+    local args = { branch = "feat/x1", create = false, agent = "agent",
+      prompt = os.getenv("want_prompt") }
+    if os.getenv("want_blank") == "1" then args.blank = true end
+    local argv = M.new_tab_argv("proj", args)
+    for i = 5, #argv do io.write(argv[i], "\n") end
+  '
+}
+
+# A prompt that starts with "-" would be a flag to the agent if it travelled as
+# it was typed. The guard is new_tab_argv's -- one leading space, not two -- and
+# this runs the argv it built, so the guard is proven across the whole trip:
+# builder, wrapper, exec, agent.
+tab_words=()
+while IFS= read -r word; do tab_words[${#tab_words[@]}]=$word; done \
+  < <(build_tab_words 0 -hello)
+ran=$((ran + 1))
+run_wrapper "${tab_words[@]}"
+if [ "$status" -ne 0 ]; then
+  fail "a dash prompt reaches the agent" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+elif ! grep -qxF 'agent arg:  -hello' "$tmp/out"; then
+  fail "a prompt starting with a dash keeps its one leading space" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if grep -qxF 'agent arg: -hello' "$tmp/out"; then
+  fail "a prompt starting with a dash is not sent as a flag" \
+    "output: $(cat "$tmp/out")"
+fi
+
+# The blank answer, end to end: no prompt parameter at all, so the agent starts
+# bare rather than with an empty argument -- and the pane still ends in a shell.
+tab_words=()
+while IFS= read -r word; do tab_words[${#tab_words[@]}]=$word; done \
+  < <(build_tab_words 1 hello)
+ran=$((ran + 1))
+run_wrapper "${tab_words[@]}"
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "a blank answer still starts the agent and leaves a shell" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if grep -q '^agent arg:' "$tmp/out"; then
+  fail "a blank answer gives the agent no prompt argument" \
+    "output: $(cat "$tmp/out")"
+fi
+
 # A ^C in the pane: it goes to the whole process group, so the agent AND this
 # wrapper get it, and a wrapper killed by it leaves no shell behind at all --
 # the pane dies. Both shapes have to end in a shell: an agent killed by the

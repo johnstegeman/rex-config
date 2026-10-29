@@ -548,8 +548,12 @@ shell_quote() {
 # The bead question, in one screen: the ready list with the prompt row pinned on
 # top, and `preview` in the pane below so a long description never crowds the
 # rows. --print-query is what makes bead-or-text-or-blank expressible at all --
-# the query is line 1, the selected row line 2 when there is one -- so what
-# comes back here is fzf's own reply and status, and fzf_answer reads it.
+# the query is line 1, the key that was pressed line 2 (--expect=ctrl-n, and an
+# empty line when none was), the selected row line 3 when there is one -- so
+# what comes back here is fzf's own reply and status, and fzf_answer reads it.
+# Reading the key off the wrong line is the bug --expect exists to prevent: the
+# blank answer arrives as a key, and a reader that took line 2 for the row would
+# see ctrl-n as a bead.
 #
 # The pane is a bottom one rather than a right-hand split: at the real float
 # size (80x24) a side split leaves about 36 columns for the list, which truncates
@@ -581,6 +585,7 @@ pick_bead() {
     fzf --delimiter='\t' \
       --with-nth=1,2 \
       --print-query \
+      --expect=ctrl-n \
       --bind "load:pos($pos)+refresh-preview" \
       --reverse \
       --header 'pick a bead · type to write a prompt · esc = no bead' \
@@ -588,40 +593,58 @@ pick_bead() {
       --preview "$script preview {1} --main $main_q"
 }
 
-# What fzf's reply to the bead question means, as one "id<TAB>prompt" row.
-# The three answers fzf can give, measured:
+# What fzf's reply to the bead question means, as one "id<TAB>prompt<TAB>blank"
+# row. fzf prints the query first and then -- with --expect, which is how ctrl-n
+# is heard at all -- the key that was pressed on a line of its own, whether or
+# not a row was selected, that line empty when no key was pressed. So:
 #
-#   0, two lines    a row was selected; the query above it is not an answer
-#   1, one line     nothing matched, so the text typed is the prompt itself
-#   130             esc or ctrl-c: no bead, no prompt -- the no-bead flow
+#   0, query, <key>, row   a row was selected; the key line wins over it
+#   1, query, <key>       nothing matched, so the text typed is the prompt
+#   130                    esc or ctrl-c: no bead, no prompt -- the no-bead flow
+#
+# ctrl-n is the blank answer -- an agent, and nothing to say -- so it is no bead
+# and no prompt whatever the row under the cursor said. A reply with no key line
+# at all, or one whose key line is empty, is "no key pressed": the reader takes
+# up to three lines and decides on what it finds rather than on how many lines
+# arrived, so a shorter reply is an answer, never an error.
 #
 # The selected row's id is field 1 of the row, and the prompt row's marker is
-# what tells a prompt from a bead. Both halves are printed with the tab between
-# them, empty where there is no answer, so the caller never counts lines. Any
-# other status is fzf failing rather than answering, and is reported as such:
-# a picker that could not run is not a decision to start no work.
+# what tells a prompt from a bead. All three fields are printed with the tab
+# between them, empty where there is no answer, so the caller never counts
+# lines. Any other status is fzf failing rather than answering, and is reported
+# as such: a picker that could not run is not a decision to start no work.
 fzf_answer() {
-  local status=$1 query='' row=''
+  local status=$1 query='' key='' row=''
   case $status in
     0)
       IFS= read -r query || true
+      IFS= read -r key || true
       IFS= read -r row || true
-      # A query with no row under it is the same answer status 1 gives: fzf's
-      # own options can make it exit 0 on a query that matched nothing
-      # (--exit-0 is the common one), and the text typed then is still the
-      # prompt rather than something to throw away.
-      if [ -z "$row" ]; then
-        printf '\t%s\n' "$query"
+      if [ "$key" = ctrl-n ]; then
+        printf '\t\t1\n'
+      elif [ -z "$row" ]; then
+        # A query with no row under it is the same answer status 1 gives: fzf's
+        # own options can make it exit 0 on a query that matched nothing
+        # (--exit-0 is the common one), and the text typed then is still the
+        # prompt rather than something to throw away.
+        printf '\t%s\t\n' "$query"
       else
-        printf '%s\t\n' "${row%%$'\t'*}"
+        printf '%s\t\t\n' "${row%%$'\t'*}"
       fi
       ;;
     1)
+      # Nothing matched, so there is no row to read: the query and the key line
+      # are what fzf printed, and either of them can be the last line there is.
       IFS= read -r query || true
-      printf '\t%s\n' "$query"
+      IFS= read -r key || true
+      if [ "$key" = ctrl-n ]; then
+        printf '\t\t1\n'
+      else
+        printf '\t%s\t\n' "$query"
+      fi
       ;;
     130)
-      printf '\t\n'
+      printf '\t\t\n'
       ;;
     *)
       printf '%s: the bead picker failed (fzf exit %s)\n' "$PROG" "$status" >&2
@@ -634,7 +657,7 @@ fzf_answer() {
 #
 # That reading, as a subcommand of its own: fzf needs a terminal and cannot be
 # driven from a pipe, so this is the one part of the bead question a test can
-# drive -- the three answers are pinned against the bytes fzf really produces.
+# drive -- the four answers are pinned against the bytes fzf really produces.
 cmd_fzf_answer() {
   [ $# -eq 1 ] || usage_error 'fzf-answer: need the status fzf exited with'
   case $1 in
@@ -739,6 +762,7 @@ cmd_pick() {
   local main='' root='' project='' base='' bead='' branch=''
   local prompt='' agent='' agent_choices=''
   local bead_set=0 prompt_set=0 agent_set=0 branch_set=0 dry_run=0 no_base=0
+  local blank_set=0
   local bd_json='' wt_json='' refs='' base_refs=''
 
   while [ $# -gt 0 ]; do
@@ -913,11 +937,25 @@ cmd_pick() {
         exit 1
       fi
       # Field 1 is the row's id -- the prompt row's marker when that row was
-      # picked -- and field 2 the text typed when nothing matched. Only one of
-      # the two can be non-empty.
+      # picked -- field 2 the text typed when nothing matched, and field 3 the
+      # blank flag. Only one of the first two can be non-empty, and the fields
+      # are read from the answer's end so a prompt holding a tab of its own
+      # keeps it: the flag is what follows the last tab, and what is left holds
+      # the other two.
+      if [ "${answer##*$'\t'}" = 1 ]; then
+        blank_set=1
+      fi
+      answer=${answer%$'\t'*}
       bead=${answer%%$'\t'*}
       prompt=${answer#*$'\t'}
-      if [ "$bead" = "$prompt_row_marker" ]; then
+      if [ "$blank_set" -eq 1 ]; then
+        # ctrl-n is the answer "an agent, and nothing to say": no bead -- the
+        # row under the cursor is not it, whatever the key line printed above
+        # -- and no prompt, so the field the prompt row would open is never
+        # opened at all.
+        bead=''
+        prompt=''
+      elif [ "$bead" = "$prompt_row_marker" ]; then
         # The prompt row hands over to a field of its own: fzf's query line is
         # one line long, with no room to see what is being typed into it.
         bead=''
@@ -1063,7 +1101,10 @@ cmd_pick() {
 
   # prompt and agent travel only when they were answered: an absent prompt leaves
   # the plugin's own template to say what the flow is, and an absent agent is one
-  # the plugin still knows better than the picker does.
+  # the plugin still knows better than the picker does. A blank answer is neither
+  # of those: it says "an agent, and nothing to say", so it carries the blank
+  # flag and no prompt at all -- which is how the tab knows to send the agent no
+  # prompt word rather than the configured template.
   local payload
   payload=$(jq -cn \
     --arg project "$project" \
@@ -1078,6 +1119,7 @@ cmd_pick() {
     --argjson base_default "$base_default" \
     --arg prompt "$prompt" \
     --argjson prompt_set "$prompt_set" \
+    --argjson blank_set "$blank_set" \
     --arg agent "$agent" \
     --argjson agent_set "$agent_set" \
     '{project: $project, root: $root, main: $main, branch: $branch,
@@ -1085,6 +1127,7 @@ cmd_pick() {
       base: (if $base_default == 1 then false else $base end)}
      + (if $base_remote == "" then {} else {base_remote: $base_remote} end)
      + (if $prompt_set == 1 then {prompt: $prompt} else {} end)
+     + (if $blank_set == 1 then {blank: true} else {} end)
      + (if $agent_set == 1 then {agent: $agent} else {} end)')
 
   if [ "$dry_run" -eq 1 ]; then
