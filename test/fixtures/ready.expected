@@ -1,0 +1,3 @@
+pmm-iris-58h	Phase 3 follow-on: implement bootstrap-vs-delta diff path
+pmm-iris-8u1	Per-component grain config on RootSpec (reference | prose | auto)
+pmm-iris-a4l	Treat index/catalog pages as non-extractable

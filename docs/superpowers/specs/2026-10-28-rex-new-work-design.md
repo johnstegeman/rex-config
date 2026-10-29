@@ -93,6 +93,30 @@ directory, as a tab in the project's own session.
 
 ## How it works
 
+> **Superseded (owner decisions after this design).** Two things below were
+> replaced at the product owner's direction once the flow ran for real, and one
+> consequence of that is a trade taken deliberately; the shipped code,
+> `new-work.sh` and `README.md` carry the behaviour to build against.
+>
+> - **The branch question is a typed prompt, not a picker.** There is no
+>   `fzf --print-query` stage: `new-work.sh` prints `branch [bug/58h]> `, a bare
+>   Enter accepts the bead-derived name (so the typed name is the branch, with
+>   nothing to reconcile between a query and a selection), and anything typed is
+>   the branch exactly as typed, trimmed of surrounding whitespace. The candidate
+>   list is still consulted — afterwards — to decide whether the name is a
+>   worktree to switch to or one to create.
+> - **The tab runs a `sh` wrapper, with no `-x` and no kept-open pane.** It is
+>   `wt switch [--create <branch> --base <base>] --no-cd --format=json` → read
+>   `.path` with `jq` → `cd` there → the agent with its prompt →
+>   `exec "$SHELL" -l`. Worktrunk's hooks still run inside the pane, and every
+>   value travels as a positional parameter, never as program text. Exiting that
+>   login shell closes the tab, which is why nothing sets `--keep-open`: a pane
+>   outliving its program is the dead tab this flow exists to avoid.
+> - **Known trade: a ^C during `wt switch` ends the wrapper.** The wrapper
+>   ignores INT only while the agent runs, so a hook approval prompt stays
+>   interruptible; with no kept-open pane the tab closes rather than hanging.
+>   Deliberate, not a bug.
+
 ### Flow
 
 1. `ctrl+space>n` runs action `work_new`.
@@ -117,8 +141,12 @@ directory, as a tab in the project's own session.
    - **Branch** — an `fzf --print-query` prompt prefilled with the bead-derived
      name, listing existing worktrees and local branches too. Enter on an
      existing entry focuses that worktree's existing tab; a new name creates.
+     *Superseded: the branch question is a typed prompt — see “Superseded (owner
+     decisions after this design)” above.*
 5. `new-work.sh` hands back:
-   `rex do work_new_go project=… root=… main=… branch=… bead=… type=… title=…`
+   `rex do work_new_go --args '<json>'`, one JSON object with the keys `project`,
+   `root`, `main`, `branch`, `bead`, `title` and `create`, so no value is ever
+   interpolated into a command line
 6. `work_new_go` (Lua):
    - resolves the project session by label = project name, creating it (with a
      `main` tab in the main worktree) when absent;
@@ -134,9 +162,16 @@ directory, as a tab in the project's own session.
      wt switch <branch> -x <agent> -- <prompt>          # existing branch/worktree
      ```
 
+     *Superseded: no `-x`, no `--keep-open`; the tab runs a `sh` wrapper around
+     `wt switch --no-cd --format=json` — see “Superseded (owner decisions after
+     this design)” above.*
+
    - asks the app to show that session and tab.
 
 ### Why `wt switch -x`
+
+*Superseded: see “Superseded (owner decisions after this design)” above — the
+wrapper replaces `-x`, and there is no kept-open pane.*
 
 `--execute` runs the agent as the worktree's program: worktrunk switches, runs
 its hooks in the tab where their output stays visible, and starts the agent in
@@ -196,6 +231,9 @@ prefix (`pmm-iris-58h` → `58h`) and `<prefix>` comes from `issue_type`:
 | anything else | `feat` |
 
 The default is a prefilled query the user edits, never a forced choice.
+
+*Superseded: the default is offered in a typed prompt and a bare Enter accepts
+it — see “Superseded (owner decisions after this design)” above.*
 
 ### Proven patterns to reuse (no longer on disk)
 
@@ -270,7 +308,8 @@ The repository is cloned into Rex's configuration directory, the way
 ```
 ~/.config/rex/rex-config/      # git clone of this repo
   init.lua                     # module: actions, config, project/session logic
-  new-work.sh                  # fzf pickers; hands back with `rex do work_new_go`
+  new-work.sh                  # the bead picker and the branch prompt; hands back
+                               # with `rex do work_new_go --args <json>`
   test/                        # shell tests
   docs/superpowers/specs/      # this design
   README.md
@@ -289,9 +328,13 @@ The repo's `.beads/` directory travels with the clone and is inert there.
 
 - Exact `fzf` bindings, header text, and the look of the two prompts — including
   whether the bead and branch questions read as two steps or one screen.
+  *Superseded: the bead question is the picker and the branch question a typed
+  prompt — see “Superseded (owner decisions after this design)”.*
 - How the Lua module quotes and assembles the `wt switch … -x … -- <prompt>`
   command for `rex window new` (argument boundaries matter; the prompt contains
-  spaces and slashes).
+  spaces and slashes). *Superseded: the tab's command is the `sh` wrapper above,
+  with every value a positional parameter — see “Superseded (owner decisions
+  after this design)”.*
 - Whether the bead claim happens before or after the worktree exists, and how a
   failed switch is undone.
 - Session-selection mechanics for the CLI hand-back (queue vs. `client.perform`),
