@@ -313,11 +313,19 @@ whose subcommands pipe tests can reach, and Lua gains no filesystem code.
 - **ctrl-n on the ✎ row** — blank: the key wins, the row is ignored.
 - **gum cancelled at ctrl-b** — the branch keeps its previous value and the pick
   continues; a cancelled branch question no longer cancels the pick, because the
-  screen is not a sequence of questions any more.
+  screen is not a sequence of questions any more. A cancelled **fallback** field
+  (below) is a cancelled pick, as a cancelled question always was.
 - **A branch edited by hand** — the branch stops tracking (`branch_edited=1`);
   before that it is recomputed from the bead at each repaint and at hand-back. It
   is **not** recomputed per keystroke: there is no `change` binding, so a typed
   query does not repaint the header on every character.
+- **No bead and no branch** — Enter on a typed prompt, or on the ✎ field, with
+  no branch yet: the screen asks for the branch in a `gum` field, prefilled with
+  whatever the header held (empty when nothing has been derived), and only that
+  path pays for the extra field. This is today's behaviour kept exactly — the
+  bead-less answer has never had a branch to derive — and it means the typed
+  prompt still works without the user knowing about ctrl-b. A cancelled field is
+  a cancelled pick (exit 3), as it is today.
 - **`base = false`** — the header opens on `base: wt default`, no refs are read,
   and ctrl-r can still move off it.
 - **No base ref resolvable** (no origin, no main) — the cycle is just `@`, the
@@ -350,6 +358,10 @@ Everything below runs from `bash test/run.sh` with no pty:
   only when the picker never answered; `base_remote` appears only for a
   remote-tracking base; `blank` travels as a flag and no `prompt` field; an
   existing-worktree branch still sets `create: false`.
+- `test/pick_test.sh` also pins the bead-less fallback: a typed-prompt answer with
+  no `--branch` asks for one, takes the typed line, and an empty or cancelled
+  answer exits 3 the way the branch question always did. `--branch` still
+  short-circuits the ask, so every other fixture stays ask-free.
 - `test/branch_test.sh` — `base-default`'s chain: origin/HEAD's target wins,
   then origin/main, origin/master, main, master; `main/topic` does not
   impersonate `main`; nothing resolvable leaves `@`; the cycle dedupes and drops
@@ -376,8 +388,9 @@ test.
   (`header`, `rows`, `cycle-agent`, `cycle-base`, `branch-field`, `answer`) and
   the exact fzf bindings that call them.
 - The state file's exact syntax and read/write helpers.
-- Whether `cmd_branch_default` is reused as-is for the tracking suggestion or
-  wrapped, and the exact shape of that suggestion when there is no bead.
+- Whether `cmd_branch_default` is reused as-is for the bead's suggestion or
+  wrapped. It stays the only naming scheme: nothing derives a branch from typed
+  text.
 - Whether the existing three question functions (`pick_bead`, `pick_agent`,
   `pick_branch`) are deleted or kept for piped runs, where the composer is not
   used at all.
