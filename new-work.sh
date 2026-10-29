@@ -82,15 +82,19 @@ instead of the repository, as bases does.
 pick's --bead, --prompt, --blank, --agent and --branch answer a question
 instead of asking it, and an empty value means none -- so a run given one of the
 first three opens no screen at all. --blank is the answer ctrl-n gives -- no
-bead and nothing said to the agent, in the branch the screen was showing, which
+bead and nothing said to the agent, in the branch the header was showing, which
 the tab reads as no prompt word at all -- and, like the others, it cannot be
-combined with an answer to the same question. With no terminal on stdin nothing
-is asked: the bead question is skipped, the agent falls back to the one this
-picker used last and then to the first --agents name, and the branch reads an
-empty answer, rather than waiting for any of them. That remembered name lives in
-$XDG_STATE_HOME/rex-config/state (~/.local/state/rex-config/state when unset),
-is read tolerantly and written before each hand-back, and a name the agent list
-no longer offers is ignored.
+combined with an answer to the same question. It is a branch the screen shows: a
+scripted run has no screen, so its branch comes from --branch or from stdin.
+With no terminal on stdin nothing is asked: the bead question is skipped, the
+agent is the name below, and the branch reads stdin rather than waiting.
+
+A pick remembers the agent it chose in $XDG_STATE_HOME/rex-config/state
+(~/.local/state/rex-config/state when unset): read tolerantly, written before
+each hand-back, and a name the agent list no longer offers is ignored. That
+remembered name is what the float's header opens on -- and, with no terminal, it
+is the agent the run takes before the first --agents name.
+
 --main and --root must be absolute: Rex resolves them against its own working
 directory, not this one.
 EOF
@@ -152,8 +156,11 @@ wait_for_key() {
 }
 
 # The status a cancelled pick leaves with: an answer rather than a failure, so
-# the float closes on it the way esc always did. The usage text above says the
-# same number in prose, because a quoted heredoc cannot interpolate this one.
+# the float closes on it without waiting for a key. A field cancelled or left
+# empty leaves it, and so does a pick with no branch at all; esc does not,
+# because esc is the no-bead answer and the screen carries on to the branch
+# field. The usage text above says the same number in prose, because a quoted
+# heredoc cannot interpolate this one.
 cancelled=3
 
 # The first row of the bead question: not a bead, but the way to write a prompt
@@ -406,6 +413,11 @@ cmd_candidates() {
 base_ref_records() {
   local main=$1 fixture=$2
   if [ -n "$fixture" ]; then
+    # A fixture that cannot be opened is refused here rather than left to the
+    # redirect: the shell's own "line 409: ... No such file or directory" names
+    # a line of this script instead of the file, and it arrives beside the
+    # message below rather than instead of it.
+    [ -r "$fixture" ] || return 1
     tr '\0' '\t' <"$fixture"
   else
     ( cd "$main" && git for-each-ref --format='%(refname)%00%(symref)' \
@@ -419,12 +431,16 @@ base_ref_records() {
 # cannot stand in for refs/heads/main. remote is the remote a ref lives on and
 # is empty for everything else, and it is the ref record that says so rather
 # than a slash in the name: feat/x is a local branch and nothing to fetch.
+#
+# LABEL is the command a failure is reported under -- bases, pick, composer
+# cycle-base -- because the same read is made from all three and a person
+# reading the float's one line needs the verb they ran.
 base_chain() {
-  local main=$1 fixture=$2 base=$3 no_base=$4
+  local main=$1 fixture=$2 base=$3 no_base=$4 label=${5:-bases}
   local records
 
   if ! records=$(base_ref_records "$main" "$fixture"); then
-    die "bases: could not read the refs of ${fixture:-$main}"
+    die "$label: could not read the refs of ${fixture:-$main}"
   fi
 
   printf '%s\n' "$records" | awk -F'\t' -v base="$base" -v no_base="$no_base" '
@@ -450,11 +466,28 @@ base_chain() {
       if (no_base == "1") {
         open = ""
       } else if (base != "") {
+        # --base can be given as the refname it really is, and every row here
+        # speaks the short name. One left whole would match no ref record, so a
+        # base on a remote would read as local and the tab would skip the
+        # fetch it needs.
         open = base
-      } else if ("refs/remotes/origin/HEAD" in refs \
-                 && symref["refs/remotes/origin/HEAD"] != "") {
-        open = symref["refs/remotes/origin/HEAD"]
         sub(/^refs\/remotes\//, "", open)
+        sub(/^refs\/heads\//, "", open)
+      } else if ("refs/remotes/origin/HEAD" in refs \
+                 && symref["refs/remotes/origin/HEAD"] ~ /^refs\/remotes\//) {
+        # A symref pointing out of refs/remotes names no base this clone
+        # tracks, so it falls through to the fixed names as any miss does.
+        target = symref["refs/remotes/origin/HEAD"]
+        open = target
+        sub(/^refs\/remotes\//, "", open)
+        # The target can be gone from the dump while the symref still names
+        # it -- a branch deleted upstream. No record then says which remote
+        # it lives on, and the first segment of the name is all that is left;
+        # without it the tab would skip the fetch that ref needs.
+        if (!(target in refs)) {
+          cut = index(open, "/")
+          if (cut > 1) remote_of[open] = substr(open, 1, cut - 1)
+        }
       } else if ("refs/remotes/origin/main" in refs) {
         open = "origin/main"
       } else if ("refs/remotes/origin/master" in refs) {
@@ -531,7 +564,7 @@ cmd_bases() {
     [ -d "$main" ] || die "bases: no such directory: $main"
   fi
 
-  base_chain "$main" "$base_refs" "$base" "$no_base"
+  base_chain "$main" "$base_refs" "$base" "$no_base" 'bases'
 }
 
 # `new-work.sh preview ID --main DIR`
@@ -635,7 +668,18 @@ state_lines() {
 # asked for. XDG's location, so a run can be pointed at a directory of its own
 # and no test ever reads or writes the developer's real one.
 state_dir() {
-  printf '%s\n' "${XDG_STATE_HOME:-${HOME:-}/.local/state}/rex-config"
+  local base
+  # Only an absolute XDG_STATE_HOME is a location: the spec says a relative one
+  # means unset, and joining it to nothing would put the file under whatever
+  # directory the run happened to be in. With neither variable set there is no
+  # per-user place to name -- the walk lands on /, which is nobody's home --
+  # and the write there fails into the same silence as every other state this
+  # picker cannot keep: a memory lost, never a launch.
+  case ${XDG_STATE_HOME:-} in
+    /*) base=$XDG_STATE_HOME ;;
+    *) base=${HOME:-}/.local/state ;;
+  esac
+  printf '%s\n' "$base/rex-config"
 }
 
 # The agent the screen opens on: the answer the last pick wrote, when the list
@@ -656,7 +700,9 @@ remembered_agent() { # NAMES: one offered name per line
   # `agent=` line and a file with no `agent=` line read the same way once the
   # prefix is stripped, and they are two different answers.
   grep -q '^agent=' "$file" 2>/dev/null || return 1
-  name=$(sed -n 's/^agent=//p' "$file" 2>/dev/null | sed -n 1p) || name=''
+  # One sed, and it stops at the first match: `q` is what makes the first
+  # `agent=` line the answer, the way `sed -n 1p` after a second pass did.
+  name=$(sed -n '/^agent=/{s///;p;q;}' "$file" 2>/dev/null) || name=''
   # The remembered "none": an answer, printed as nothing.
   [ -n "$name" ] || return 0
   printf '%s\n' "$names" | grep -Fxq -- "$name" || return 1
@@ -757,7 +803,8 @@ composer_cycle_base() {
   local total index next=1
   total=$(state_lines "$state" bases)
   if [ "$total" -eq 0 ] && { [ -n "$main" ] || [ -n "$base_refs" ]; }; then
-    base_chain "$main" "$base_refs" "$base" "$no_base" >"$state/bases"
+    base_chain "$main" "$base_refs" "$base" "$no_base" 'composer cycle-base' \
+      >"$state/bases"
     total=$(state_lines "$state" bases)
   fi
   index=$(state_get "$state" base_index)
@@ -785,7 +832,17 @@ composer_cycle_base() {
 ask_branch() {
   local prefill=$1 project=${2:-} answer=''
   if on_screen; then
-    local header='branch: Enter accepts the name shown'
+    # The header says what a bare Enter does, and that is not the same thing
+    # twice: with a name in the field Enter keeps it, while an empty field has
+    # nothing to accept -- Enter there is no answer at all, and a pick with
+    # nothing else to name a branch has nothing to start. So the empty field is
+    # told to be typed into rather than to be accepted.
+    local header
+    if [ -n "$prefill" ]; then
+      header='branch: Enter accepts the name shown'
+    else
+      header='branch: type a name'
+    fi
     [ -z "$project" ] || header="$project · $header"
     if [ -n "$prefill" ]; then
       answer=$(gum input --value "$prefill" --header "$header") || answer=''
@@ -1186,14 +1243,15 @@ branch_for_bead() {
 #       `[--bead ID | --prompt TEXT | --blank] [--agents NAME]...`
 #       `[--agent NAME] [--branch NAME] [--dry-run]`
 #
-# The three questions behind ctrl+space>n: which bead (or prompt), which agent,
-# then which branch. The answer goes back to Rex as one JSON object, built by jq
-# so no value is ever interpolated into a command line. --bead, --prompt,
-# --blank, --agent and --branch answer a question without asking it, which is how
-# the tests and scripts drive the picker: --blank is ctrl-n's blank answer -- an
-# agent, and nothing to say -- which a pipe cannot press for itself. --base,
-# --no-base and --base-refs answer the base the branch question opens on, which
-# the payload carries to the tab.
+# The one screen behind ctrl+space>n, and everything it answers: the bead (or a
+# prompt, or neither), the agent, the branch and the base a new branch starts
+# from with the remote it lives on. The answer goes back to Rex as one JSON
+# object, built by jq so no value is ever interpolated into a command line.
+# --bead, --prompt, --blank, --agent and --branch answer a question without
+# asking it, which is how the tests and scripts drive the picker: --blank is
+# ctrl-n's blank answer -- an agent, and nothing to say -- which a pipe cannot
+# press for itself. --base, --no-base and --base-refs answer the base the screen
+# opens on, which the payload carries to the tab.
 cmd_pick() {
   local main='' root='' project='' base='' bead='' branch=''
   local prompt='' agent='' agent_choices=''
@@ -1412,7 +1470,8 @@ cmd_pick() {
     fi
     # The base cycle, resolved once for the whole run: one for-each-ref here, and
     # ctrl-r only ever moves the index into it.
-    base_chain "$main" "$base_refs" "$base" "$no_base" >"$composer_state/bases"
+    base_chain "$main" "$base_refs" "$base" "$no_base" 'pick' \
+      >"$composer_state/bases"
     state_put "$composer_state" base_index 1
     {
       printf '%s\n' "$prompt_row"
@@ -1585,7 +1644,7 @@ cmd_pick() {
       [ -n "$branch" ] || branch=$suggestion
     fi
   elif [ -n "$note" ]; then
-    printf '%s\n' "$note" >&2
+    printf '%s: %s\n' "$PROG" "$note" >&2
   fi
 
   if [ -z "$branch" ]; then
@@ -1627,8 +1686,11 @@ cmd_pick() {
   elif [ "$no_base" -eq 1 ]; then
     base_default=1
   else
-    base_row=$(base_chain "$main" "$base_refs" "$base" '' | sed -n 1p)
-    base_ref=${base:-${base_row%%$'\t'*}}
+    base_row=$(base_chain "$main" "$base_refs" "$base" '' 'pick' | sed -n 1p)
+    # The row's own first field, not the --base word: base_chain opens on that
+    # word and prints where it resolved, which is the short name the cycle
+    # speaks -- what the tab and its fetch can use.
+    base_ref=${base_row%%$'\t'*}
     base_remote=${base_row#*$'\t'}
   fi
 

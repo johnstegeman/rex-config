@@ -238,8 +238,10 @@ switch_worktree() {
 
 # A fetch that fails does not cost the work: one line says the ref is as it was,
 # and the switch below runs from it anyway. Only a create is given a base to
-# start from, so only a create has anything to freshen.
-if [ "$create" = 1 ] && [ -n "$remote" ]; then
+# start from, so only a create has anything to freshen -- and the failure line
+# below names that base, so a remote sent without one is not fetched at all:
+# there would be no ref to name and nothing the branch could start from.
+if [ "$create" = 1 ] && [ -n "$base" ] && [ -n "$remote" ]; then
   if ! fetch_base; then
     printf 'rex-config: could not fetch %s; %s starts from %s as it is\n' \
       "$remote" "$branch" "$base" >&2
@@ -302,7 +304,8 @@ fi
 # the dead pane all over again. The wrapper therefore ignores INT for exactly
 # the length of the agent's run, and the agent gets the default disposition
 # back in its own child. Outside this, INT is left alone: interrupting the
-# switch itself (a hook approval prompt, say) still stops the wrapper as it did.
+# fetch above or the switch itself (a hook approval prompt, say) still stops the
+# wrapper as it did -- neither sits inside the window this trap opens.
 trap '' INT
 ( trap - INT; exec "$@" )
 trap - INT
@@ -979,9 +982,12 @@ function M.setup(opts)
     name = "work_new_go",
     title = "New work: start the branch the picker chose",
     category = "New work",
-    -- An action is handed only the pairs it declares -- `rex do work_new_go
-    -- blank=true` is refused outright without the declaration -- and the picker
-    -- hands back exactly these, so every one of them is declared here.
+    -- This Rex build refuses a *named* undeclared pair -- `rex do work_new_go
+    -- blank=true` is rejected outright without the declaration -- while an
+    -- `--args` object reaches the action whole, undeclared fields and all. The
+    -- picker hands back exactly these pairs, so every one of them is declared
+    -- here: the declaration is what the named path is checked against, and no
+    -- pair the picker sends is left to depend on which path a caller took.
     args = {
       type = "object",
       properties = {

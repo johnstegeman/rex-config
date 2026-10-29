@@ -66,15 +66,35 @@ fi
 EOF
 chmod +x "$tmp/bin/rex" "$tmp/bin/fzf" "$tmp/bin/gum"
 
+# Whether a run_pick/run_pick_answer call is a dry run: only then may the real
+# rex be reached, because a dry run hands nothing back at all.
+run_is_dry() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" = --dry-run ] && return 0
+  done
+  return 1
+}
+
 # run_pick <beads fixture> [options...]
 #
 # Runs the picker with every tool call replaced by saved output: stdout lands
 # in $tmp/out, stderr in $tmp/err, the exit status in $status. PICK_PATH
-# prepends the stand-ins to PATH for the assertions that need them.
+# prepends the stand-ins to PATH for the assertions that need them, and a run
+# that does not name it must be a dry run: without one the picker hands its work
+# to rex, and this harness once handed three picks to the real one that way.
 run_pick() {
   local fixture=$1
   shift
   ran=$((ran + 1))
+  if [ -z "${PICK_PATH:-}" ] && ! run_is_dry "$@"; then
+    fail "run_pick needs PICK_PATH for a run that hands back" \
+      "$* would reach the real rex"
+    status=1
+    : >"$tmp/out"
+    printf 'run_pick: no PICK_PATH and no --dry-run\n' >"$tmp/err"
+    return
+  fi
   rm -f "$tmp/rex-args"
   PATH="${PICK_PATH:-$PATH}" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
     --main /p/demo/main --root /p/demo --project demo \
@@ -85,15 +105,23 @@ run_pick() {
   status=$?
 }
 
-# run_pick_answer <typed text> <beads fixture> [options...]
-#
 # The same run with the branch answer typed on stdin and followed by Enter; an
 # empty text is the bare Enter that accepts the suggestion. The branch question
 # is a typed prompt, so this drives the real path end to end: no fzf stand-in.
+# PICK_PATH is the same requirement it is for run_pick: a run without it has to
+# be a dry one.
 run_pick_answer() {
   local text=$1 fixture=$2
   shift 2
   ran=$((ran + 1))
+  if [ -z "${PICK_PATH:-}" ] && ! run_is_dry "$@"; then
+    fail "run_pick_answer needs PICK_PATH for a run that hands back" \
+      "$* would reach the real rex"
+    status=1
+    : >"$tmp/out"
+    printf 'run_pick_answer: no PICK_PATH and no --dry-run\n' >"$tmp/err"
+    return
+  fi
   rm -f "$tmp/rex-args"
   printf '%s\n' "$text" |
     PATH="${PICK_PATH:-$PATH}" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
@@ -164,8 +192,11 @@ printf 'refs/remotes/upstream/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' 
 # A ready list with nothing on it: the branch question on its own.
 printf '[]\n' >"$tmp/empty-beads.json"
 
-# (a) An empty branch is a cancelled pick: exit 3, no payload, no Rex.
-run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch ''
+# (a) An empty branch is a cancelled pick: exit 3, no payload, no Rex. The
+# stand-in is on PATH so that "no Rex" means the hand-back never ran rather than
+# the real rex never being there.
+PICK_PATH="$tmp/bin:$PATH" run_pick test/fixtures/ready.json \
+  --bead pmm-iris-a4l --branch ''
 if [ "$status" -ne 3 ]; then
   fail "empty branch exits 3" "exit $status: $(cat "$tmp/err")"
 fi
@@ -316,8 +347,10 @@ if [ "$status" -ne 0 ]; then
   fail "empty ready list still picks a branch" \
     "exit $status: $(cat "$tmp/err")"
 fi
+# The note is a line of the script's, so it carries the script's name the way
+# every other line about the run does -- both of the paths it can arrive by do.
 ran=$((ran + 1))
-if ! grep -q 'no ready beads' "$tmp/err"; then
+if ! grep -qxF 'new-work.sh: no ready beads' "$tmp/err"; then
   fail "no ready beads is said out loud" "stderr: $(cat "$tmp/err")"
 fi
 
@@ -605,6 +638,27 @@ elif ! grep -qF "new-work.sh: pick: no such directory: $tmp/nowhere" "$tmp/err";
 elif grep -q 'cd:' "$tmp/err"; then
   fail "a --main that is not there is named" \
     "bash's own cd error is still in: $(cat "$tmp/err")"
+fi
+
+# (h3) The same directory, this time with --no-base and no --base-refs: nothing
+# is read for the base, so the guard above never opens --main and a directory
+# that is not there costs nothing. The arm every run_pick case hides, because
+# every one of them names a --base-refs.
+ran=$((ran + 1))
+./new-work.sh pick --main "$tmp/nowhere" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --no-base --bead '' --branch feat/x --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a --no-base pick never opens --main" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a --no-base pick prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a --no-base pick: the worktrunk default, and no remote" "$json" \
+    '.base == false and (has("base_remote") | not)'
 fi
 
 # (i) preview: `bd show` reads better through bat, and still works without it.
@@ -1095,6 +1149,35 @@ if [ "$status" -ne 2 ]; then
   fail "a base and no base together exit 2" "exit $status: $(cat "$tmp/err")"
 fi
 
+# --base given as the refname it really is travels as the short name: that is
+# what the cycle speaks, and it is the form the remote was found under -- the
+# payload carries the base the tab can use rather than the words it was given.
+run_pick test/fixtures/ready.json --branch feat/x \
+  --base refs/remotes/origin/main --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a full refname base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a full refname base is the short name, on its remote" "$json" \
+    '.base == "origin/main" and .base_remote == "origin"'
+fi
+
+# A --base-refs that cannot be read is one line under this verb's own name,
+# and no shell line number beside it.
+ran=$((ran + 1))
+./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/no-such-refs" --bead '' --branch feat/x --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 1 ]; then
+  fail "an unreadable --base-refs exits 1" "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/err")" != \
+  "new-work.sh: pick: could not read the refs of $tmp/no-such-refs" ]; then
+  fail "an unreadable --base-refs is named under pick" "stderr: $(cat "$tmp/err")"
+fi
+
 # The note is gone. Where a new branch starts from is now a word in the payload
 # rather than a line above the branch question, which is where a person reads it
 # next to the base the tab will really use.
@@ -1431,17 +1514,20 @@ elif ! grep -qxF 'new-work.sh: no branch given, nothing to start' "$tmp/err"; th
   fail "a piped prompt with no branch answer says why" "stderr: $(cat "$tmp/err")"
 fi
 
-rm -f "$tmp/gum-ran"
-PICK_PATH="$tmp/bin:$PATH" GUM_MARKER=$tmp/gum-ran \
-  run_pick test/fixtures/ready.json --prompt 'why is the guard flaky?' \
+# --branch is an answer given before the pick, so the branch question is not asked
+# at all. Off a terminal there is no field to open either way, so what is pinned
+# here is the answer that travels: the branch is the one that was given, and the
+# typed prompt is still the prompt.
+run_pick test/fixtures/ready.json --prompt 'why is the guard flaky?' \
   --branch feat/x --dry-run
 if [ "$status" -ne 0 ]; then
   fail "a piped prompt with --branch exits 0" "exit $status: $(cat "$tmp/err")"
-fi
-ran=$((ran + 1))
-if [ -e "$tmp/gum-ran" ]; then
-  fail "a branch already given opens no field" \
-    "gum was asked: $(cat "$tmp/gum-ran")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a piped prompt with --branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a piped prompt with --branch: the branch is the one given" \
+    "$json" '.branch == "feat/x" and .prompt == "why is the guard flaky?"'
 fi
 
 # The field is part of the screen, and the screen exists only where stdin is a
@@ -1496,7 +1582,9 @@ cat >"$tmp/screen/bin/gum" <<'EOF'
 if [ -n "${GUM_MARKER:-}" ]; then printf '%s\n' "$*" >>"$GUM_MARKER"; fi
 case " $* " in
   *'prompt for the agent'*) printf '%s\n' "${GUM_PROMPT:-}" ;;
-  *'branch: Enter accepts'*)
+  # The branch field, whichever of its two headers it wears: it opens on a name
+  # (Enter accepts it) or on nothing (there is nothing to accept).
+  *'branch:'*)
     [ -z "${GUM_CANCEL:-}" ] || exit 130
     printf '%s\n' "${GUM_BRANCH:-}"
     ;;
@@ -1529,6 +1617,33 @@ run_screen() {
   status=$?
 }
 
+# The field's two headers, each true of its own field: an empty one has nothing
+# for Enter to accept, so it asks for a name rather than pretending a bare
+# Enter is an answer -- on a bead-less pick Enter there is a cancelled pick.
+# The prefilled field is ctrl-b's, opening on the branch the header shows, and
+# there a bare Enter does keep that name.
+rm -f "$tmp/gum-ran"
+composer_state "$tmp/cs10" pi 'feat/one' 1
+: >"$tmp/cs10/bases"
+PATH="$tmp/screen/bin:$PATH" PICK_SCREEN=1 GUM_MARKER=$tmp/gum-ran \
+  GUM_BRANCH=feat/two ./new-work.sh composer branch-field \
+  --state "$tmp/cs10" --project demo >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "a prefilled field exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qF -- 'branch: Enter accepts the name shown' "$tmp/gum-ran" \
+    2>/dev/null; then
+  fail "a prefilled field says Enter accepts the name shown" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+elif ! grep -qF -- '--value feat/one' "$tmp/gum-ran" 2>/dev/null; then
+  fail "a prefilled field opens on the header's branch" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+elif [ "$(cat "$tmp/cs10/branch")" != feat/two ]; then
+  fail "a prefilled field's answer replaces the name it showed" \
+    "branch: [$(cat "$tmp/cs10/branch" 2>/dev/null)]"
+fi
+
 # Typed text the list could not match: the screen's answer is the text and no
 # bead, so the branch is asked for, and what comes back is the branch the tab
 # creates. The field opens on nothing: the header's branch is the name the bead
@@ -1548,7 +1663,7 @@ else
     '.branch == "feat/typed" and .create == true'
 fi
 ran=$((ran + 1))
-if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+if ! grep -qF -- 'branch: type a name' "$tmp/gum-ran" 2>/dev/null; then
   fail "the bead-less answer opens the branch field" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 elif grep -qF -- '--value' "$tmp/gum-ran" 2>/dev/null; then
@@ -1579,7 +1694,7 @@ if ! grep -qF -- '--header prompt for the agent' "$tmp/gum-ran" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 fi
 ran=$((ran + 1))
-if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+if ! grep -qF -- 'branch: type a name' "$tmp/gum-ran" 2>/dev/null; then
   fail "the prompt row then opens the branch field" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 elif grep -qF -- '--value' "$tmp/gum-ran" 2>/dev/null; then
@@ -1605,7 +1720,7 @@ no_branch_answer() { # NAME
       "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
   fi
   ran=$((ran + 1))
-  if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+  if ! grep -qF -- 'branch: type a name' "$tmp/gum-ran" 2>/dev/null; then
     fail "$name still opened the field" \
       "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
   fi
@@ -1631,7 +1746,7 @@ if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 ran=$((ran + 1))
-if ! grep -qF -- 'branch: Enter accepts' "$tmp/gum-ran" 2>/dev/null; then
+if ! grep -qF -- 'branch: type a name' "$tmp/gum-ran" 2>/dev/null; then
   fail "esc opens the branch field" \
     "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
 elif grep -qF -- '--value' "$tmp/gum-ran" 2>/dev/null; then
@@ -1763,8 +1878,9 @@ fi
 # reading it nor writing it may fail a launch.
 #
 # Each case names a state directory of its own, so no case can answer for the
-# next. The missing-file case is every other run in this file: the harness
-# points XDG_STATE_HOME under $tmp and nothing writes a state file there.
+# next. The missing file has a case of its own below rather than riding on
+# whichever run happened to come first: a run that remembers an agent leaves the
+# shared state directory of the harness in place.
 
 # remember <dir> <content>: the file the pick before this one would have left.
 remember() { # DIR CONTENT
@@ -1785,6 +1901,24 @@ quiet_state() { # NAME
   fi
 }
 
+# No state directory at all: the answer is "nothing remembered", quietly, and
+# the first name is the agent. Its own case, and its own directory, because a run
+# that remembers an agent writes into whichever one it was given.
+rm -rf "$tmp/st-missing"
+PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-missing \
+  run_pick test/fixtures/ready.json \
+  --agents pi --agents claude --branch feat/x --dry-run
+quiet_state "a missing state file is not complained about"
+if [ "$status" -ne 0 ]; then
+  fail "a missing state file exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a missing state file prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a missing state file falls back to the first name" "$json" \
+    '.agent == "pi"'
+fi
+
 # A remembered name the list still offers is the answer, in the payload and in
 # the state file the pick leaves behind: the same name, and no key in the
 # payload that a pick with nothing remembered does not have.
@@ -1804,8 +1938,8 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "a remembered agent prints runnable rex do work_new_go from the screen" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "a remembered agent is the header's opening agent" "$json" \
-    '.agent == "claude"'
+  assert_json "a remembered agent is the agent the screen hands back" \
+    "$json" '.agent == "claude"'
 fi
 
 # --agent is an answer given before the screen opened, so the header opens on it
@@ -1937,9 +2071,10 @@ elif [ "$(cat "$tmp/st-ghost/rex-config/state")" != agent=pi ]; then
     "state: $(cat "$tmp/st-ghost/rex-config/state")"
 fi
 
-# Garbage in the file -- a line with no key, an empty one, a line with no value
-# -- is a file with nothing to say, not a reason to stop: the first name, and a
-# pick that runs to the hand-back.
+# Garbage in the file -- a line with no `=` at all, an empty one, and a key with
+# nothing before it -- is a file with nothing to say, not a reason to stop: the
+# first name, and a pick that runs to the hand-back. A line for the key with
+# nothing after it is not garbage: that one is the remembered "none".
 remember "$tmp/st-corrupt" 'garbage
 
 =nonsense

@@ -265,6 +265,16 @@ if ! diff -u "$tmp/want" "$tmp/wt-words"; then
   fail "the base reaches wt switch verbatim"
 fi
 
+# The fetch is the pane's business and says nothing on its stdout: the agent
+# and the shell are what wrote there, and a fetch that added a line of its own
+# -- git's progress, say -- would sit in the middle of their answers.
+ran=$((ran + 1))
+printf 'agent pwd: %s\nagent arg: /brainstorming\nshell pwd: %s\nshell args: -l\n' \
+  "$worktree" "$worktree" >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/out"; then
+  fail "a fetch adds nothing to the pane's stdout"
+fi
+
 # A base on a remote that is not origin: the wrapper fetches the word it was
 # given, upstream, and not the origin it could have assumed.
 ran=$((ran + 1))
@@ -319,6 +329,22 @@ ran=$((ran + 1))
 run_wrapper 1 feat/x1 origin/main "" agent "/brainstorming"
 if [ -e "$tmp/git-calls" ]; then
   fail "no remote means no fetch" "git was given: $(cat "$tmp/git-calls")"
+fi
+
+# A remote with no base to go with it: there is no ref to freshen and nothing a
+# failure line could name, so git is not run at all and the pane stays quiet --
+# the case that used to read "starts from  as it is".
+ran=$((ran + 1))
+GIT_EXIT=1 run_wrapper 1 feat/x1 "" upstream agent "/brainstorming"
+if [ "$status" -ne 0 ]; then
+  fail "a base-less remote still starts the work" \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -e "$tmp/git-calls" ]; then
+  fail "a base-less remote fetches nothing" \
+    "git was given: $(cat "$tmp/git-calls" 2>/dev/null)"
+elif [ -s "$tmp/err" ]; then
+  fail "a base-less remote says nothing about a ref" \
+    "stderr: $(cat "$tmp/err")"
 fi
 
 # And only a create fetches: an existing worktree is not created from a base at

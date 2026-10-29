@@ -336,7 +336,9 @@ and Lua gains no filesystem code.
 
 ## Edge cases and failure behaviour
 
-- **fzf 130** — no bead, `no_bead_prompt`, as today.
+- **fzf 130** — no bead: the configured `no_bead_prompt` speaks for the work, and
+  the pick carries on to the branch field. 130 ends the pick only after that
+  field, when nothing has named a branch by then (see *No bead and no branch*).
 - **ctrl-n on the ✎ row** — blank: the key wins, the row is ignored.
 - **gum cancelled at ctrl-b** — the branch keeps its previous value and the pick
   continues; a cancelled branch question no longer cancels the pick, because the
