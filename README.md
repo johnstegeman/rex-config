@@ -2,16 +2,16 @@
 
 A Rex plugin for starting new work from a bead with one keystroke.
 
-`ctrl+space>n` opens a picker: choose one of the project's ready beads, accept or
-edit the branch name it suggests, and Rex opens a tab for that branch in the
-project's own session, claims the bead, creates the worktree with
-[worktrunk](https://worktrunk.dev), and starts your agent inside it already
-brainstorming the bead.
+`ctrl+space>n` opens a picker: choose one of the project's ready beads — or write
+the prompt yourself — accept or edit the branch name it suggests, say which agent
+to start, and Rex opens a tab for that branch in the project's own session,
+claims the bead, creates the worktree with [worktrunk](https://worktrunk.dev),
+and starts your agent inside it already working on the bead.
 
 ```
-ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktree,
-                                                          a claimed bead,
-                                                          and an agent on it
+ctrl+space>n  →  pick a bead (or type a prompt)  →  which agent  →  edit the
+                 branch name  →  a tab, a worktree, a claimed bead, and an
+                 agent on it
 ```
 
 ## What it does
@@ -20,15 +20,26 @@ ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktre
    directory, works out which project that is, and refuses (naming the reason)
    if the directory is not in a git repository or the repository has no beads
    database.
-2. Otherwise a floating picker opens, running `new-work.sh`. It asks two
-   questions: which ready bead (with a preview of its long description), then
-   which branch — typed at a prompt that offers `<prefix>/<short-id>`, e.g.
-   `bug/58h` for `pmm-iris-58h`, so a bare Enter accepts it. Typing the name of
-   an existing branch or worktree switches to it instead of creating anything;
-   worktrunk's own shortcuts — `^` the default branch, `-` the previous worktree,
-   `@` the current one, `pr:<n>` / `mr:<n>` a pull or merge request's branch —
-   switch too, with no branch created, and the new tab is labelled with what you
-   typed.
+2. Otherwise a floating picker opens, running `new-work.sh`. It asks three
+   questions, in this order:
+   - **which bead.** The ready beads, with a preview of the highlighted one
+     below the list. Text typed at the prompt that matches no bead is the prompt
+     itself, and the pinned top row — `✎  write a prompt instead` — opens a
+     field for text that would be awkward to type on one line. `esc` means no
+     bead, which starts the plain (no-bead) prompt instead. Picking a bead sends
+     `/brainstorming for bead <id>`.
+   - **which agent.** The names in `agents` (default: just your `agent`), with
+     `none` last. `none` starts no agent at all: the tab is still made, the
+     worktree still created and the bead still claimed, and the pane is a login
+     shell in that worktree — with the prompt printed above it, so nothing you
+     typed disappears.
+   - **which branch.** Typed at a prompt that offers `<prefix>/<short-id>`, e.g.
+     `bug/58h` for `pmm-iris-58h`, so a bare Enter accepts it. Typing the name of
+     an existing branch or worktree switches to it instead of creating anything;
+     worktrunk's own shortcuts — `^` the default branch, `-` the previous
+     worktree, `@` the current one, `pr:<n>` / `mr:<n>` a pull or merge request's
+     branch — switch too, with no branch created, and the new tab is labelled
+     with what you typed.
 3. The picker hands its answer back to the action `work_new_go`, which:
    - finds the project's session by label, creating it with a `main` tab in the
      main worktree when it is not there yet;
@@ -46,7 +57,8 @@ ctrl+space>n  →  pick a bead  →  edit the branch name  →  a tab, a worktre
      ```
 
      Every value reaches that wrapper as a positional parameter, so no branch,
-     prompt or agent name is ever parsed as shell text.
+     prompt or agent name is ever parsed as shell text. With no agent the `cd`
+     goes straight to `exec "$SHELL" -l`, after printing the prompt above it.
 
    - and shows that session and tab in the app.
 
@@ -74,7 +86,8 @@ looked up through your shell):
 |---|---|
 | `wt` | worktrunk, for switching, creating, and naming the worktree's path |
 | `jq` | the picker's JSON hand-back, the tab's worktree path, and bead filtering |
-| `fzf` | the bead picker and its preview pane |
+| `fzf` | the bead question: the ready list, the preview, and the typed prompt |
+| `gum` | the agent and branch questions, and the prompt row's input field |
 | `bd` | beads, for `bd ready` and claiming the picked bead |
 | your agent | default `pi`; anything that takes a prompt argument works |
 | `bat` | optional, for the bead preview |
@@ -129,7 +142,8 @@ Every option is optional; these are the defaults.
 
 ```lua
 require("rex-config").setup{
-  agent = "pi",                            -- program started in the new tab
+  agent = "pi",                            -- agent started in the new tab
+  agents = nil,                            -- the picker's agent list; nil = { agent }
   agent_args = {},                         -- extra arguments before the prompt
   bead_prompt = "/brainstorming for bead {id}",  -- {id}, {title}, {branch}, {project}
   no_bead_prompt = "/brainstorming",       -- used when the flow ran without a bead
@@ -147,6 +161,13 @@ require("rex-config").setup{
 built from, so `agent = "claude"` starts Claude instead of `pi` without any
 other change. An unknown option is ignored with a warning rather than silently
 kept.
+
+`agents` is the list the picker's agent question offers, and the first name is
+the one a bare Enter takes: set it to offer a choice, or leave it unset to be
+asked about the one agent you configured. The picker always adds `none` after
+the list — that is the answer that starts no agent, and it is not something to
+configure, so `agents` has no way to say it and an empty `agent` is refused.
+`agent_args` travel to whichever agent is started.
 
 ## The convention
 
@@ -171,6 +192,10 @@ worktrunk shortcut was typed).
   names the directory.
 - A tool missing from the login shell's `PATH`: the picker float says which one
   and waits for a keypress instead of vanishing.
+- Cancelling anywhere — `esc` at the bead list, `ctrl-c` at the agent or branch
+  question — starts nothing and closes the float. `esc` at the bead list is the
+  one exception in meaning, not in effect: it means "no bead", so the flow goes
+  on with the plain prompt.
 - The bead cannot be claimed: the flow stops before a tab is made, naming what
   `bd` said, so an agent never starts on a bead that is not its own.
 - `wt switch` fails (bad ref, dirty base, a failing hook): its output stays in
@@ -190,7 +215,7 @@ worktrunk shortcut was typed).
 ```
 ~/.config/rex/rex-config/
   init.lua        the module: options, the two actions, project and session logic
-  new-work.sh     the bead picker and the branch prompt; hands back to work_new_go
+  new-work.sh     the picker's three questions; hands back to work_new_go
   test/           lua and bash tests, run with `bash test/run.sh`
   docs/           the design this was built from
 ```

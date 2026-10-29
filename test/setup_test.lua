@@ -424,6 +424,10 @@ eq("bd that cannot start reports why", beads_reason,
 
 -- work_new() ----------------------------------------------------------------
 
+-- The options at their defaults: an earlier assertion in this file left the
+-- agent set to claude, and the picker's default list is built from it.
+M.setup{ agent = "pi" }
+
 stub = project_stub()
 local ok, result = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("work_new opens the picker", ok, true)
@@ -443,7 +447,7 @@ eq("the float's label", layer.layout.block.label, "new work")
 eq("the picker starts in the main worktree", layer.layout.block.options.cwd, "/x/pmm-iris/main")
 eq("the picker command", layer.layout.block.options.command,
   { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--base", "@" })
+    "--project", "pmm-iris", "--base", "@", "--agents", "pi" })
 
 -- A second press replaces the picker instead of stacking another one.
 local ok_again, result_again = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
@@ -496,7 +500,36 @@ stub = project_stub()
 M.setup{ base = false }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("no --base when base is false", stub.layers[1].layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris", "--project", "pmm-iris" })
+  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+    "--project", "pmm-iris", "--agents", "pi" })
+
+-- The agent question is a list, so every name is handed over in order: the first
+-- is the one the picker offers as its default. A configured list replaces the
+-- single agent rather than adding to it.
+stub = project_stub()
+M.setup{ base = "@", agents = { "pi", "claude" } }
+pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
+eq("configured agent names are all offered, in order",
+  stub.layers[1].layout.block.options.command,
+  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+    "--project", "pmm-iris", "--base", "@", "--agents", "pi", "--agents", "claude" })
+
+-- agents is the picker's list, so it reaches the float as one --agents per name:
+-- a string here is the same mistake as a string agent_args, and a name that is
+-- not a name would reach the picker as nothing at all. pairs() cannot carry a
+-- nil, so the unset state is put back by hand.
+M.options.agents = nil
+eq("agents has no default of its own", M.options.agents, nil)
+local ok_agents, agents_message = pcall(M.setup, { agents = "pi" })
+eq("a non-table agents is refused", ok_agents, false)
+contains("a non-table agents names the option", agents_message, "agents")
+eq("a refused agents leaves the option unset", M.options.agents, nil)
+local ok_blank, blank_message = pcall(M.setup, { agents = { "pi", "" } })
+eq("an empty agent name is refused", ok_blank, false)
+contains("an empty agent name names the option", blank_message, "agents")
+local ok_number, number_message = pcall(M.setup, { agents = { 3 } })
+eq("a number in agents is refused", ok_number, false)
+contains("a number in agents names the option", number_message, "agents")
 
 if fails > 0 then os.exit(1) end
 print("ok " .. count .. " assertions")

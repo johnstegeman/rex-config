@@ -426,6 +426,65 @@ for run_shell in $shells; do
       "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
   fi
 done
+# No agent: the picker's "none". The pane is the worktree and a login shell, and
+# the prompt -- which has nowhere to go -- is printed above that shell rather
+# than disappearing with the float that collected it.
+ran=$((ran + 1))
+run_wrapper 0 feat/x1 "" "" "look before you leap"
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "no agent still lands in a shell in the worktree" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+if grep -q 'agent pwd' "$tmp/out"; then
+  fail "no agent starts nothing" "output: $(cat "$tmp/out")"
+fi
+
+ran=$((ran + 1))
+if ! grep -q 'no agent started; the prompt is:' "$tmp/err" \
+  || ! grep -qxF 'look before you leap' "$tmp/err"; then
+  fail "no agent prints the prompt it could not deliver" \
+    "stderr: $(cat "$tmp/err")"
+fi
+
+# The switch is worktrunk's, not the agent's, so a create still happens -- and
+# with no agent there is no agent's arguments to give to anyone.
+ran=$((ran + 1))
+run_wrapper 1 feat/x1 @ "" "p"
+printf 'switch\n--create\nfeat/x1\n--base\n@\n--no-cd\n--format=json\n' >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/wt-words"; then
+  fail "no agent still asks worktrunk to create the branch from the base"
+fi
+
+ran=$((ran + 1))
+if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "a create with no agent still ends in a shell" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
+# An empty prompt is nothing to say: the pane is the shell, with no line about
+# a prompt nobody wrote.
+ran=$((ran + 1))
+run_wrapper 0 feat/x1 "" "" ""
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "no agent and no prompt still lands in the shell" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+elif grep -q 'the prompt is:' "$tmp/err"; then
+  fail "an empty prompt is not announced" "stderr: $(cat "$tmp/err")"
+fi
+
+# A switch that fails with no agent names what is not started: "not starting "
+# followed by nothing is not a sentence.
+ran=$((ran + 1))
+WT_FAIL=1 run_wrapper 1 nope/nothing @ "" "/brainstorming"
+if ! grep -q 'wt switch nope/nothing failed' "$tmp/err"; then
+  fail "a failed switch with no agent says why" "stderr: $(cat "$tmp/err")"
+elif ! grep -q 'not starting an agent' "$tmp/err"; then
+  fail "a failed switch with no agent names what is not started" \
+    "stderr: $(cat "$tmp/err")"
+fi
+
 
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"

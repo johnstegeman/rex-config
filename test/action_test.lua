@@ -423,13 +423,48 @@ do
 end
 
 -- Without a branch or an agent there is nothing to start, and a tab that ran
--- something arbitrary would be worse than a refusal.
+-- something arbitrary would be worse than a refusal. A *configured* agent has to
+-- be a program; only the picker's answer may be "none".
 eq("a tab needs a branch", pcall(M.new_tab_argv, PROJECT, {}), false)
 do
   local agent = M.options.agent
   M.options.agent = ""
   eq("a tab needs an agent", pcall(M.new_tab_argv, PROJECT, { branch = "x" }), false)
   M.options.agent = agent
+end
+
+-- The picker's two other answers. The agent it names is the one this tab starts
+-- -- it is an answer about one tab, so it overrides the configured default per
+-- tab rather than changing it -- and the prompt typed there is what the agent is
+-- asked, in place of either template.
+eq("new_tab_argv starts the agent the picker chose",
+  M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff", agent = "claude" }),
+  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "claude", "/brainstorming for bead " .. BEAD })
+
+eq("new_tab_argv sends the prompt the picker was given",
+  M.new_tab_argv(PROJECT, { branch = "x", create = true, prompt = "why is the guard flaky?" }),
+  { "sh", "-c", WRAPPER, "sh", "1", "x", "@", "pi", "why is the guard flaky?" })
+
+eq("a typed prompt wins over the bead's",
+  M.new_tab_argv(PROJECT, { branch = "x", bead = BEAD, title = "Diff", prompt = "just look" })[9],
+  "just look")
+
+-- "none" is an empty agent parameter, and an empty parameter is what keeps the
+-- wrapper from exec'ing nothing. With no agent there is nobody to be prompted,
+-- so a prompt the user did not type themselves is not sent at all -- the
+-- templates are for an agent that is about to start -- and the one they did type
+-- is, because the wrapper prints it above the shell it leaves. The agent's own
+-- arguments stop with the agent: there is no program left to give them to.
+do
+  local agent_args = M.options.agent_args
+  M.options.agent_args = { "--thinking", "high" }
+  eq("new_tab_argv with no agent",
+    M.new_tab_argv(PROJECT, { branch = "x", agent = "" }),
+    { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "" })
+  eq("new_tab_argv with no agent keeps a prompt that was typed",
+    M.new_tab_argv(PROJECT, { branch = "x", agent = "", prompt = "look first" })[9],
+    "look first")
+  M.options.agent_args = agent_args
 end
 
 -- work_new_go(): the whole flow ----------------------------------------------
@@ -650,6 +685,24 @@ eq("no bead means the plain prompt",
   request_of(stub, "session.new_window").layout.block.options.command,
   M.new_tab_argv(PROJECT, payload{ bead = "", title = "" }))
 
+-- The picker's other two answers reach the tab as well: an empty agent is its
+-- "none", and the prompt it could not deliver still travels, because the wrapper
+-- is what prints it above the shell it leaves behind.
+stub = new_branch_stub()
+pcall(M.work_new_go, { origin = "cli" },
+  payload{ bead = "", title = "", agent = "", prompt = "look before you leap" })
+do
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("no agent means a tab that starts none", command[8], "")
+  eq("no agent still carries the prompt", command[#command], "look before you leap")
+end
+
+stub = new_branch_stub()
+pcall(M.work_new_go, { origin = "cli" }, payload{ agent = "claude" })
+eq("the agent the picker chose is the one the tab starts",
+  request_of(stub, "session.new_window").layout.block.options.command[8], "claude")
+eq("the configured agent is left alone", M.options.agent, "pi")
+
 -- Switching to a worktree that already exists, with no tab for it yet: the tab
 -- is made without --create, so no second worktree appears.
 stub = new_branch_stub()
@@ -739,7 +792,7 @@ do
   end
   eq("work_new_go is registered", type(go), "table")
   eq("work_new_go declares its arguments", sorted_keys(go and go.args and go.args.properties),
-    { "bead", "branch", "create", "main", "project", "root", "title" })
+    { "agent", "bead", "branch", "create", "main", "project", "prompt", "root", "title" })
   eq("work_new_go requires what the picker always sends",
     go and go.args.required, { "project", "root", "main", "branch" })
   eq("the arguments are typed", go and go.args.properties.create, { type = "boolean" })

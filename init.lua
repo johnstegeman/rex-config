@@ -115,6 +115,11 @@ end
 M.options = {
   agent = "pi",
   agent_args = {},
+  -- The list the picker's agent question offers. Unset -- nil rather than left
+  -- out, so it reads as a default -- means the one agent above. The picker
+  -- always adds its own no-agent row after these, so "none" is never a name to
+  -- configure.
+  agents = nil,
   bead_prompt = "/brainstorming for bead {id}",
   no_bead_prompt = "/brainstorming",
   base = "@",
@@ -136,7 +141,9 @@ M.options = {
 -- bash -- it runs on whatever `sh` the machine has.
 M.new_tab_script = [==[
 # $1 = create (1 or 0), $2 = branch, $3 = base (empty when there is none), then
-# the agent and the arguments it is started with, the prompt last.
+# the agent and the arguments it is started with, the prompt last. An empty
+# agent is an answer -- the picker's "none" -- and the pane then goes straight to
+# a login shell, with the prompt said out loud instead of dropped.
 
 # A login shell is this program's last act, and every path below ends here: it
 # is what keeps the pane alive once the agent is gone, with the output above it
@@ -162,9 +169,12 @@ create=$1
 branch=$2
 base=$3
 shift 3
-# Named once so the messages below can name the agent even if it was sent with
-# no arguments: nothing is run then, but the pane still has to say what.
-agent=${1:-the agent}
+# Named once so the messages below can name what is not started even when no
+# agent was asked for: "not starting " is not a sentence. ${1-} rather than $1
+# because a caller that sent the three parameters and nothing else leaves it
+# unset, and `nounset` would end this wrapper before it could open a shell.
+agent=${1-}
+what=${agent:-an agent}
 
 # worktrunk owns the switch: --create makes the branch and its worktree, --base
 # says what the branch starts from (only meaningful when creating), and --no-cd
@@ -203,10 +213,10 @@ if [ -z "$path" ]; then
   # the line, so neither case says "no path (exit 0)".
   if [ "$switched" -eq 0 ]; then
     printf 'rex-config: could not read the worktree path of %s from the switch reply (jq missing, or no path in it); not starting %s\n' \
-      "$branch" "$agent" >&2
+      "$branch" "$what" >&2
   else
     printf 'rex-config: wt switch %s failed (exit %s); not starting %s\n' \
-      "$branch" "$switched" "$agent" >&2
+      "$branch" "$switched" "$what" >&2
   fi
   leave_shell
 fi
@@ -214,9 +224,24 @@ fi
 # `cd --` ends the options: a path that starts with a dash is a directory like
 # any other, not a flag the shell refuses.
 cd -- "$path" || {
-  printf 'rex-config: could not enter %s; not starting %s\n' "$path" "$agent" >&2
+  printf 'rex-config: could not enter %s; not starting %s\n' "$path" "$what" >&2
   leave_shell
 }
+
+# No agent was asked for: the pane is the worktree and a login shell. The prompt
+# is the last parameter -- whatever else came with it belonged to an agent that
+# is not running -- and it has nowhere to go now, so it is printed above the
+# shell rather than disappearing with the float that collected it.
+if [ -z "$agent" ]; then
+  prompt=
+  for arg in "$@"; do
+    prompt=$arg
+  done
+  if [ -n "$prompt" ]; then
+    printf 'rex-config: no agent started; the prompt is:\n%s\n' "$prompt" >&2
+  fi
+  leave_shell
+fi
 
 # A ^C while the agent runs belongs to the agent: the terminal sends it to
 # every process in the pane's group, so the agent dies (or handles it) -- and if
@@ -238,23 +263,41 @@ leave_shell
 --
 -- because a parameter is the one way a branch, a prompt or an agent name
 -- reaches a shell without the shell parsing it as text. The prompt is the
--- bead's, unless the flow was started without one.
+-- picker's own when it was typed there, the bead's, or -- with neither -- the
+-- configured no-bead prompt. An empty agent is the picker's "none": the wrapper
+-- starts nothing and hands the pane to a login shell.
 function M.new_tab_argv(project, args)
   args = args or {}
   assert(type(args.branch) == "string" and args.branch ~= "",
     "new_tab_argv: a branch is required")
+  -- The configured default is a program that has to exist: nobody may set an
+  -- empty agent in a configuration file and quietly get no agent at all. A
+  -- payload may answer none, and that is the only way to say it.
   assert(type(M.options.agent) == "string" and M.options.agent ~= "",
     "new_tab_argv: an agent is required")
-  local prompt
-  if type(args.bead) == "string" and args.bead ~= "" then
-    prompt = M.render_prompt(M.options.bead_prompt, {
-      id = args.bead,
-      title = args.title,
-      branch = args.branch,
-      project = project,
-    })
-  else
-    prompt = M.options.no_bead_prompt
+  local agent = M.options.agent
+  if type(args.agent) == "string" then
+    agent = args.agent
+  end
+  local prompt = ""
+  if type(args.prompt) == "string" and args.prompt ~= "" then
+    -- What was typed at the picker beats both templates: it is an answer, where
+    -- they are what the plugin says when nobody said anything.
+    prompt = args.prompt
+  elseif agent ~= "" then
+    -- The templates are a prompt for an agent that is about to start, so with
+    -- no agent there is nothing to deliver and nothing to say: the wrapper only
+    -- prints a prompt the user really typed above the shell it leaves.
+    if type(args.bead) == "string" and args.bead ~= "" then
+      prompt = M.render_prompt(M.options.bead_prompt, {
+        id = args.bead,
+        title = args.title,
+        branch = args.branch,
+        project = project,
+      })
+    else
+      prompt = M.options.no_bead_prompt
+    end
   end
 
   -- --base says what a new branch starts from, so it only travels when
@@ -272,16 +315,19 @@ function M.new_tab_argv(project, args)
     args.create and "1" or "0",
     args.branch,
     base,
-    M.options.agent,
+    agent,
   }
-  for _, arg in ipairs(M.options.agent_args or {}) do
-    argv[#argv + 1] = arg
+  -- An agent's arguments are the agent's, so they travel only when one starts.
+  if agent ~= "" then
+    for _, arg in ipairs(M.options.agent_args or {}) do
+      argv[#argv + 1] = arg
+    end
   end
   argv[#argv + 1] = prompt
   return argv
 end
 
-local OPTION_NAMES = { "agent", "agent_args", "bead_prompt", "no_bead_prompt", "base", "bounds", "script" }
+local OPTION_NAMES = { "agent", "agent_args", "agents", "bead_prompt", "no_bead_prompt", "base", "bounds", "script" }
 local KNOWN_OPTION = {}
 for _, name in ipairs(OPTION_NAMES) do
   KNOWN_OPTION[name] = true
@@ -458,6 +504,18 @@ local function close_picker()
   picker.session_id, picker.layer_id = nil, nil
 end
 
+-- The agent names the picker's agent question offers, in the order it offers
+-- them: the first is the one an unasked question takes. Unset means the one
+-- configured agent, so a configuration that names no list still gets the
+-- question -- the agent, or none -- rather than no question at all.
+local function agent_choices()
+  local agents = M.options.agents
+  if type(agents) ~= "table" or #agents == 0 then
+    return { M.options.agent }
+  end
+  return agents
+end
+
 -- argv for new-work.sh's picker. base = false means "let worktrunk choose",
 -- so there is no --base to pass on.
 local function picker_command(project)
@@ -470,6 +528,14 @@ local function picker_command(project)
   if M.options.base ~= nil and M.options.base ~= false then
     command[#command + 1] = "--base"
     command[#command + 1] = M.options.base
+  end
+  -- The agent question is asked only where the picker is given a list, so an
+  -- answer always comes back for a question that was really asked.
+  for _, name in ipairs(agent_choices()) do
+    if name ~= "" then
+      command[#command + 1] = "--agents"
+      command[#command + 1] = name
+    end
   end
   return command
 end
@@ -775,6 +841,20 @@ function M.setup(opts)
       error(string.format(
         'rex-config: agent_args must be a list of arguments, not a %s', type(value)), 0)
     end
+    -- agents reaches the picker as one --agents per name, so a string here is
+    -- the same mistake in a different shape, and a name that is not a string
+    -- would reach the float as nothing at all.
+    if key == "agents" then
+      if type(value) ~= "table" then
+        error(string.format(
+          'rex-config: agents must be a list of agent names, not a %s', type(value)), 0)
+      end
+      for _, name in ipairs(value) do
+        if type(name) ~= "string" or name == "" then
+          error('rex-config: agents must be a list of agent names, so each one is a non-empty string', 0)
+        end
+      end
+    end
   end
 
   for key, value in pairs(opts or {}) do
@@ -813,6 +893,10 @@ function M.setup(opts)
         root = { type = "string" },
         main = { type = "string" },
         branch = { type = "string" },
+        -- The agent the picker chose -- an empty string is its "none" -- and the
+        -- prompt the user typed there, when they typed one.
+        agent = { type = "string" },
+        prompt = { type = "string" },
         bead = { type = "string" },
         title = { type = "string" },
         create = { type = "boolean" },
