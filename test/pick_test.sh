@@ -1093,6 +1093,184 @@ elif grep -qF 'new branches start from' "$tmp/err"; then
 fi
 
 
+# (s) The composer: the one screen's answers, kept in a directory of their own
+# with one file per answer, so a key can read and change one of them while fzf
+# is up. fzf needs a terminal, so the screen itself is out of reach here; what
+# is pinned is the program behind each key and the two lines it shows -- the
+# header's exact bytes, and that a key changes one field and leaves the rest
+# (the rows, the other answers) alone.
+
+# The state directory a picker run builds before it opens the screen.
+composer_state() { # DIR AGENT BRANCH BASE_INDEX
+  local dir=$1
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  printf '%s\n' "$2" >"$dir/agent"
+  printf '%s\n' "$3" >"$dir/branch"
+  printf '%s\n' "$4" >"$dir/base_index"
+  printf '%s\n' "✎"$'\t'"write a prompt instead" \
+    "pmm-iris-a4l"$'\t'"Treat index/catalog pages as non-extractable" >"$dir/rows"
+}
+
+# run_composer <args...>: the verb's stdout in $tmp/out, its stderr in $tmp/err,
+# its exit status in $status. stdin is a pipe with nothing on it, which is how a
+# verb that asks for an answer is answered with an empty one.
+run_composer() {
+  ran=$((ran + 1))
+  ./new-work.sh composer "$@" >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+# The two header lines, exactly: the leading space and the separators are part
+# of what fzf shows, so they are part of what is compared.
+heading() { # PROJECT AGENT BRANCH BASE
+  printf ' %s · agent: %s · branch: %s · base: %s\n %s\n' "$1" "$2" "$3" "$4" \
+    'ctrl-a agent  ctrl-b branch  ctrl-r base  ctrl-n blank  enter start  esc no bead'
+}
+
+check_header() { # NAME WANT
+  local name=$1 want=$2
+  if [ "$status" -ne 0 ]; then
+    fail "$name exits 0" "exit $status: $(cat "$tmp/err")"
+  elif [ "$(cat "$tmp/out")" != "$want" ]; then
+    fail "$name" "want [$want], got [$(cat "$tmp/out")]"
+  fi
+}
+
+# The header the screen opens on: the project, then the three answers, then the
+# line of keys. An empty agent is "none" -- the cycle's no-agent row -- and an
+# empty base ref is the worktrunk-default sentinel, named rather than blanked.
+composer_state "$tmp/cs1" pi 'bug/58h' 1
+printf 'origin/main\torigin\n@\t\nmain\t\n' >"$tmp/cs1/bases"
+run_composer header --state "$tmp/cs1" --project rex-config
+check_header "the header's two lines" \
+  "$(heading rex-config pi 'bug/58h' origin/main)"
+
+composer_state "$tmp/cs2" '' 'feat/x' 1
+printf '\t\n@\t\nmain\t\n' >"$tmp/cs2/bases"
+run_composer header --state "$tmp/cs2" --project rex-config
+check_header "an empty agent is none and an empty base is the wt default" \
+  "$(heading rex-config none 'feat/x' 'wt default')"
+
+# ctrl-a: the next name on the agent list, then none, then round again -- and
+# only the header is repainted. The rows are beads, so nothing about them
+# depends on the agent and a key that reloaded them would clear the list and
+# drop the cursor back to the top for a one-word change.
+composer_state "$tmp/cs3" pi 'feat/one' 1
+printf 'origin/main\torigin\n@\t\n' >"$tmp/cs3/bases"
+rows_before=$(cat "$tmp/cs3/rows")
+cycle_agent() { # NAME WANT_LABEL WANT_AGENT
+  local name=$1 label=$2 file=$3
+  run_composer cycle-agent --state "$tmp/cs3" --project rex-config \
+    --agents pi --agents claude
+  if [ "$status" -ne 0 ]; then
+    fail "$name exits 0" "exit $status: $(cat "$tmp/err")"
+    return
+  fi
+  if [ "$(cat "$tmp/out")" != \
+    "$(heading rex-config "$label" feat/one origin/main)" ]; then
+    fail "$name repaints the header" "stdout: $(cat "$tmp/out")"
+  fi
+  if [ "$(cat "$tmp/cs3/agent")" != "$file" ]; then
+    fail "$name writes the agent" "agent file: [$(cat "$tmp/cs3/agent")]"
+  fi
+  ran=$((ran + 1))
+  if [ "$(cat "$tmp/cs3/rows")" != "$rows_before" ]; then
+    fail "$name leaves the rows alone" "rows: $(cat "$tmp/cs3/rows")"
+  fi
+}
+cycle_agent 'the next agent is the second name' claude claude
+cycle_agent 'the name after the last is none' none ''
+cycle_agent 'the cycle wraps to the first name' pi pi
+
+# ctrl-r: the next base in the cycle, then round again. The cycle was resolved
+# once, before the screen opened -- one for-each-ref per run, not one per
+# keystroke -- so a --main that is not even there proves no ref was read.
+composer_state "$tmp/cs4" pi 'feat/one' 1
+printf 'origin/main\torigin\n@\t\nmain\t\n' >"$tmp/cs4/bases"
+cycle_base() { # NAME WANT_INDEX WANT_LABEL
+  local name=$1 index=$2 label=$3
+  run_composer cycle-base --state "$tmp/cs4" --project rex-config \
+    --main "$tmp/nowhere"
+  if [ "$status" -ne 0 ]; then
+    fail "$name exits 0" "exit $status: $(cat "$tmp/err")"
+    return
+  fi
+  if [ "$(cat "$tmp/out")" != \
+    "$(heading rex-config pi feat/one "$label")" ]; then
+    fail "$name repaints the header" "stdout: $(cat "$tmp/out")"
+  fi
+  if [ "$(cat "$tmp/cs4/base_index")" != "$index" ]; then
+    fail "$name moves the index" "base_index: $(cat "$tmp/cs4/base_index")"
+  fi
+}
+cycle_base 'the next base is @' 2 '@'
+cycle_base 'the base after that is main' 3 'main'
+cycle_base 'the cycle wraps to the opening answer' 1 'origin/main'
+
+# ctrl-b: the branch, typed. gum asks it in the float and stdin carries it in a
+# pipe, so this is the real path either way. The answer is trimmed, the edit is
+# marked so the branch stops tracking the bead, and nothing is printed -- fzf is
+# told the branch by the header, not by what this wrote.
+composer_state "$tmp/cs5" pi 'feat/one' 1
+: >"$tmp/cs5/bases"
+run_branch_field() { # DIR STDIN
+  ran=$((ran + 1))
+  if [ "$2" = EOF ]; then
+    ./new-work.sh composer branch-field --state "$1" --project rex-config \
+      >"$tmp/out" 2>"$tmp/err" </dev/null
+  else
+    printf '%s\n' "$2" |
+      ./new-work.sh composer branch-field --state "$1" --project rex-config \
+        >"$tmp/out" 2>"$tmp/err"
+  fi
+  status=$?
+}
+run_branch_field "$tmp/cs5" '  feat/two  '
+if [ "$status" -ne 0 ]; then
+  fail "a typed branch exits 0" "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/cs5/branch")" != 'feat/two' ]; then
+  fail "a typed branch is trimmed" "branch: [$(cat "$tmp/cs5/branch")]"
+elif [ "$(cat "$tmp/cs5/branch_edited")" != 1 ]; then
+  fail "a typed branch stops tracking the bead" \
+    "branch_edited: [$(cat "$tmp/cs5/branch_edited" 2>/dev/null)]"
+elif [ -s "$tmp/out" ]; then
+  fail "a typed branch prints nothing" "stdout: $(cat "$tmp/out")"
+fi
+
+# A field that was cancelled (ctrl-c, or no line at all on a pipe) and one that
+# was left empty, or filled with spaces, are the same answer: the branch keeps
+# the value it had and the pick carries on. Nothing was edited, so nothing is
+# marked either -- the branch still tracks the bead.
+composer_state "$tmp/cs6" pi 'feat/one' 1
+: >"$tmp/cs6/bases"
+keeps_branch() { # NAME STDIN
+  local name=$1
+  run_branch_field "$tmp/cs6" "$2"
+  if [ "$status" -ne 0 ]; then
+    fail "$name exits 0" "exit $status: $(cat "$tmp/err")"
+  elif [ "$(cat "$tmp/cs6/branch")" != 'feat/one' ]; then
+    fail "$name keeps the branch" "branch: [$(cat "$tmp/cs6/branch")]"
+  elif [ -s "$tmp/cs6/branch_edited" ]; then
+    fail "$name marks no edit" \
+      "branch_edited: [$(cat "$tmp/cs6/branch_edited")]"
+  fi
+}
+keeps_branch 'an empty answer keeps the branch' ''
+keeps_branch 'a space-only answer keeps the branch' '   '
+keeps_branch 'a cancelled field keeps the branch' EOF
+
+# rows is what fzf is given: the prompt row first, then the beads, byte for
+# byte -- tabs, and a title holding a tab of its own, included.
+composer_state "$tmp/cs7" pi '' 1
+printf '✎\twrite a prompt instead\nb-1\tA title\twith a tab\n' >"$tmp/cs7/rows"
+run_composer rows --state "$tmp/cs7"
+if [ "$status" -ne 0 ]; then
+  fail "rows exits 0" "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/out")" != "$(cat "$tmp/cs7/rows")" ]; then
+  fail "rows prints the rows verbatim" "stdout: $(cat "$tmp/out")"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
   exit 1

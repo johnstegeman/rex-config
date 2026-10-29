@@ -604,8 +604,12 @@ local function agent_choices()
   return agents
 end
 
--- argv for new-work.sh's picker. base = false means "let worktrunk choose",
--- so there is no --base to pass on.
+-- argv for new-work.sh's picker, every word of it built here and nowhere else.
+-- base = false means "let worktrunk choose", so there is no ref to pass on --
+-- but the picker still has to be told, because a picker told nothing resolves
+-- the remote's default branch itself and the screen would open on a base the
+-- configuration opted out of. So false is --no-base: the cycle opens on the
+-- worktrunk-default sentinel, and ctrl-r can still move off it.
 local function picker_command(project)
   local command = {
     M.options.script, "pick",
@@ -613,7 +617,9 @@ local function picker_command(project)
     "--root", project.root,
     "--project", project.name,
   }
-  if M.options.base ~= nil and M.options.base ~= false then
+  if M.options.base == false then
+    command[#command + 1] = "--no-base"
+  elseif M.options.base ~= nil then
     command[#command + 1] = "--base"
     command[#command + 1] = M.options.base
   end

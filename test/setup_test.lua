@@ -497,13 +497,17 @@ eq("a bd that cannot be consulted is not called a missing database", broken_bd_m
   "bd failed in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
 eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
 
--- base = false means "let worktrunk choose", so there is nothing to pass on.
+-- base = false means "let worktrunk choose", so there is no ref to name -- and
+-- the picker is told so, because a picker that is told nothing resolves the
+-- remote's default branch and opens the screen on a base the configuration
+-- opted out of. The screen then opens on "wt default" and ctrl-r can still move
+-- off it: the opt-out sets the answer it starts on, it does not pin the field.
 stub = project_stub()
 M.setup{ base = false }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("no --base when base is false", stub.layers[1].layout.block.options.command,
   { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--agents", "pi" })
+    "--project", "pmm-iris", "--no-base", "--agents", "pi" })
 
 -- The agent question is a list, so every name is handed over in order: the first
 -- is the one the picker offers as its default. A configured list replaces the

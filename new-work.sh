@@ -23,7 +23,7 @@ commands:
       print the branch names that already exist, one per line, worktree
       branches first
   bases --main DIR [--base-refs FILE] [--base REF | --no-base]
-      print the bases the branch question opens on and cycles through, one
+      print the bases the screen opens on and cycles through, one
       "ref<TAB>remote" row each, the opening answer first; an empty ref means
       no --base at all, which leaves it to worktrunk
   fzf-answer STATUS
@@ -33,10 +33,21 @@ commands:
   pick --main DIR --root PATH --project NAME [--base REF | --no-base]
        [--base-refs FILE] [--bead ID | --prompt TEXT | --blank]
        [--agents NAME]... [--agent NAME] [--branch NAME] [--dry-run]
-      ask which bead (or prompt), which agent, and which branch, and hand the
-      answer to Rex as one JSON object, with the base a new branch is created
-      from and the remote that base lives on; exit 3 when no branch or agent was
-      chosen, exit 2 when the name typed for a new branch is not a valid ref
+      open the one screen and hand its answers to Rex as one JSON object: the
+      bead (or prompt, or nothing said at all), the agent, the branch, the base
+      a new branch is created from and the remote that base lives on; exit 3
+      when no branch or agent was chosen, exit 2 when the name typed for a new
+      branch is not a valid ref
+  composer rows --state DIR
+  composer header --state DIR --project NAME [--no-base]
+  composer cycle-agent --state DIR --project NAME [--agents NAME]...
+  composer cycle-base --state DIR --project NAME --main DIR
+           [--base-refs FILE] [--base REF | --no-base]
+  composer branch-field --state DIR [--project NAME]
+      the one screen's answers, one verb each, kept in DIR so a key can read and
+      change them while the screen is up: rows and header print what fzf shows,
+      cycle-agent, cycle-base and branch-field are what ctrl-a, ctrl-r and ctrl-b
+      run, and branch-field prints nothing
 
 --bd-json, --wt-json, --refs and --base-refs read saved tool output instead of
 asking the tools, which is how the tests and dry runs work: --bd-json stands in
@@ -44,30 +55,32 @@ for bd, --wt-json with --refs for both of the lookups --main would be read for,
 and --base-refs for the one bases reads, so a run given all four never touches
 --main at all.
 
-The first question is one screen: the ready beads, with "✎  write a prompt
-instead" pinned on top. Text typed at the fzf prompt that matches no row is the
-prompt itself (--print-query with --expect: the query is line 1, the key that
-was pressed line 2 -- empty when none was -- and the selected row line 3 when
-there is one), and picking the prompt row opens a prompt field for text that
-would be awkward to type there. esc means no bead, so the configured no-bead
-prompt says what the flow is; ctrl-n means blank, an agent started with
-nothing said to it at all.
+The one screen asks everything at once: the ready beads with "✎  write a prompt
+instead" pinned on top, and the agent, the branch and the base in its header, a
+key for each. Text typed at the fzf prompt that matches no row is the prompt
+itself (--print-query with --expect: the query is line 1, the key that was
+pressed line 2 -- empty when none was -- and the selected row line 3 when there
+is one), and picking the prompt row opens a prompt field for text that would be
+awkward to type there. esc means no bead, so the configured no-bead prompt says
+what the flow is; ctrl-n means blank, an agent started with nothing said to it
+at all; ctrl-a, ctrl-b and ctrl-r cycle the agent, type the branch and cycle the
+base, and each repaints the header alone. The agent cycle is the --agents names
+followed by "none", which starts nothing -- the tab is then the new worktree and
+a login shell, with the prompt it could not deliver printed above that shell
+rather than dropped. The branch starts as the name derived from the bead and a
+bare Enter keeps it.
 
-The second question is the agent: the --agents names, with "none" last. none
-starts nothing, so the tab is the new worktree and a login shell, and the prompt
-it could not deliver is printed above that shell rather than dropped. The third
-is the branch, typed with the bead's name already in the field, so a bare Enter
-accepts it.
-
-The branch question carries the base it opens on: the one --base names, or the
-one this clone would be created from (origin/HEAD's target, then origin/main,
-origin/master, main, master), or none at all with --no-base. The base travels to
-the tab with the remote it lives on so the tab can fetch that one; a base on no
-remote carries no remote, and nothing is fetched for it. --base-refs reads a
-saved for-each-ref instead of the repository, as bases does.
+The base field opens on the one --base names, or the one this clone would be
+created from (origin/HEAD's target, then origin/main, origin/master, main,
+master), or none at all with --no-base -- which reads "wt default", because it
+is a real answer rather than a missing one. The base travels to the tab with the
+remote it lives on so the tab can fetch that one; a base on no remote carries no
+remote, and nothing is fetched for it. --base-refs reads a saved for-each-ref
+instead of the repository, as bases does.
 
 pick's --bead, --prompt, --blank, --agent and --branch answer a question
-instead of asking it, and an empty value means none. --blank is the answer
+instead of asking it, and an empty value means none -- so a run given one of the
+first three opens no screen at all. --blank is the answer
 ctrl-n gives -- no bead and nothing said to the agent, which the tab reads as
 no prompt word at all -- and, like the others, it cannot be combined with an
 answer to the same question. With no terminal on stdin nothing is asked: the
@@ -107,6 +120,11 @@ die() {
 # other way the picker can stop.
 held=0
 
+# The directory this run keeps the one screen's answers in, empty until pick
+# makes one. Declared out here rather than inside pick because hold_pick removes
+# it, and every way out of pick passes through hold_pick.
+composer_state=''
+
 # Wait for one keypress before the message just printed disappears with the
 # terminal: the picker runs in a floating terminal, which closes the moment this
 # script exits. The keypress goes to that terminal; with no terminal on stdin (a
@@ -129,16 +147,16 @@ cancelled=3
 prompt_row_marker='✎'
 prompt_row=$prompt_row_marker$'\t''write a prompt instead'
 
-# The last row of the agent question: the answer that starts no agent at all.
-# Its label is prose, so what was chosen is read back against the configured
-# names rather than by matching this text.
-none_agent_row='none — no agent, just the tab'
-
 # On the way out of pick -- usage_error's 2, die's 1, a missing tool's 1, rex's
 # own status -- hold the float with the failure still on screen. A cancelled
-# pick is an answer rather than a failure, so it is left alone.
+# pick is an answer rather than a failure, so it is left alone. The one screen's
+# state directory, when this run made one, is removed here too: every way out of
+# pick comes through here, so a killed float leaves nothing behind.
 hold_pick() {
   local status=$?
+  if [ -n "$composer_state" ]; then
+    rm -rf "$composer_state"
+  fi
   if [ "$status" -ne 0 ] && [ "$status" -ne "$cancelled" ] && [ "$held" -eq 0 ]; then
     wait_for_key
   fi
@@ -551,52 +569,428 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-# The bead question, in one screen: the ready list with the prompt row pinned on
-# top, and `preview` in the pane below so a long description never crowds the
-# rows. --print-query is what makes bead-or-text-or-blank expressible at all --
-# the query is line 1, the key that was pressed line 2 (--expect=ctrl-n, and an
-# empty line when none was), the selected row line 3 when there is one -- so
-# what comes back here is fzf's own reply and status, and fzf_answer reads it.
-# Reading the key off the wrong line is the bug --expect exists to prevent: the
-# blank answer arrives as a key, and a reader that took line 2 for the row would
-# see ctrl-n as a bead.
+# The composer: the one screen's answers, kept in a directory of their own so a
+# key can read and change one of them while fzf is up. fzf needs a terminal, so
+# the screen itself is out of a pipe's reach; every verb below is a subcommand
+# with one job, which is what lets the tests pin what each key does.
 #
-# The pane is a bottom one rather than a right-hand split: at the real float
-# size (80x24) a side split leaves about 36 columns for the list, which truncates
-# every bead title, and about 42 for the preview, which cuts prose mid-word. A
-# bottom pane is full width for both, and the preview wraps.
-#
-# The cursor starts on the first bead rather than on the prompt row, so a bare
-# Enter still takes the bead the list leads with; with no beads to lead with it
-# stays on the prompt row, which is then the only answer worth offering. That is
-# the load event's pos(1-based number), not --cursor: this fzf has no such flag,
-# and the start event fires before the list exists. The preview is refreshed in
-# the same breath, because it renders against the row the cursor started on and
-# would otherwise describe the prompt row until the first keypress.
-pick_bead() {
-  local main=$1 rows=$2 pos=1
-  local script main_q
-  script=$(printf '%q' "$0")
-  main_q=$(printf '%q' "$main")
-  if [ -n "$rows" ]; then
-    pos=2
-  fi
+#   agent         the agent's name, empty for none
+#   branch        the branch, empty until a bead or a key gives it one
+#   branch_edited 1 once it was typed by hand, which stops it tracking the bead
+#   bases         the base cycle, one "ref<TAB>remote" row each, the opening
+#                 answer first, an empty ref for the worktrunk-default sentinel
+#   base_index    which of those rows the screen is showing, 1-based
+#   rows          the fzf rows: the prompt row, then the beads
 
-  {
-    printf '%s\n' "$prompt_row"
-    if [ -n "$rows" ]; then
-      printf '%s\n' "$rows"
+# The second header line: every key that changes an answer, and the two ways out
+# of the screen. Fixed, with two spaces between the pairs, so it reads as a
+# legend rather than as prose.
+composer_hints='ctrl-a agent  ctrl-b branch  ctrl-r base  ctrl-n blank  enter start  esc no bead'
+
+# One answer from the state directory, and one answer into it. A file that is not
+# there reads as an empty answer rather than as a failure: a key can fire before
+# the picker has written every file, and a header missing a field is still a
+# header.
+state_get() {
+  local file=$1/$2
+  if [ -r "$file" ]; then
+    cat "$file"
+  fi
+}
+
+state_put() {
+  printf '%s\n' "$3" >"$1/$2"
+}
+
+# How many lines a state file has, 0 when it is not there at all.
+state_lines() {
+  local file=$1/$2
+  if [ -r "$file" ]; then
+    wc -l <"$file" | tr -d ' '
+  else
+    printf '0\n'
+  fi
+}
+
+# The cycle entry the screen is showing, as the "ref<TAB>remote" line base_chain
+# prints: field 1 the ref, field 2 the remote it lives on. Field 1 is empty for
+# the worktrunk-default sentinel, which is a real answer and not a missing one.
+# NO_BASE only matters when the state holds no cycle at all -- a screen opened by
+# hand -- and is then what says which of the two the empty ref means. Nothing
+# named and nothing said about it falls back to @, which is what base_chain
+# itself settles on when no ref resolves.
+composer_base_row() {
+  local state=$1 no_base=${2:-0}
+  local index row=''
+  index=$(state_get "$state" base_index)
+  case $index in
+    '' | *[!0-9]*) index=1 ;;
+  esac
+  [ "$index" -ge 1 ] || index=1
+  row=$(state_get "$state" bases | sed -n "${index}p")
+  if [ -z "$row" ]; then
+    if [ "$no_base" -eq 1 ]; then
+      row=$'\t'
+    else
+      row="@"$'\t'
     fi
-  } |
+  fi
+  printf '%s\n' "$row"
+}
+
+# The header, exactly two lines: the project with the three fields the keys
+# change, then the legend. The leading space is part of both lines -- fzf indents
+# the header anyway, and without a field of its own a blank one would swallow it.
+# An empty agent reads "none" -- the cycle's no-agent answer -- and an empty base
+# ref reads "wt default", so neither field is ever blank and neither lies about
+# what the tab will do.
+composer_header_lines() {
+  local state=$1 project=$2 no_base=${3:-0}
+  local agent branch base_row base_ref
+  agent=$(state_get "$state" agent)
+  branch=$(state_get "$state" branch)
+  base_row=$(composer_base_row "$state" "$no_base")
+  base_ref=${base_row%%$'\t'*}
+  printf ' %s · agent: %s · branch: %s · base: %s\n' \
+    "$project" "${agent:-none}" "$branch" "${base_ref:-wt default}"
+  printf ' %s\n' "$composer_hints"
+}
+
+# ctrl-a: the next name on the agent list, then none, then round again, one name
+# per line in NAMES. Only the header is repainted: the rows are beads and nothing
+# about them depends on the agent, so a reload would clear the list and drop the
+# cursor back to the top for a one-word change. The answer is written before the
+# header is printed, because the header is all this prints.
+composer_cycle_agent() {
+  local state=$1 project=$2 names=$3
+  local current='' next=''
+  current=$(state_get "$state" agent)
+  if [ -n "$names" ]; then
+    next=$(printf '%s\n' "$names" | awk -v cur="$current" '
+      { slot[NR] = $0 }
+      END {
+        n = NR
+        at = n + 1              # none, when the agent is no name on the list
+        for (i = 1; i <= n; i++) if (slot[i] == cur) at = i
+        print slot[at % (n + 1) + 1]   # the next slot, wrapping to the first
+      }')
+  fi
+  state_put "$state" agent "$next"
+  composer_header_lines "$state" "$project"
+}
+
+# ctrl-r: the next base in the cycle, wrapping. The cycle was resolved once,
+# before the screen opened -- one for-each-ref per picker run, not one per
+# keystroke -- so this only moves an index. --main and the rest are here for a
+# state that holds no cycle, which is a screen opened by hand: then the cycle is
+# resolved the way bases resolves it, and only then.
+composer_cycle_base() {
+  local state=$1 project=$2 main=$3 base_refs=$4 base=$5 no_base=$6
+  local total index next=1
+  total=$(state_lines "$state" bases)
+  if [ "$total" -eq 0 ] && { [ -n "$main" ] || [ -n "$base_refs" ]; }; then
+    base_chain "$main" "$base_refs" "$base" "$no_base" >"$state/bases"
+    total=$(state_lines "$state" bases)
+  fi
+  index=$(state_get "$state" base_index)
+  case $index in
+    '' | *[!0-9]*) index=1 ;;
+  esac
+  if [ "$total" -ge 1 ] && [ "$index" -lt "$total" ]; then
+    next=$((index + 1))
+  fi
+  state_put "$state" base_index "$next"
+  composer_header_lines "$state" "$project" "$no_base"
+}
+
+# The branch answer, trimmed. gum asks it in the float with PREFILL already in
+# the field, so a bare Enter keeps it; off a terminal -- a pipe, a script, the
+# tests -- the answer is read from stdin instead, because there is nobody to ask.
+# A cancelled ask (ctrl-c, which gum exits non-zero on) and a pipe with nothing
+# on it are both no answer at all: nothing is printed, and the caller decides
+# what an empty answer means.
+#
+# Trimming is not cosmetic. A pasted name usually arrives with whitespace around
+# it, whitespace is part of no branch name, and a trimmed space-then-Enter is
+# Enter -- accepting the name already in the field rather than failing
+# `git check-ref-format` on one that looks perfectly valid on screen.
+ask_branch() {
+  local prefill=$1 project=${2:-} answer=''
+  if [ -t 0 ]; then
+    local header='branch: Enter accepts the name shown'
+    [ -z "$project" ] || header="$project · $header"
+    if [ -n "$prefill" ]; then
+      answer=$(gum input --value "$prefill" --header "$header") || answer=''
+    else
+      answer=$(gum input --header "$header") || answer=''
+    fi
+  else
+    # Nothing is printed for a pipe: nobody is reading a prompt there, and it
+    # would land in the middle of a script's output. read fails at EOF, which is
+    # an empty answer rather than a reason to stop, so it must not end the run
+    # here under `set -e`.
+    IFS= read -r answer || true
+  fi
+  printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+# ctrl-b: the branch, typed by hand. The field opens on the branch the header is
+# showing, and a cancelled field -- or an empty one -- leaves the branch exactly
+# as it was and the pick carries on: the screen is not a sequence of questions
+# any more, so backing out of one field does not cancel it. Nothing is printed;
+# the header the binding repaints next is where the answer shows.
+composer_branch_field() {
+  local state=$1 project=${2:-}
+  local answer=''
+  answer=$(ask_branch "$(state_get "$state" branch)" "$project")
+  [ -n "$answer" ] || return 0
+  state_put "$state" branch "$answer"
+  state_put "$state" branch_edited 1
+}
+
+# The one screen. fzf reads the rows from the state directory and every key runs
+# a verb against that same directory, so a key changes one answer and the header
+# that shows it.
+#
+# --print-query with --expect=ctrl-n is what makes every answer expressible: the
+# query is the prompt, and ctrl-n is blank. The reply is fzf's own, in the order
+# fzf prints it (query, key, row), and fzf_answer reads it -- reading the key off
+# the wrong line is the bug --expect exists to prevent.
+#
+# No binding reloads the list. The rows are beads, and nothing a key changes adds
+# or removes one, so a reload would clear and repaint the list and reset the
+# cursor: a change of one field costing the gesture the screen exists for. ctrl-b
+# is the exception the terminal forces -- gum suspends fzf to take it -- and even
+# there only the header is repainted: the query and every other answer stay as
+# they were.
+#
+# The cursor starts on row 2, the bead the list leads with, so a bare Enter takes
+# it; row 1 is the prompt row, and with no beads it is the only row and fzf keeps
+# the cursor there. That is the load event's pos(1-based number), not --cursor:
+# this fzf has no such flag, and the start event fires before the list exists.
+# The preview is refreshed in the same breath because it renders against the row
+# the cursor started on, and would otherwise describe the prompt row until the
+# first keypress. The pane is a bottom one rather than a right-hand split: at the
+# real float size (80x24) a side split leaves about 36 columns for the list, which
+# truncates every bead title, and about 42 for the preview, which cuts prose
+# mid-word. A bottom pane is full width for both, and the preview wraps.
+#
+# Every path is quoted for a shell, because a shell is what fzf runs a binding
+# through, and the script's own path is absolute because fzf runs them in the
+# project's directory rather than this one.
+composer_screen() {
+  local state=$1 main=$2 project=$3 base=$4 base_refs=$5 no_base=$6 names=$7
+  local self script main_q state_q project_q
+  local base_q='' base_refs_q='' no_base_q='' agents_q='' name
+  self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+  script=$(printf '%q' "$self")
+  main_q=$(printf '%q' "$main")
+  state_q=$(printf '%q' "$state")
+  project_q=$(printf '%q' "$project")
+  [ -z "$base" ] || base_q=" --base $(printf '%q' "$base")"
+  [ -z "$base_refs" ] || base_refs_q=" --base-refs $(printf '%q' "$base_refs")"
+  [ "$no_base" -eq 0 ] || no_base_q=' --no-base'
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    agents_q=$agents_q" --agents $(printf '%q' "$name")"
+  done < <(printf '%s\n' "$names")
+
+  "$self" composer rows --state "$state" |
     fzf --delimiter='\t' \
       --with-nth=1,2 \
       --print-query \
       --expect=ctrl-n \
-      --bind "load:pos($pos)+refresh-preview" \
       --reverse \
-      --header 'pick a bead · type to write a prompt · esc = no bead' \
-      --preview-window 'down,60%' \
-      --preview "$script preview {1} --main $main_q"
+      --prompt ' ❯ prompt or bead> ' \
+      --pointer '▌' \
+      --marker '✓' \
+      --header "$(composer_header_lines "$state" "$project" "$no_base")" \
+      --preview-window 'down,55%' \
+      --preview "$script preview {1} --main $main_q" \
+      --bind 'load:pos(2)+refresh-preview' \
+      --bind "ctrl-a:transform-header($script composer cycle-agent --state $state_q --project $project_q$agents_q)" \
+      --bind "ctrl-b:execute($script composer branch-field --state $state_q --project $project_q)+transform-header($script composer header --state $state_q --project $project_q$no_base_q)+refresh-preview" \
+      --bind "ctrl-r:transform-header($script composer cycle-base --state $state_q --project $project_q --main $main_q$base_refs_q$base_q$no_base_q)"
+}
+
+# `new-work.sh composer <verb> --state DIR [...]`
+#
+# The screen's own subcommands, dispatched here the way the script's are at the
+# bottom: the state directory is the only thing all five share.
+cmd_composer() {
+  case ${1:-} in
+    rows)
+      shift
+      cmd_composer_rows "$@"
+      ;;
+    header)
+      shift
+      cmd_composer_header "$@"
+      ;;
+    cycle-agent)
+      shift
+      cmd_composer_cycle_agent "$@"
+      ;;
+    cycle-base)
+      shift
+      cmd_composer_cycle_base "$@"
+      ;;
+    branch-field)
+      shift
+      cmd_composer_branch_field "$@"
+      ;;
+    *) usage_error "composer: unknown command ${1:-<none>}" ;;
+  esac
+}
+
+# The rows fzf is given, as they are.
+cmd_composer_rows() {
+  local state=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --state)
+        [ $# -ge 2 ] || usage_error 'composer rows: --state needs a directory'
+        state=$2
+        shift 2
+        ;;
+      *) usage_error "composer rows: unknown option $1" ;;
+    esac
+  done
+  [ -n "$state" ] || usage_error 'composer rows: need --state DIR'
+  # A screen whose rows were never written is an empty list rather than a
+  # failure: the list is the one thing there is nothing to do about from here.
+  if [ -r "$state/rows" ]; then
+    cat "$state/rows"
+  fi
+}
+
+# The two header lines, as the screen shows them.
+cmd_composer_header() {
+  local state='' project='' no_base=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --state)
+        [ $# -ge 2 ] || usage_error 'composer header: --state needs a directory'
+        state=$2
+        shift 2
+        ;;
+      --project)
+        [ $# -ge 2 ] || usage_error 'composer header: --project needs a name'
+        project=$2
+        shift 2
+        ;;
+      --no-base)
+        no_base=1
+        shift
+        ;;
+      *) usage_error "composer header: unknown option $1" ;;
+    esac
+  done
+  [ -n "$state" ] || usage_error 'composer header: need --state DIR'
+  [ -n "$project" ] || usage_error 'composer header: need --project NAME'
+  composer_header_lines "$state" "$project" "$no_base"
+}
+
+# The header again, after the agent moved on.
+cmd_composer_cycle_agent() {
+  local state='' project='' names=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --state)
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-agent: --state needs a directory'
+        state=$2
+        shift 2
+        ;;
+      --project)
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-agent: --project needs a name'
+        project=$2
+        shift 2
+        ;;
+      --agents)
+        [ $# -ge 2 ] && [ -n "$2" ] ||
+          usage_error 'composer cycle-agent: --agents needs a name'
+        names=${names:+$names$'\n'}$2
+        shift 2
+        ;;
+      *) usage_error "composer cycle-agent: unknown option $1" ;;
+    esac
+  done
+  [ -n "$state" ] || usage_error 'composer cycle-agent: need --state DIR'
+  [ -n "$project" ] || usage_error 'composer cycle-agent: need --project NAME'
+  composer_cycle_agent "$state" "$project" "$names"
+}
+
+# The header again, after the base moved on.
+cmd_composer_cycle_base() {
+  local state='' project='' main='' base_refs='' base='' no_base=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --state)
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-base: --state needs a directory'
+        state=$2
+        shift 2
+        ;;
+      --project)
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-base: --project needs a name'
+        project=$2
+        shift 2
+        ;;
+      --main)
+        [ $# -ge 2 ] || usage_error 'composer cycle-base: --main needs a directory'
+        main=$2
+        shift 2
+        ;;
+      --base-refs)
+        [ $# -ge 2 ] || usage_error 'composer cycle-base: --base-refs needs a file'
+        base_refs=$2
+        shift 2
+        ;;
+      --base)
+        [ $# -ge 2 ] || usage_error 'composer cycle-base: --base needs a value'
+        base=$2
+        shift 2
+        ;;
+      --no-base)
+        no_base=1
+        shift
+        ;;
+      *) usage_error "composer cycle-base: unknown option $1" ;;
+    esac
+  done
+  [ -n "$state" ] || usage_error 'composer cycle-base: need --state DIR'
+  [ -n "$project" ] || usage_error 'composer cycle-base: need --project NAME'
+  [ -n "$main" ] || usage_error 'composer cycle-base: need --main DIR'
+  [ -z "$base" ] || [ "$no_base" -eq 0 ] ||
+    usage_error 'composer cycle-base: --base and --no-base answer the same question'
+  composer_cycle_base "$state" "$project" "$main" "$base_refs" "$base" "$no_base"
+}
+
+# The branch field: it writes an answer and prints none.
+cmd_composer_branch_field() {
+  local state='' project=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --state)
+        [ $# -ge 2 ] ||
+          usage_error 'composer branch-field: --state needs a directory'
+        state=$2
+        shift 2
+        ;;
+      --project)
+        [ $# -ge 2 ] ||
+          usage_error 'composer branch-field: --project needs a name'
+        project=$2
+        shift 2
+        ;;
+      *) usage_error "composer branch-field: unknown option $1" ;;
+    esac
+  done
+  [ -n "$state" ] || usage_error 'composer branch-field: need --state DIR'
+  composer_branch_field "$state" "$project"
 }
 
 # What fzf's reply to the bead question means, as one "id<TAB>prompt<TAB>blank"
@@ -670,58 +1064,6 @@ cmd_fzf_answer() {
     '' | *[!0-9]*) usage_error "fzf-answer: $1 is not an exit status" ;;
   esac
   fzf_answer "$1"
-}
-
-# The agent question: the names the configuration offers, with the no-agent row
-# last. gum choose prints the row it landed on, prose and all, so the caller
-# reads the answer back against the configured names. ctrl-c -- all gum listens
-# to, as it ignores esc -- ends it non-zero, which the caller turns into the same
-# cancelled exit as everywhere else.
-pick_agent() {
-  local choices=$1
-  {
-    printf '%s\n' "$choices"
-    printf '%s\n' "$none_agent_row"
-  } | gum choose --header 'start which agent?'
-}
-
-# The branch question: a typed answer, not a picker. Creating a branch is the
-# usual case and a list of names that already exist offers nothing for a name
-# that does not exist yet, so the answer is typed -- with the name derived from
-# the bead already in the field, where a bare Enter accepts it. Whatever is
-# typed is the branch, exactly as typed; the candidate list decides afterwards
-# whether that name is an existing worktree to switch to or one to create.
-#
-# gum input asks it in the float. Off a terminal -- a pipe, a script, the tests
-# -- there is nobody to ask, so the answer is read from stdin instead, which is
-# what keeps this path reachable without a pty. A failed ask (ctrl-c) and EOF
-# are both an empty answer, which pick turns into exit 3 the way esc used to.
-pick_branch() {
-  local suggestion=$1 answer=''
-
-  if [ -t 0 ]; then
-    if [ -n "$suggestion" ]; then
-      answer=$(gum input --value "$suggestion" \
-        --header 'branch: Enter accepts the name shown') || return 1
-    else
-      answer=$(gum input --header 'branch') || return 1
-    fi
-  else
-    # Nothing is printed for a pipe: nobody is reading a prompt there, and it
-    # would land in the middle of a script's output. read fails at EOF, which is
-    # an empty answer rather than a reason to stop, so it must not end the run
-    # here under `set -e`.
-    IFS= read -r answer || true
-  fi
-  # A pasted name usually arrives with whitespace around it, and whitespace is
-  # part of no branch: trimmed, so space-then-Enter is Enter -- accepting the
-  # suggestion -- rather than a `git check-ref-format` refusal naming a branch
-  # that looks perfectly valid on screen.
-  answer=$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-  if [ -z "$answer" ]; then
-    answer=$suggestion
-  fi
-  printf '%s\n' "$answer"
 }
 
 # The shortcuts `wt switch` resolves itself -- ^ the default branch, - the previous
@@ -905,27 +1247,18 @@ cmd_pick() {
     [ -d "$main" ] || die "pick: no such directory: $main"
   fi
 
-  # The picker's own requirements, before any work, and only for the questions
-  # that will really be asked -- in the float, where stdin is a terminal -- so a
-  # scripted run is not stopped by a tool it would never call: off a terminal the
-  # bead question is skipped, the agent question takes the first name and the
-  # branch question reads stdin. Saved tool output stands in for the tools it
+  # The screen's own requirements, before any work, and only where the screen
+  # will really open -- in the float, where stdin is a terminal -- so a scripted
+  # run is not stopped by a tool it would never call: off a terminal nothing is
+  # asked, the bead question is skipped, the agent falls back to the first name
+  # and the branch reads stdin. Saved tool output stands in for the tools it
   # replaces.
-  if [ -t 0 ]; then
-    if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
-      [ "$blank_set" -eq 0 ]; then
-      need fzf
-    fi
-    # gum asks the agent question and the branch question, and it writes the
-    # prompt in the field the bead question's prompt row opens -- a path of that
-    # same question -- so it is needed wherever one of the three is really asked.
-    # No agent list means no agent question.
-    if [ "$branch_set" -eq 0 ] ||
-      { [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; } ||
-      { [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
-        [ "$blank_set" -eq 0 ]; }; then
-      need gum
-    fi
+  if [ -t 0 ] && [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
+    [ "$blank_set" -eq 0 ]; then
+    # fzf is the screen and gum is every field it opens: the prompt row's and
+    # ctrl-b's.
+    need fzf
+    need gum
   fi
   [ -n "$wt_json" ] || need wt
   need jq
@@ -944,6 +1277,32 @@ cmd_pick() {
   fi
 
   local note=''
+  # The screen's state, made here so its keys have somewhere to write while it is
+  # up: one directory per run, removed by hold_pick on the way out, so a killed
+  # float leaves nothing behind and two picker runs cannot collide. Only the float
+  # gets one -- off a terminal nothing is asked, and a scripted run keeps the
+  # tools it was promised and no temporary directory of its own.
+  if [ -t 0 ]; then
+    composer_state=$(mktemp -d) || die 'pick: could not make a state directory'
+    # The agent list leads with its default, which is the answer the header opens
+    # on; no list at all is no agent answer, and the payload then says nothing
+    # about the agent.
+    state_put "$composer_state" agent \
+      "$(printf '%s\n' "$agent_choices" | sed -n 1p)"
+    # --branch is an answer already, and one given by hand: the header shows it
+    # and nothing derives it again.
+    state_put "$composer_state" branch "$branch"
+    [ "$branch_set" -eq 0 ] || state_put "$composer_state" branch_edited 1
+    # The base cycle, resolved once for the whole run: one for-each-ref here, and
+    # ctrl-r only ever moves the index into it.
+    base_chain "$main" "$base_refs" "$base" "$no_base" >"$composer_state/bases"
+    state_put "$composer_state" base_index 1
+    {
+      printf '%s\n' "$prompt_row"
+      [ -z "$rows" ] || printf '%s\n' "$rows"
+    } >"$composer_state/rows"
+  fi
+
   # The bead question is asked only when it was not answered already: a bead, a
   # prompt and a blank answer are all answers to it.
   if [ "$bead_set" -eq 0 ] && [ "$prompt_set" -eq 0 ] &&
@@ -961,7 +1320,8 @@ cmd_pick() {
         "$PROG" >&2
     else
       local reply='' asked=0 answer=''
-      reply=$(pick_bead "$main" "$rows") || asked=$?
+      reply=$(composer_screen "$composer_state" "$main" "$project" "$base" \
+        "$base_refs" "$no_base" "$agent_choices") || asked=$?
       if ! answer=$(printf '%s\n' "$reply" | fzf_answer "$asked"); then
         exit 1
       fi
@@ -1036,29 +1396,17 @@ cmd_pick() {
             (($b.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))')
   fi
 
-  # The agent question, asked before the branch and after everything derived from
-  # the bead: nothing about it is derived from anything.
+  # The agent is the header's: ctrl-a cycles it through the list and then none, so
+  # there is no second question after the screen to ask. Off a terminal nobody can
+  # press a key, and the list leads with its default -- the same agent the
+  # configuration names, which is the answer an unasked question takes.
   if [ "$agent_set" -eq 0 ] && [ -n "$agent_choices" ]; then
-    if [ -t 0 ]; then
-      local chosen='' chosen_status=0
-      chosen=$(pick_agent "$agent_choices") || chosen_status=$?
-      if [ "$chosen_status" -ne 0 ]; then
-        printf '%s: no agent chosen, nothing to start\n' "$PROG" >&2
-        exit "$cancelled"
-      fi
-      # The no-agent row's label is prose, so the answer is read back against
-      # the names that were offered: anything else is none.
-      agent=''
-      if printf '%s\n' "$agent_choices" | grep -Fxq -- "$chosen"; then
-        agent=$chosen
-      fi
-      agent_set=1
+    if [ -n "$composer_state" ]; then
+      agent=$(state_get "$composer_state" agent)
     else
-      # Nobody to ask: the list leads with the default, which is the answer an
-      # unasked question takes -- the same agent the configuration names.
       agent=$(printf '%s\n' "$agent_choices" | sed -n 1p)
-      agent_set=1
     fi
+    agent_set=1
   fi
 
   local candidates
@@ -1081,9 +1429,22 @@ cmd_pick() {
     if [ -n "$note" ]; then
       printf '%s: %s\n' "$PROG" "$note" >&2
     fi
-    # A failed ask -- gum's ctrl-c -- is no branch, which is the same cancelled
-    # pick an EOF on the typed answer has always been.
-    branch=$(pick_branch "$suggestion") || branch=''
+    if [ -n "$composer_state" ]; then
+      # The screen had its chance. ctrl-b writes the branch and marks it edited;
+      # a branch that was not edited is the one the bead derives, the same name
+      # the field would have opened on, had there been a bead to derive it from
+      # when the screen opened.
+      if [ "$(state_get "$composer_state" branch_edited)" = 1 ]; then
+        branch=$(state_get "$composer_state" branch)
+      else
+        branch=$suggestion
+      fi
+    else
+      # Nobody to ask: the answer is a line of stdin, and an empty one is the
+      # suggestion accepted -- which is what a bare Enter means in the float.
+      branch=$(ask_branch "$suggestion" '')
+      [ -n "$branch" ] || branch=$suggestion
+    fi
   elif [ -n "$note" ]; then
     printf '%s\n' "$note" >&2
   fi
@@ -1110,19 +1471,23 @@ cmd_pick() {
     exit 2
   fi
 
-  # The base the tab creates from, resolved once, here, where the answer the
-  # branch question opens on is known: it travels in the payload with the remote
-  # it lives on so the tab can fetch that one, and nothing is said about it on
-  # stderr, where the announcement used to be. --base is the answer whatever
-  # this clone would have opened on; --no-base is the worktrunk default, no ref
-  # at all; otherwise the base cycle's first row is it, the answer `bases`
-  # prints first. The remote comes from that row rather than from a slash in the
-  # name, because feat/x is a local branch and nothing to fetch.
-  local base_ref='' base_remote='' base_default=0
-  if [ "$no_base" -eq 1 ]; then
+  # The base the tab creates from: it travels in the payload with the remote it
+  # lives on so the tab can fetch that one, and nothing is said about it on stderr,
+  # where the announcement used to be. On the screen it is ctrl-r's answer, the
+  # cycle entry the base_index points at; off a terminal it is the cycle's first
+  # row, which is what `bases` prints first -- --base names it outright, whatever
+  # this clone would have opened on, and --no-base is the worktrunk default, no
+  # ref at all. The remote comes from the row rather than from a slash in the name,
+  # because feat/x is a local branch and nothing to fetch.
+  local base_ref='' base_remote='' base_default=0 base_row=''
+  if [ -n "$composer_state" ]; then
+    base_row=$(composer_base_row "$composer_state" "$no_base")
+    base_ref=${base_row%%$'\t'*}
+    base_remote=${base_row#*$'\t'}
+    [ -n "$base_ref" ] || base_default=1
+  elif [ "$no_base" -eq 1 ]; then
     base_default=1
   else
-    local base_row=''
     base_row=$(base_chain "$main" "$base_refs" "$base" '' | sed -n 1p)
     base_ref=${base:-${base_row%%$'\t'*}}
     base_remote=${base_row#*$'\t'}
@@ -1199,6 +1564,10 @@ case ${1:-} in
   fzf-answer)
     shift
     cmd_fzf_answer "$@"
+    ;;
+  composer)
+    shift
+    cmd_composer "$@"
     ;;
   pick)
     shift
