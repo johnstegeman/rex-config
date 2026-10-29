@@ -142,8 +142,10 @@ default`, so the field is never blank and never lies about what will happen.
   reload: the rows did not change, and a reload clears and repaints the list and
   resets the cursor.
 - `ctrl-b` → `execute(composer branch-field)` (gum input, prefilled) then
-  `reload` + `transform-header` + `refresh-preview`. The reload is here because
-  the branch may change which rows are "existing worktree" candidates.
+  `transform-header` + `refresh-preview`. **No reload**: nothing in the row set
+  depends on the branch — the rows are beads, and the branch only decides
+  `create` at hand-back — so a reload here would be a bare cursor reset and would
+  break the anti-goal above for no reason.
 - `ctrl-r` → `transform-header(composer cycle-base)`. Nothing else changes.
 - All state (`agent`, `branch`, `branch_edited`, `base`, index counters) lives in
   one `mktemp -d` directory per picker run, removed by a `trap` on exit, so a
@@ -154,8 +156,11 @@ default`, so the field is never blank and never lies about what will happen.
 `fzf-answer` grows from two lines to three and stays a subcommand, so the pipe
 tests keep pinning the bytes fzf really produces:
 
-| typed text matching no bead, Enter | 1 | query, then whatever else fzf
-  printed | that text is the prompt |
+| What you do | status | lines | answer |
+|---|---|---|---|
+| Enter on a bead | 0 | query, ``, row | that bead |
+| Enter on the ✎ row | 0 | query, ``, row | the text from the field (gum input) |
+| typed text matching no bead, Enter | 1 | query, then whatever else fzf printed | that text is the prompt |
 | `ctrl-n` anywhere | 0 | query, `ctrl-n`, row | **blank**: no bead, no prompt |
 | Esc / ctrl-c | 130 | — | no bead: the configured `no_bead_prompt` |
 
@@ -201,7 +206,19 @@ impersonate `main`), not `rev-parse` per candidate.
 **The cycle** is `[default, "@", "main", "master"]`, deduplicated and with
 unresolvable entries dropped, `default` first. `@` is today's behaviour and stays
 reachable two ways: as a cycle entry, and as `base = "@"` in configuration.
-`base = false` keeps its current meaning — no `--base` at all, worktrunk decides.
+**`base = false` is a cycle entry, not a lock.** Its first entry is a `wt
+default` sentinel meaning "pass no `--base` and let worktrunk decide", followed by
+the same `@`, `main`, `master`; the auto-detected chain is not computed at all
+(no refs are read). ctrl-r still cycles, so the opt-out sets the answer the screen
+opens on rather than pinning the field — the header shows `base: wt default` while
+it is there.
+
+**The picker also resolves whether a fetch is warranted**, so the wrapper never
+has to guess. When the chosen base names a remote-tracking ref (`for-each-ref`
+says `refs/remotes/<remote>/<branch>`), the payload carries that `<remote>`;
+`@`, `^`, a local branch and the `wt default` sentinel carry none. A textual
+"contains a slash" test is wrong: `feat/x` is a local branch and would produce a
+failing `git fetch feat` on every launch.
 
 **Configuration moves the first entry, not the chain.** `base` (a string) becomes
 the cycle's first entry instead of a notification; unset means auto-detect. The
@@ -209,10 +226,9 @@ existing `new branches start from X` stderr line goes away with the branch
 question it introduced.
 
 **The fetch happens in the tab, not the picker.** Only when creating, only when
-the base is a remote-tracking ref (`origin/...`) rather than a `wt` shortcut
-(`@`, `^`) or a local branch: `git fetch --quiet <remote>` before `wt switch`,
-with `GIT_TERMINAL_PROMPT=0` exported, bounded by `timeout`/`gtimeout` **when one
-is installed** and unbounded otherwise (documented; the credential prompt is the
+the picker said the base lives on a remote: `git fetch --quiet <remote>` before
+`wt switch`, with `GIT_TERMINAL_PROMPT=0` exported, bounded by
+`timeout`/`gtimeout` **when one is installed** and unbounded otherwise (documented; the credential prompt is the
 hang this really fixes). A failed fetch prints one line on the pane and **the
 switch still runs** from the ref's last-known position — orca's own instinct in
 `compare-base-ref-fetch.ts`.
@@ -224,11 +240,19 @@ switch still runs** from the ref's last-known position — orca's own instinct i
 ```json
 { "project": …, "root": …, "main": …, "branch": …, "bead": …, "title": …,
   "create": true,
-  "base": "origin/main",            // when a base was chosen; omitted for false
+  "base": "origin/main" | false,    // absent = the picker never answered
+  "base_remote": "origin",          // only when the base is remote-tracking
   "prompt": "…" | absent,           // as today, when the picker was answered
   "blank": true,                    // when ctrl-n was pressed
   "agent": "pi" | "" }              // as today
 ```
+
+`base` is deliberately three-valued: a string is the ref to create from, `false`
+is the `wt default` sentinel (pass no `--base`), and **absent** means the picker
+never answered — a hand-run `rex do work_new_go --args '…'`, which keeps today's
+behaviour by falling back to `M.options.base` when that is a string. So the
+payload is authoritative when it speaks, and `base = false` survives end to end
+instead of being swallowed by a configuration fallback.
 
 `work_new_go` needs no change: it validates `project`/`root`/`main`/`branch`,
 claims the bead, makes the tab. `new_tab_argv` is the only consumer that changes.
@@ -245,8 +269,18 @@ Two fixes, both in the argv contract:
    dash it could read as a flag. (The no-agent path, which prints the prompt for
    the user, prints that same string; the space is invisible there.)
 
-Plus the base: `wt switch --create --base <base>`, and the fetch above, before
-the switch.
+Plus the base, which widens the positional contract by one word:
+
+```
+sh -c SCRIPT sh <create> <branch> <base> <remote> <agent> [agent_args] <prompt>
+```
+
+`<base>` empty means no `--base` at all (`wt default`), and `<remote>` empty means
+no fetch. The wrapper's `shift` moves from 3 to 4 and its "not enough parameters"
+guard moves with it, so a caller that sends three still gets a clear message and a
+login shell rather than a `dash` exit. The wrapper then runs `git fetch --quiet
+<remote>` (when set, and only when creating) before `wt switch --create --base
+<base>`, prints one line if the fetch failed, and carries on.
 
 ## Configuration surface
 
@@ -256,15 +290,22 @@ the switch.
 | `agent_args` | table | unchanged |
 | `agents` | list or nil | unchanged (the cycle's order and labels) |
 | `bead_prompt`, `no_bead_prompt` | strings | unchanged (`no_bead_prompt` is the Esc answer) |
-| `base` | string, default `"@"`, printed as a note | string = the cycle's first entry; `false` = no `--base`; **unset = auto-detect (the orca chain)** |
+| `base` | string, default `"@"`, printed as a note | string = the cycle's first entry; `false` = the cycle opens on `wt default`; **unset = auto-detect (the orca chain)** |
 | `bounds`, `script` | unchanged | unchanged |
+
+**The agent cycle** is `agents` (or the one configured agent) in order, with the
+no-agent row last, exactly as the question offers it today: the header reads
+`agent: none` there, the payload sends `"agent": ""`, and an empty value is
+written to the state file. A one-name list still cycles: that name, then none.
 
 New state, outside the configuration: `$XDG_STATE_HOME/rex-config/state`
 (`~/.local/state/rex-config/state` when unset), a `key=value` file the picker
 reads tolerantly (missing file, missing key, corrupt line → the configured
-default; a write failure is not worth failing a launch). It holds `agent=<name>`,
-written when work is started, and is used to choose the header's initial agent (a
-name no longer in `agents` is ignored).
+default; a write failure is not worth failing a launch). It holds `agent=<name>`
+and is used to choose the header's initial agent (a name no longer in `agents` is
+ignored). **The picker writes it**, immediately before `rex do work_new_go`, so a
+refused hand-back still remembers what was chosen, the write lives in the script
+whose subcommands pipe tests can reach, and Lua gains no filesystem code.
 
 ## Edge cases and failure behaviour
 
@@ -273,9 +314,12 @@ name no longer in `agents` is ignored).
 - **gum cancelled at ctrl-b** — the branch keeps its previous value and the pick
   continues; a cancelled branch question no longer cancels the pick, because the
   screen is not a sequence of questions any more.
-- **A branch edited by hand** — the branch stops tracking the query/bead
-  (`branch_edited=1`); before that it follows `cmd_branch_default`'s suggestion as
-  the query moves.
+- **A branch edited by hand** — the branch stops tracking (`branch_edited=1`);
+  before that it is recomputed from the bead at each repaint and at hand-back. It
+  is **not** recomputed per keystroke: there is no `change` binding, so a typed
+  query does not repaint the header on every character.
+- **`base = false`** — the header opens on `base: wt default`, no refs are read,
+  and ctrl-r can still move off it.
 - **No base ref resolvable** (no origin, no main) — the cycle is just `@`, the
   header says `base: @`, no fetch is attempted, and `wt switch --base @` behaves
   exactly as today.
@@ -288,6 +332,12 @@ name no longer in `agents` is ignored).
 - **A piped run (no terminal)** — unchanged: the bead question is skipped, the
   agent takes the first offered name, the branch reads stdin; the base resolves
   the same way, without the cycle.
+- **A fixture run in the tests** — the existing `--bd-json` / `--wt-json` /
+  `--refs` flags mean "no tool is consulted for this", and a base lookup against
+  `--main` would break that for the tests whose `--main` does not exist. So a
+  fourth fixture, `--base-refs FILE`, stands in for the `for-each-ref` output —
+  the same shape as the other three — and `--base REF` short-circuits resolution
+  entirely.
 
 ## Testing
 
@@ -296,9 +346,10 @@ Everything below runs from `bash test/run.sh` with no pty:
 - `test/pick_test.sh` — the reply reading, pinned as bytes: query/key/row line
   order, ctrl-n over a row, ctrl-n over the ✎ row, status 1 with a query, status
   130, a missing key line, a three-line reply whose row is empty. Plus the
-  payload: `base` travels when chosen and is omitted for `false`, `blank` travels
-  as a flag and no `prompt` field, and an existing-worktree branch still sets
-  `create: false`.
+  payload: `base` travels as a string, `false` for `wt default`, and is absent
+  only when the picker never answered; `base_remote` appears only for a
+  remote-tracking base; `blank` travels as a flag and no `prompt` field; an
+  existing-worktree branch still sets `create: false`.
 - `test/branch_test.sh` — `base-default`'s chain: origin/HEAD's target wins,
   then origin/main, origin/master, main, master; `main/topic` does not
   impersonate `main`; nothing resolvable leaves `@`; the cycle dedupes and drops
@@ -310,7 +361,9 @@ Everything below runs from `bash test/run.sh` with no pty:
   argument, verbatim; a blank prompt starts the agent with no prompt argument.
 - `test/pure_test.lua` — `new_tab_argv`: the dash-prefixed prompt gains its
   leading space, `blank` appends no prompt parameter, `agent_args` still travel
-  only with an agent.
+  only with an agent, the four positional words keep their places, `base: false`
+  sends an empty third word and a hand-run payload with no `base` still falls back
+  to the configured one.
 
 The composer's repaint behaviour (a key changing one field without losing the
 query) is the one thing a pipe cannot prove; it is checked by hand once, in the
@@ -324,7 +377,7 @@ test.
   the exact fzf bindings that call them.
 - The state file's exact syntax and read/write helpers.
 - Whether `cmd_branch_default` is reused as-is for the tracking suggestion or
-  wrapped.
+  wrapped, and the exact shape of that suggestion when there is no bead.
 - Whether the existing three question functions (`pick_bead`, `pick_agent`,
   `pick_branch`) are deleted or kept for piped runs, where the composer is not
   used at all.
