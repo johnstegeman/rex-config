@@ -1462,6 +1462,23 @@ cmd_pick() {
       # The screen had its chance and the branch was not edited, so it is the one
       # this bead derives -- the name the field would have opened on.
       branch=$suggestion
+      # A bead-less answer -- text that matched no bead, or the prompt row --
+      # has no bead to derive a name from, so it is asked the branch question in
+      # the field that question has always been asked in, opened on whatever the
+      # header holds: Enter accepts that name, and anything typed replaces it.
+      # Only this path pays for the field. A bead carries its own name, --branch
+      # and ctrl-b are answers given before the pick is handed back, and a run
+      # off a terminal reads its line of stdin as it always has.
+      #
+      # Blank is the exception, and stays the cancelled pick it is today: it is
+      # the answer "an agent, and nothing to say", and a run with nothing to say
+      # has never been asked for a branch. An empty or cancelled field is no
+      # answer either, and falls through to the exit below rather than quietly
+      # taking the seed the field was opened on.
+      if [ -z "$bead" ] && [ "$blank_set" -eq 0 ]; then
+        branch=$(ask_branch "$(state_get "$composer_state" branch)" \
+          "$project")
+      fi
     else
       # Nobody to ask: the answer is a line of stdin, and an empty one is the
       # suggestion accepted -- which is what a bare Enter means in the float.

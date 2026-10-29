@@ -49,7 +49,15 @@ if [ -n "${FZF_MARKER:-}" ]; then
 fi
 cat >/dev/null
 EOF
-chmod +x "$tmp/bin/rex" "$tmp/bin/fzf"
+# gum is the screen's field, and a pipe never opens one: the line it would leave
+# behind is how "no field was asked" is proven where a field could have been.
+cat >"$tmp/bin/gum" <<'EOF'
+#!/bin/sh
+if [ -n "${GUM_MARKER:-}" ]; then
+  printf '%s\n' "$*" >>"$GUM_MARKER"
+fi
+EOF
+chmod +x "$tmp/bin/rex" "$tmp/bin/fzf" "$tmp/bin/gum"
 
 # run_pick <beads fixture> [options...]
 #
@@ -1321,6 +1329,244 @@ if [ "$status" -ne 0 ]; then
   fail "rows exits 0" "exit $status: $(cat "$tmp/err")"
 elif [ "$(cat "$tmp/out")" != "$(cat "$tmp/cs7/rows")" ]; then
   fail "rows prints the rows verbatim" "stdout: $(cat "$tmp/out")"
+fi
+
+
+# (t) A bead-less answer asks for its branch. Typed text that matches no bead,
+# the prompt row and ctrl-n all say "no bead", and none of them has a branch to
+# derive it from: the branch question is the one answer such a run still needs,
+# and it is asked in the field it has always been asked in -- prefilled with
+# whatever the header held, so Enter accepts it and ctrl-c is the cancelled
+# pick it always was. A bead, or a --branch already given, is an answer, so
+# nothing is asked and nothing is paid for.
+
+# On a pipe nothing changes and nothing is paid for: there is no screen to open
+# a field in, so the answer is a line of stdin -- and a line there and no line
+# at all are still the two answers they have always been.
+run_pick_answer 'feat/typed' test/fixtures/ready.json \
+  --prompt 'why is the guard flaky?' --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a piped prompt with no branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a piped prompt with no branch: the text is the prompt" "$json" \
+    '.prompt == "why is the guard flaky?" and .bead == ""'
+  assert_json "a piped prompt with no branch: stdin is the branch" "$json" \
+    '.branch == "feat/typed" and .create == true'
+fi
+
+run_pick_answer '' test/fixtures/ready.json \
+  --prompt 'why is the guard flaky?' --dry-run
+if [ "$status" -ne 3 ]; then
+  fail "a piped prompt with no branch answer exits 3" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF 'new-work.sh: no branch given, nothing to start' "$tmp/err"; then
+  fail "a piped prompt with no branch answer says why" "stderr: $(cat "$tmp/err")"
+fi
+
+rm -f "$tmp/gum-ran"
+PICK_PATH="$tmp/bin:$PATH" GUM_MARKER=$tmp/gum-ran \
+  run_pick test/fixtures/ready.json --prompt 'why is the guard flaky?' \
+  --branch feat/x --dry-run
+if [ "$status" -ne 0 ]; then
+  fail "a piped prompt with --branch exits 0" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gum-ran" ]; then
+  fail "a branch already given opens no field" \
+    "gum was asked: $(cat "$tmp/gum-ran")"
+fi
+
+# The field is part of the screen, and the screen exists only where stdin is a
+# terminal, which a test may not have. So the runs below are the real script with
+# that one answer forced: the copy differs from new-work.sh in the four places
+# that ask whether stdin is a terminal, and in nothing else -- line-anchored, so
+# a rewrite of one of them fails the check below instead of quietly testing the
+# path a pipe takes. fzf and gum are stand-ins that answer for the person who is
+# not there, and gum records what it was asked, which is how "no field was
+# opened" and "the field opened on the header's branch" are both proven.
+mkdir -p "$tmp/screen/bin"
+sed -e 's/^  if \[ -t 0 \]; then$/  if [ -n "${PICK_SCREEN:-}" ] || [ -t 0 ]; then/' \
+  -e 's/^    if \[ ! -t 0 \]; then$/    if [ -z "${PICK_SCREEN:-}" ]; then/' \
+  -e 's/^  if \[ -t 0 \] && /  if [ -n "${PICK_SCREEN:-}" ] \&\& /' \
+  new-work.sh >"$tmp/screen/new-work.sh"
+chmod +x "$tmp/screen/new-work.sh"
+ran=$((ran + 1))
+if [ "$(grep -c 'PICK_SCREEN' "$tmp/screen/new-work.sh")" -ne 4 ]; then
+  fail "the screen copy forces the four places that ask for a terminal" \
+    "$(grep -c 'PICK_SCREEN' "$tmp/screen/new-work.sh") of 4 patched"
+fi
+
+cat >"$tmp/screen/bin/fzf" <<'EOF'
+#!/bin/sh
+# The screen's reply, in fzf's own order: query, key, row.
+cat >/dev/null
+printf '%s' "$FZF_REPLY"
+EOF
+cat >"$tmp/screen/bin/gum" <<'EOF'
+#!/bin/sh
+# The field, answered by whoever set the answer up. Both headers are recorded,
+# so which field was opened -- and what it opened on -- is a line or a missing
+# file rather than something to read out of the script.
+if [ -n "${GUM_MARKER:-}" ]; then printf '%s\n' "$*" >>"$GUM_MARKER"; fi
+case " $* " in
+  *'prompt for the agent'*) printf '%s\n' "${GUM_PROMPT:-}" ;;
+  *'branch: Enter accepts'*)
+    [ -z "${GUM_CANCEL:-}" ] || exit 130
+    printf '%s\n' "${GUM_BRANCH:-}"
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$tmp/screen/bin/fzf" "$tmp/screen/bin/gum"
+
+# run_screen [options...]: a picker run with a screen. What a person would
+# answer is the environment: FZF_REPLY for the screen, GUM_BRANCH and
+# GUM_PROMPT for the two fields it can open, GUM_CANCEL for one that is
+# dismissed. stdin is empty, so a field that was not forced would answer
+# nothing and the run would exit 3 -- the failure mode this section exists for.
+run_screen() {
+  ran=$((ran + 1))
+  rm -f "$tmp/gum-ran" "$tmp/rex-args"
+  PATH="$tmp/screen/bin:$PATH" PICK_SCREEN=1 \
+    FZF_REPLY="${FZF_REPLY:-}" GUM_MARKER=$tmp/gum-ran \
+    GUM_BRANCH="${GUM_BRANCH:-}" GUM_PROMPT="${GUM_PROMPT:-}" \
+    GUM_CANCEL="${GUM_CANCEL:-}" REX_ARGS_FILE=$tmp/rex-args \
+    "$tmp/screen/new-work.sh" pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json test/fixtures/ready.json \
+    --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+    --base-refs "$tmp/base-refs" --dry-run "$@" \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+# Typed text the list could not match: the screen's answer is the text and no
+# bead, so the branch is asked for -- opened on the name the header was showing
+# (the first bead's, seeded before the screen opened), and what comes back is
+# the branch the tab creates.
+FZF_REPLY=$'why is the guard flaky?\n\n' GUM_BRANCH='feat/typed' run_screen
+if [ "$status" -ne 0 ]; then
+  fail "typed text with no branch asks for one" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "typed text with no branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "typed text with no branch: the text is the prompt" "$json" \
+    '.prompt == "why is the guard flaky?" and .bead == "" and .title == ""'
+  assert_json "typed text with no branch: the answer is the branch" "$json" \
+    '.branch == "feat/typed" and .create == true'
+fi
+ran=$((ran + 1))
+if ! grep -qF -- '--value feat/58h' "$tmp/gum-ran" 2>/dev/null; then
+  fail "the branch field opens on the header's branch" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+fi
+
+# The prompt row: the text is typed into the field the row opens, and the branch
+# is then asked for in exactly the same way -- one field, then the other.
+FZF_REPLY=$'\n\n✎\twrite a prompt instead\n' \
+  GUM_PROMPT='why is the guard flaky?' GUM_BRANCH='feat/row' run_screen
+if [ "$status" -ne 0 ]; then
+  fail "the prompt row with no branch asks for one" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "the prompt row prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "the prompt row: its text is the prompt" "$json" \
+    '.prompt == "why is the guard flaky?" and .bead == ""'
+  assert_json "the prompt row: its branch answer travels" "$json" \
+    '.branch == "feat/row" and .create == true'
+fi
+ran=$((ran + 1))
+if ! grep -qF -- '--header prompt for the agent' "$tmp/gum-ran" \
+    2>/dev/null; then
+  fail "the prompt row opens the prompt field" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+fi
+ran=$((ran + 1))
+if ! grep -qF -- '--value feat/58h' "$tmp/gum-ran" 2>/dev/null; then
+  fail "the prompt row then opens the branch field on the header's branch" \
+    "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+fi
+
+# A field dismissed, and a field answered with nothing: both are no answer, and
+# no answer is a cancelled pick -- exit 3, said out loud, nothing started. The
+# field was opened either way, and the seed it opened on is not quietly taken as
+# the answer, which a run that exited 0 with feat/58h would have shown.
+no_branch_answer() { # NAME
+  local name=$1
+  if [ "$status" -ne 3 ]; then
+    fail "$name exits 3" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -qxF 'new-work.sh: no branch given, nothing to start' "$tmp/err"; then
+    fail "$name says why" "stderr: $(cat "$tmp/err")"
+  fi
+  ran=$((ran + 1))
+  if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+    fail "$name starts nothing" \
+      "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+  fi
+  ran=$((ran + 1))
+  if ! grep -qF -- '--value feat/58h' "$tmp/gum-ran" 2>/dev/null; then
+    fail "$name still opened the field" \
+      "gum was asked: [$(cat "$tmp/gum-ran" 2>/dev/null)]"
+  fi
+}
+FZF_REPLY=$'why is the guard flaky?\n\n' GUM_CANCEL=1 run_screen
+no_branch_answer 'a cancelled branch field'
+FZF_REPLY=$'why is the guard flaky?\n\n' GUM_BRANCH='' run_screen
+no_branch_answer 'an empty branch answer'
+
+# A bead is an answer that carries its own branch, so the screen asks nothing
+# more: the derived name is what the tab creates, and no field is opened.
+FZF_REPLY=$'\n\npmm-iris-a4l\tTreat index/catalog pages as non-extractable\n' \
+  run_screen
+if [ "$status" -ne 0 ]; then
+  fail "a bead with no branch is asked nothing" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a bead prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a bead's own branch is the branch" "$json" \
+    '.bead == "pmm-iris-a4l" and .branch == "bug/a4l"'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gum-ran" ]; then
+  fail "a bead opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
+fi
+
+# --branch is an answer given before the screen opened, so the field is never
+# reached -- the one path that pays for no extra question at all.
+FZF_REPLY=$'why is the guard flaky?\n\n' run_screen --branch feat/x
+if [ "$status" -ne 0 ]; then
+  fail "--branch short-circuits the ask" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "--branch is the branch" "$json" '.branch == "feat/x"'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gum-ran" ]; then
+  fail "--branch opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
+fi
+
+# ctrl-n is the answer "an agent, and nothing to say", and a blank answer has
+# never asked for a branch: it is the cancelled pick it is today, with no field
+# opened on the way.
+FZF_REPLY=$'\nctrl-n\npmm-iris-a4l\tTreat index/catalog pages as non-extractable\n' \
+  run_screen
+if [ "$status" -ne 3 ]; then
+  fail "a blank answer with no branch exits 3" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF 'new-work.sh: no branch given, nothing to start' "$tmp/err"; then
+  fail "a blank answer with no branch says why" "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gum-ran" ]; then
+  fail "a blank answer opens no field" "gum was asked: $(cat "$tmp/gum-ran")"
 fi
 
 if [ "$fails" -ne 0 ]; then
