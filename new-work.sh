@@ -602,11 +602,13 @@ state_put() {
   printf '%s\n' "$3" >"$1/$2"
 }
 
-# How many lines a state file has, 0 when it is not there at all.
+# How many entries a state file has, 0 when it is not there at all. awk's NR, not
+# wc -l: a last line without a trailing newline is a whole entry, and counting it
+# short would shorten the base cycle by one for a state written by hand.
 state_lines() {
   local file=$1/$2
   if [ -r "$file" ]; then
-    wc -l <"$file" | tr -d ' '
+    awk 'END { print NR }' "$file"
   else
     printf '0\n'
   fi
@@ -643,7 +645,9 @@ composer_base_row() {
 # the header anyway, and without a field of its own a blank one would swallow it.
 # An empty agent reads "none" -- the cycle's no-agent answer -- and an empty base
 # ref reads "wt default", so neither field is ever blank and neither lies about
-# what the tab will do.
+# what the tab will do. A branch that nothing has given a name to yet -- no bead
+# to derive one from, no ctrl-b -- reads "(none yet)" for the same reason: a blank
+# field would print as a doubled space and read as a bug.
 composer_header_lines() {
   local state=$1 project=$2 no_base=${3:-0}
   local agent branch base_row base_ref
@@ -652,7 +656,7 @@ composer_header_lines() {
   base_row=$(composer_base_row "$state" "$no_base")
   base_ref=${base_row%%$'\t'*}
   printf ' %s · agent: %s · branch: %s · base: %s\n' \
-    "$project" "${agent:-none}" "$branch" "${base_ref:-wt default}"
+    "$project" "${agent:-none}" "${branch:-(none yet)}" "${base_ref:-wt default}"
   printf ' %s\n' "$composer_hints"
 }
 
@@ -1095,6 +1099,22 @@ valid_branch_name() {
   [ "$resolved" = "$1" ]
 }
 
+# The branch name READY's bead ID derives, or nothing: a bead the list did not
+# describe still gets a name (types outside the map fall back to feat, as the map
+# itself does), and an id no name can be built from -- one ending in a dash -- is
+# no reason to stop the pick with a usage dump. The issue type is read from the
+# ready list rather than from a row, so a row is never parsed for it.
+branch_for_bead() {
+  local ready=$1 id=$2 type=''
+  [ -n "$id" ] || return 0
+  type=$(printf '%s\n' "$ready" | jq -r --arg id "$id" \
+    '([.[] | select(.id == $id)][0].issue_type) // ""') || type=''
+  # In a subshell of its own: cmd_branch_default answers a name it cannot build
+  # with a usage error, and that error is a status to ignore here -- the bead
+  # simply offers nothing -- not one that ends the pick.
+  (cmd_branch_default --type "${type:-other}" --id "$id" 2>/dev/null) || true
+}
+
 # `new-work.sh pick --main DIR --root PATH --project NAME`
 #       `[--base REF | --no-base] [--base-refs FILE]`
 #       `[--bead ID | --prompt TEXT | --blank] [--agents NAME]...`
@@ -1289,10 +1309,20 @@ cmd_pick() {
     # about the agent.
     state_put "$composer_state" agent \
       "$(printf '%s\n' "$agent_choices" | sed -n 1p)"
-    # --branch is an answer already, and one given by hand: the header shows it
-    # and nothing derives it again.
-    state_put "$composer_state" branch "$branch"
-    [ "$branch_set" -eq 0 ] || state_put "$composer_state" branch_edited 1
+    # The branch the screen opens on. --branch is an answer already, and one
+    # given by hand, so the header shows it and nothing derives it again.
+    # Otherwise it is the first pickable row's name: load:pos(2) lands the cursor
+    # on that bead, so a bare Enter creates exactly the branch the header is
+    # showing, and the header never reads as a blank field on the way in. A bead
+    # picked lower down derives its own name at hand-back, which wins.
+    if [ "$branch_set" -eq 1 ]; then
+      state_put "$composer_state" branch "$branch"
+      state_put "$composer_state" branch_edited 1
+    else
+      state_put "$composer_state" branch \
+        "$(branch_for_bead "$ready" \
+          "$(printf '%s\n' "$rows" | sed -n 1p | cut -f1)")"
+    fi
     # The base cycle, resolved once for the whole run: one for-each-ref here, and
     # ctrl-r only ever moves the index into it.
     base_chain "$main" "$base_refs" "$base" "$no_base" >"$composer_state/bases"
@@ -1377,23 +1407,18 @@ cmd_pick() {
   # The title is read from the ready list rather than from the row, so quotes
   # and whitespace arrive as the database has them. Only whitespace is
   # touched: it would break the one-line JSON this has to fit in.
-  local title='' issue_type=''
+  local title=''
   if [ -n "$bead" ]; then
     if ! printf '%s\n' "$rows" | cut -f1 | grep -Fxq -- "$bead"; then
       # It can still have a title: a gate, a molecule or a step is filtered out
       # of the picker but present in the database.
       printf '%s: %s is not on the pickable list\n' "$PROG" "$bead" >&2
     fi
-    # One lookup for both fields, one per line, so the empty issue_type cannot
-    # be lost to field splitting. A title that is not a string is stringified
-    # first, as in pickable_rows: gsub cannot match a number.
-    {
-      read -r issue_type
-      read -r title
-    } < <(printf '%s\n' "$ready" | jq -r --arg id "$bead" '
-          ([.[] | select(.id == $id)][0]) as $b
-          | ($b.issue_type // ""),
-            (($b.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))')
+    # A title that is not a string is stringified first, as in pickable_rows:
+    # gsub cannot match a number.
+    title=$(printf '%s\n' "$ready" | jq -r --arg id "$bead" '
+          (([.[] | select(.id == $id)][0].title) // "")
+          | tostring | gsub("[\\t\\n\\r]+"; " ")')
   fi
 
   # The agent is the header's: ctrl-a cycles it through the list and then none, so
@@ -1414,15 +1439,19 @@ cmd_pick() {
     die "pick: could not list the branches of $main"
   fi
 
+  # The screen's branch wins over --branch when it was edited: what the header
+  # showed while the pick was being made is what gets handed back, or the float
+  # would promise one branch and the tab create another.
+  if [ -n "$composer_state" ] &&
+    [ "$(state_get "$composer_state" branch_edited)" = 1 ]; then
+    branch=$(state_get "$composer_state" branch)
+    branch_set=1
+  fi
+
   if [ "$branch_set" -eq 0 ]; then
     local suggestion=''
     if [ -n "$bead" ]; then
-      # A bead the list did not describe still gets a name: types outside the
-      # map fall back to feat, like the map itself does. An id no name can be
-      # built from -- one ending in a dash -- is no reason to stop the pick with
-      # a usage dump: the prompt simply offers nothing.
-      suggestion=$(cmd_branch_default --type "${issue_type:-other}" --id "$bead" 2>/dev/null) ||
-        suggestion=''
+      suggestion=$(branch_for_bead "$ready" "$bead")
     fi
     # Told before the prompt rather than packed into it, so the prompt stays one
     # short line whatever the reason for asking.
@@ -1430,15 +1459,9 @@ cmd_pick() {
       printf '%s: %s\n' "$PROG" "$note" >&2
     fi
     if [ -n "$composer_state" ]; then
-      # The screen had its chance. ctrl-b writes the branch and marks it edited;
-      # a branch that was not edited is the one the bead derives, the same name
-      # the field would have opened on, had there been a bead to derive it from
-      # when the screen opened.
-      if [ "$(state_get "$composer_state" branch_edited)" = 1 ]; then
-        branch=$(state_get "$composer_state" branch)
-      else
-        branch=$suggestion
-      fi
+      # The screen had its chance and the branch was not edited, so it is the one
+      # this bead derives -- the name the field would have opened on.
+      branch=$suggestion
     else
       # Nobody to ask: the answer is a line of stdin, and an empty one is the
       # suggestion accepted -- which is what a bare Enter means in the float.

@@ -1132,8 +1132,17 @@ check_header() { # NAME WANT
   local name=$1 want=$2
   if [ "$status" -ne 0 ]; then
     fail "$name exits 0" "exit $status: $(cat "$tmp/err")"
-  elif [ "$(cat "$tmp/out")" != "$want" ]; then
+    return
+  fi
+  if [ "$(cat "$tmp/out")" != "$want" ]; then
     fail "$name" "want [$want], got [$(cat "$tmp/out")]"
+  fi
+  # $(cat) drops trailing newlines, so a verb printing a third, empty line would
+  # still compare equal: the header is two lines, and it is counted as two.
+  ran=$((ran + 1))
+  if [ "$(wc -l <"$tmp/out" | tr -d ' ')" != 2 ]; then
+    fail "$name is exactly two lines" \
+      "$(wc -l <"$tmp/out" | tr -d ' ') lines: $(cat "$tmp/out")"
   fi
 }
 
@@ -1151,6 +1160,25 @@ printf '\t\n@\t\nmain\t\n' >"$tmp/cs2/bases"
 run_composer header --state "$tmp/cs2" --project rex-config
 check_header "an empty agent is none and an empty base is the wt default" \
   "$(heading rex-config none 'feat/x' 'wt default')"
+
+# The branch the screen opens on is the name a bare Enter would create, seeded
+# from the bead the cursor lands on (load:pos(2)), so the field describes the tab
+# the pick would make before anything is pressed. This is that state, the way the
+# picker writes it: the first bead's derived name.
+composer_state "$tmp/cs1b" pi 'feat/58h' 1
+printf 'origin/main\torigin\n@\t\n' >"$tmp/cs1b/bases"
+run_composer header --state "$tmp/cs1b" --project rex-config
+check_header "a branch seeded from the first bead is the header's branch" \
+  "$(heading rex-config pi 'feat/58h' origin/main)"
+
+# With nothing to name -- no bead to derive a branch from, and no ctrl-b -- the
+# field says so in words: an empty one would print as a doubled space and read
+# as a bug.
+composer_state "$tmp/cs1c" pi '' 1
+printf 'origin/main\torigin\n@\t\n' >"$tmp/cs1c/bases"
+run_composer header --state "$tmp/cs1c" --project rex-config
+check_header "a branch nothing has named yet says so" \
+  "$(heading rex-config pi '(none yet)' origin/main)"
 
 # ctrl-a: the next name on the agent list, then none, then round again -- and
 # only the header is repainted. The rows are beads, so nothing about them
@@ -1207,6 +1235,30 @@ cycle_base() { # NAME WANT_INDEX WANT_LABEL
 cycle_base 'the next base is @' 2 '@'
 cycle_base 'the base after that is main' 3 'main'
 cycle_base 'the cycle wraps to the opening answer' 1 'origin/main'
+
+# The cycle is counted by entries, not by newlines: a bases file whose last line
+# has none -- one written by hand -- must not lose its last base, which would
+# shorten the cycle and wrap one entry early.
+composer_state "$tmp/cs8" pi 'feat/one' 1
+printf 'origin/main\torigin\n@\t' >"$tmp/cs8/bases"
+cycle_base_no_newline() { # NAME WANT_INDEX WANT_LABEL
+  local name=$1 index=$2 label=$3
+  run_composer cycle-base --state "$tmp/cs8" --project rex-config \
+    --main "$tmp/nowhere"
+  if [ "$status" -ne 0 ]; then
+    fail "$name exits 0" "exit $status: $(cat "$tmp/err")"
+    return
+  fi
+  if [ "$(cat "$tmp/out")" != "$(heading rex-config pi feat/one "$label")" ]; then
+    fail "$name repaints the header" "stdout: $(cat "$tmp/out")"
+  fi
+  if [ "$(cat "$tmp/cs8/base_index")" != "$index" ]; then
+    fail "$name moves the index" "base_index: $(cat "$tmp/cs8/base_index")"
+  fi
+}
+cycle_base_no_newline 'a bases file with no final newline cycles to its last entry' \
+  2 '@'
+cycle_base_no_newline 'a bases file with no final newline wraps after it' 1 'origin/main'
 
 # ctrl-b: the branch, typed. gum asks it in the float and stdin carries it in a
 # pipe, so this is the real path either way. The answer is trimmed, the edit is

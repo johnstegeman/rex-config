@@ -623,8 +623,9 @@ local function picker_command(project)
     command[#command + 1] = "--base"
     command[#command + 1] = M.options.base
   end
-  -- The agent question is asked only where the picker is given a list, so an
-  -- answer always comes back for a question that was really asked.
+  -- The agent names are handed over only where the screen has a field to cycle
+  -- them in: the picker seeds its header from the first, ctrl-a walks the rest and
+  -- then none, and a list is the whole of what it needs to do that.
   for _, name in ipairs(agent_choices()) do
     if name ~= "" then
       command[#command + 1] = "--agents"
