@@ -4,8 +4,8 @@
 # pick is the two-stage picker behind ctrl+space>n: a bead, then a branch, then
 # one JSON object handed back to Rex. The bead question is fzf, which cannot be
 # driven without a terminal, so it is bypassed with --bead or served by saved
-# tool output (--bd-json/--wt-json/--refs). The branch question is typed, so its
-# answers arrive on stdin like a person's would.
+# tool output (--bd-json/--wt-json/--refs/--base-refs). The branch question is
+# typed, so its answers arrive on stdin like a person's would.
 #
 # Three things are outside what a pipe can reach, so a pty and a hand are what
 # verify them: the prompt text `branch [name]> ` as it appears on a terminal, the
@@ -64,7 +64,8 @@ run_pick() {
   PATH="${PICK_PATH:-$PATH}" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json "$fixture" \
-    --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" "$@" \
+    --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+    --base-refs "$tmp/base-refs" "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
 }
@@ -83,7 +84,8 @@ run_pick_answer() {
     PATH="${PICK_PATH:-$PATH}" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
       --main /p/demo/main --root /p/demo --project demo \
       --bd-json "$fixture" \
-      --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" "$@" \
+      --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+      --base-refs "$tmp/base-refs" "$@" \
       >"$tmp/out" 2>"$tmp/err"
   status=$?
 }
@@ -130,6 +132,20 @@ feat/abc123
 main
 EOF
 
+# The refs the base is resolved from, exactly what
+#
+#   git for-each-ref --format='%(refname)%00%(symref)' refs/remotes refs/heads
+#
+# prints for a clone of origin/main with both of the local branches: a refname,
+# a NUL, then that ref's symref target -- empty for everything but origin/HEAD.
+printf 'refs/remotes/origin/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' \
+  >"$tmp/base-refs"
+
+# The same for a clone whose one remote is upstream: the remote a base lives on
+# is what its ref record says, not the slash in its name.
+printf 'refs/remotes/upstream/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' \
+  >"$tmp/base-refs-upstream"
+
 # A ready list with nothing on it: the branch question on its own.
 printf '[]\n' >"$tmp/empty-beads.json"
 
@@ -169,8 +185,9 @@ else
     '.title == "Treat index/catalog pages as non-extractable"'
   assert_json "exact branch: project, root, main" "$json" \
     '.project == "demo" and .root == "/p/demo" and .main == "/p/demo/main"'
-  assert_json "exact branch: exactly the seven keys" "$json" \
-    'keys == ["bead", "branch", "create", "main", "project", "root", "title"]'
+  assert_json "exact branch: exactly the nine keys" "$json" \
+    'keys == ["base", "base_remote", "bead", "branch", "create", "main",
+              "project", "root", "title"]'
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/rex-args" ]; then
@@ -466,6 +483,7 @@ PATH=/nonexistent REX_ARGS_FILE=$tmp/rex-args "${BASH:-bash}" ./new-work.sh pick
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/base-refs" \
   --bead pmm-iris-a4l </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 1 ]; then
@@ -487,6 +505,7 @@ PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/base-refs" \
   --bead pmm-iris-a4l --branch feat/needs-git --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
@@ -508,6 +527,7 @@ PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/base-refs" \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 3 ]; then
@@ -525,6 +545,7 @@ printf 'feat/no-fzf\n' |
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json test/fixtures/ready.json \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+    --base-refs "$tmp/base-refs" \
     --bead pmm-iris-a4l --dry-run >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -690,6 +711,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args \
   ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/base-refs" \
   --bead pmm-iris-a4l --branch bug/a4l \
   >"$tmp/out" 2>"$tmp/err" </dev/null
 status=$?
@@ -720,6 +742,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args REX_FAIL='no server' \
   ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/base-refs" \
   --bead pmm-iris-a4l --branch bug/a4l \
   >"$tmp/out" 2>"$tmp/err" < <(sleep 10)
 status=$?
@@ -793,7 +816,8 @@ else
   assert_json "a typed prompt replaces the bead" "$json" \
     '.bead == "" and .title == ""'
   assert_json "a typed prompt is the only new key" "$json" \
-    'keys == ["bead", "branch", "create", "main", "project", "prompt", "root", "title"]'
+    'keys == ["base", "base_remote", "bead", "branch", "create", "main",
+              "project", "prompt", "root", "title"]'
 fi
 
 # A prompt with quotes and runs of spaces survives as one value: it travels to
@@ -843,7 +867,8 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "the agent list leads with its default" "$json" '.agent == "pi"'
   assert_json "the agent question asks nobody off a terminal" "$json" \
-    'keys == ["agent", "bead", "branch", "create", "main", "project", "root", "title"]'
+    'keys == ["agent", "base", "base_remote", "bead", "branch", "create",
+              "main", "project", "root", "title"]'
 fi
 
 run_pick test/fixtures/ready.json --agents pi --agent claude \
@@ -886,6 +911,7 @@ PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-refs "$tmp/base-refs" \
   --agents pi --branch feat/no-gum --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
@@ -921,6 +947,77 @@ elif ! grep -qF 'Picking this row writes the prompt in a field of its own.' "$tm
 elif [ -e "$tmp/called" ]; then
   fail "the prompt row's preview asks bd nothing" \
     "called: $(sort -u "$tmp/called" 2>/dev/null)"
+fi
+
+# (r) The base. The picker resolves the ref new branches are created from and
+# hands it over with the remote it lives on, so the tab can fetch that one; the
+# tab owns the fetch, so the picker says nothing about the base on stderr.
+run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "the base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "the branch question opens on origin/main" "$json" \
+    '.base == "origin/main"'
+  assert_json "the base names the remote it lives on" "$json" \
+    '.base_remote == "origin"'
+fi
+
+# --base is the answer whatever this clone would have opened on, and it is not
+# a ref this clone has: the picker does not get to refuse it. A ref with no
+# record of its own is on no remote, so the tab fetches nothing for it.
+run_pick test/fixtures/ready.json --branch feat/x --base refresh --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "--base is the base, verbatim" "$json" '.base == "refresh"'
+  assert_json "a base on no remote carries no remote" "$json" \
+    '(has("base_remote") | not)'
+fi
+
+# --no-base is the worktrunk default: a boolean false, not the string an --arg
+# would have made of it, and no remote to fetch.
+run_pick test/fixtures/ready.json --branch feat/x --no-base --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--no-base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "--no-base is false, not a word" "$json" '.base == false'
+  assert_json "--no-base fetches nothing" "$json" \
+    '(has("base_remote") | not)'
+fi
+
+# The remote comes from the ref record, so a base on a remote that is not
+# origin says so, and the tab fetches that one rather than origin.
+run_pick test/fixtures/ready.json --branch feat/x --base upstream/main \
+  --base-refs "$tmp/base-refs-upstream" --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "an upstream base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "an upstream base says upstream" "$json" \
+    '.base == "upstream/main" and .base_remote == "upstream"'
+fi
+
+# A base and no base are two answers to one question, so both at once is a
+# script that cannot mean what it says.
+run_pick test/fixtures/ready.json --branch feat/x --base refresh --no-base \
+  --dry-run
+if [ "$status" -ne 2 ]; then
+  fail "a base and no base together exit 2" "exit $status: $(cat "$tmp/err")"
+fi
+
+# The note is gone. Where a new branch starts from is now a word in the payload
+# rather than a line above the branch question, which is where a person reads it
+# next to the base the tab will really use.
+run_pick_answer feat/x test/fixtures/ready.json --base refresh --dry-run
+if [ "$status" -ne 0 ]; then
+  fail "a typed branch with a --base hands back" \
+    "exit $status: $(cat "$tmp/err")"
+elif grep -qF 'new branches start from' "$tmp/err"; then
+  fail "the base is not announced before the branch question" \
+    "stderr: $(cat "$tmp/err")"
 fi
 
 

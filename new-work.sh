@@ -29,11 +29,12 @@ commands:
   fzf-answer STATUS
       read fzf's --print-query reply on stdin and print what it means as one
       "bead<TAB>prompt" row; STATUS is the status fzf exited with
-  pick --main DIR --root PATH --project NAME [--base B]
-       [--bead ID | --prompt TEXT] [--agents NAME]... [--agent NAME]
-       [--branch NAME] [--dry-run]
+  pick --main DIR --root PATH --project NAME [--base REF | --no-base]
+       [--base-refs FILE] [--bead ID | --prompt TEXT] [--agents NAME]...
+       [--agent NAME] [--branch NAME] [--dry-run]
       ask which bead (or prompt), which agent, and which branch, and hand the
-      answer to Rex as one JSON object; exit 3 when no branch or agent was
+      answer to Rex as one JSON object, with the base a new branch is created
+      from and the remote that base lives on; exit 3 when no branch or agent was
       chosen, exit 2 when the name typed for a new branch is not a valid ref
 
 --bd-json, --wt-json, --refs and --base-refs read saved tool output instead of
@@ -54,6 +55,13 @@ starts nothing, so the tab is the new worktree and a login shell, and the prompt
 it could not deliver is printed above that shell rather than dropped. The third
 is the branch, typed with the bead's name already in the field, so a bare Enter
 accepts it.
+
+The branch question carries the base it opens on: the one --base names, or the
+one this clone would be created from (origin/HEAD's target, then origin/main,
+origin/master, main, master), or none at all with --no-base. The base travels to
+the tab with the remote it lives on so the tab can fetch that one; a base on no
+remote carries no remote, and nothing is fetched for it. --base-refs reads a
+saved for-each-ref instead of the repository, as bases does.
 
 pick's --bead, --prompt, --agent and --branch answer a question instead of
 asking it, and an empty value means none. With no terminal on stdin nothing is
@@ -716,20 +724,22 @@ valid_branch_name() {
   [ "$resolved" = "$1" ]
 }
 
-# `new-work.sh pick --main DIR --root PATH --project NAME [--base B]`
-#       `[--bead ID | --prompt TEXT] [--agents NAME]... [--agent NAME]`
-#       `[--branch NAME] [--dry-run]`
+# `new-work.sh pick --main DIR --root PATH --project NAME`
+#       `[--base REF | --no-base] [--base-refs FILE]`
+#       `[--bead ID | --prompt TEXT] [--agents NAME]...`
+#       `[--agent NAME] [--branch NAME] [--dry-run]`
 #
 # The three questions behind ctrl+space>n: which bead (or prompt), which agent,
 # then which branch. The answer goes back to Rex as one JSON object, built by jq
 # so no value is ever interpolated into a command line. --bead, --prompt, --agent
 # and --branch answer a question without asking it, which is how the tests and
-# scripts drive the picker.
+# scripts drive the picker. --base, --no-base and --base-refs answer the base
+# the branch question opens on, which the payload carries to the tab.
 cmd_pick() {
   local main='' root='' project='' base='' bead='' branch=''
   local prompt='' agent='' agent_choices=''
-  local bead_set=0 prompt_set=0 agent_set=0 branch_set=0 dry_run=0
-  local bd_json='' wt_json='' refs=''
+  local bead_set=0 prompt_set=0 agent_set=0 branch_set=0 dry_run=0 no_base=0
+  local bd_json='' wt_json='' refs='' base_refs=''
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -752,6 +762,10 @@ cmd_pick() {
         [ $# -ge 2 ] || usage_error 'pick: --base needs a value'
         base=$2
         shift 2
+        ;;
+      --no-base)
+        no_base=1
+        shift
         ;;
       --bead)
         [ $# -ge 2 ] || usage_error 'pick: --bead needs an id'
@@ -799,6 +813,11 @@ cmd_pick() {
         refs=$2
         shift 2
         ;;
+      --base-refs)
+        [ $# -ge 2 ] || usage_error 'pick: --base-refs needs a file'
+        base_refs=$2
+        shift 2
+        ;;
       --dry-run)
         dry_run=1
         shift
@@ -818,6 +837,10 @@ cmd_pick() {
     usage_error 'pick: --bead and --prompt answer the same question'
   fi
 
+  # A base and no base answer one question too, as they do for bases.
+  [ -z "$base" ] || [ "$no_base" -eq 0 ] ||
+    usage_error 'pick: --base and --no-base answer the same question'
+
   # The hand-back's paths are read by the Rex server, whose working directory is
   # not this one, so they have to say where they are. The Lua side derives both
   # from git and they are always absolute; this is the guard for a hand-run.
@@ -828,8 +851,9 @@ cmd_pick() {
   # refused here, by name: left to the pipelines below it reaches `cd` inside a
   # subshell, whose failure reads as a line number in this script rather than as a
   # place that does not exist. Only when one of those lookups will really be made:
-  # a run given all three fixtures never touches --main.
-  if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ]; then
+  # a run given all four fixtures never touches --main.
+  if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ] ||
+    { [ -z "$base_refs" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
   fi
 
@@ -987,9 +1011,6 @@ cmd_pick() {
     fi
     # Told before the prompt rather than packed into it, so the prompt stays one
     # short line whatever the reason for asking.
-    if [ -n "$base" ]; then
-      printf '%s: new branches start from %s\n' "$PROG" "$base" >&2
-    fi
     if [ -n "$note" ]; then
       printf '%s: %s\n' "$PROG" "$note" >&2
     fi
@@ -1022,6 +1043,24 @@ cmd_pick() {
     exit 2
   fi
 
+  # The base the tab creates from, resolved once, here, where the answer the
+  # branch question opens on is known: it travels in the payload with the remote
+  # it lives on so the tab can fetch that one, and nothing is said about it on
+  # stderr, where the announcement used to be. --base is the answer whatever
+  # this clone would have opened on; --no-base is the worktrunk default, no ref
+  # at all; otherwise the base cycle's first row is it, the answer `bases`
+  # prints first. The remote comes from that row rather than from a slash in the
+  # name, because feat/x is a local branch and nothing to fetch.
+  local base_ref='' base_remote='' base_default=0
+  if [ "$no_base" -eq 1 ]; then
+    base_default=1
+  else
+    local base_row=''
+    base_row=$(base_chain "$main" "$base_refs" "$base" '' | sed -n 1p)
+    base_ref=${base:-${base_row%%$'\t'*}}
+    base_remote=${base_row#*$'\t'}
+  fi
+
   # prompt and agent travel only when they were answered: an absent prompt leaves
   # the plugin's own template to say what the flow is, and an absent agent is one
   # the plugin still knows better than the picker does.
@@ -1034,12 +1073,17 @@ cmd_pick() {
     --arg bead "$bead" \
     --arg title "$title" \
     --argjson create "$create" \
+    --arg base "$base_ref" \
+    --arg base_remote "$base_remote" \
+    --argjson base_default "$base_default" \
     --arg prompt "$prompt" \
     --argjson prompt_set "$prompt_set" \
     --arg agent "$agent" \
     --argjson agent_set "$agent_set" \
     '{project: $project, root: $root, main: $main, branch: $branch,
-      bead: $bead, title: $title, create: $create}
+      bead: $bead, title: $title, create: $create,
+      base: (if $base_default == 1 then false else $base end)}
+     + (if $base_remote == "" then {} else {base_remote: $base_remote} end)
      + (if $prompt_set == 1 then {prompt: $prompt} else {} end)
      + (if $agent_set == 1 then {agent: $agent} else {} end)')
 
