@@ -428,6 +428,21 @@ else
   assert_json "quirky title payload" "$json" '.bead == "pmm-iris-q1"'
 fi
 
+# A bead the row filter drops -- a gate here -- can still be named with --bead,
+# and its title is read by a second jq, which is the only place such a bead
+# reaches. A title that is not a string has to be stringified there too: without
+# that the pick dies in raw jq text before it hands anything back.
+printf '[{"id": "pmm-iris-g1", "title": 42, "priority": 1, "issue_type": "gate"}]\n' \
+  >"$tmp/gate-numeric-title.json"
+run_pick "$tmp/gate-numeric-title.json" --bead pmm-iris-g1 --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a numeric title on a filtered bead still hands back" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a numeric title on a filtered bead is stringified" "$json" \
+    '.title == "42" and .bead == "pmm-iris-g1"'
+fi
+
 # (f) A branch holding both kinds of quote: the payload survives the printed
 # quoting, so what rex receives is the branch that was typed.
 odd='x"y'"'"'z'

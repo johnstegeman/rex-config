@@ -279,28 +279,23 @@ contains("a non-table agent_args names the option", args_message, "agent_args")
 eq("a refused agent_args leaves the option a list", type(M.options.agent_args), "table")
 
 -- A table with one bad value applies none of it: the refusal comes before
--- anything is assigned. pairs() visits a table's keys in an order that varies
--- between processes, so this one hands its keys out in a fixed order instead,
--- the bad one last: a single pass over them would apply the other two before it
--- raised, which is exactly what the last assertion looks for.
-local function in_order(values, order)
-  return setmetatable(values, {
-    __pairs = function()
-      local i = 0
-      return function()
-        i = i + 1
-        local key = order[i]
-        if key ~= nil then return key, values[key] end
-      end
-    end,
-  })
-end
-
+-- anything is assigned, which is `setup`'s two visible passes (validate, then
+-- assign).
+--
+-- The table is plain on purpose. An earlier version fixed the iteration order
+-- with a `__pairs` metamethod, which only some interpreters honour -- Lua 5.4
+-- removed it and LuaJIT never has it on -- so the assertion would have been
+-- order-dependent where it mattered most. A plain table gives the guarantee for
+-- every order instead: on any interpreter and any hash seed, a correct `setup`
+-- leaves every option as it was. What a plain table cannot do is promise to
+-- notice a single-pass regression on every run -- a single pass applies
+-- whatever it meets before the bad key, which is some keys in some orders -- so
+-- this is a guard, not a proof, and this comment is the honest half of it.
 local options_before = {}
 for key, value in pairs(M.options) do options_before[key] = value end
-local ok_mixed, mixed_message = pcall(M.setup, in_order({
+local ok_mixed, mixed_message = pcall(M.setup, {
   bead_prompt = "work on {id}", agent = "aider", agent_args = "--thinking high",
-}, { "bead_prompt", "agent", "agent_args" }))
+})
 eq("a table with one bad value is refused", ok_mixed, false)
 contains("a table with one bad value names the option", mixed_message, "agent_args")
 eq("a table with one bad value applies none of it", M.options, options_before)
