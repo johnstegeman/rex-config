@@ -5,10 +5,11 @@
 # worktree, the agent runs in it, and a login shell stays behind, in the
 # worktree, with everything printed above it still readable. It is run here for
 # real -- with a stand-in `wt` that answers the way worktrunk does, a stand-in
-# agent, and a stand-in SHELL -- because what matters is shell behaviour: which
-# directory the agent and the shell end up in, which words reach `wt switch`,
-# that a failed switch never starts the agent, and that the answer (a branch, a
-# prompt) is data and not program text.
+# `git` for the fetch it makes before creating a branch, a stand-in agent, and a
+# stand-in SHELL -- because what matters is shell behaviour: which directory the
+# agent and the shell end up in, which words reach `wt switch`, that a failed
+# switch never starts the agent, and that the answer (a branch, a prompt) is
+# data and not program text.
 #
 # The program under test is taken out of the argv the module builds, so this
 # file runs exactly the string Rex hands to `sh -c`.
@@ -62,16 +63,31 @@ mkdir -p "$bin" "$worktree" "$start"
 # worktrunk, stood in for: it records the words it was given, one per line, then
 # answers like `wt switch --no-cd --format=json` -- the switch's result as JSON
 # on stdout, hook output on stderr -- or fails the way it does for a branch it
-# does not know.
+# does not know. It also records the credential-prompt guard it inherited from
+# the wrapper, and that it ran, in the call order the fetch is checked against.
 cat >"$bin/wt" <<'EOF'
 #!/bin/sh
 : >"$WT_WORDS"
+printf 'wt %s\n' "$1" >>"${CALL_ORDER:-/dev/null}"
+printf 'GIT_TERMINAL_PROMPT=%s\n' "${GIT_TERMINAL_PROMPT-unset}" >"${WT_ENV:-/dev/null}"
 for word in "$@"; do printf '%s\n' "$word" >>"$WT_WORDS"; done
 if [ "${WT_FAIL:-0}" = 1 ]; then
   printf '✗ No branch named %s\n' "$1" >&2
   exit 1
 fi
 printf '{"action":"switched","path":"%s"}\n' "$WT_PATH"
+EOF
+
+# git, stood in for: the fetch a create makes before it switches. It writes the
+# words it was given into $GIT_CALLS -- so the remote under test is read from
+# what git was told rather than from what the wrapper meant -- and fails when
+# GIT_EXIT says so. It sits in $bin, so every run has it on PATH; only a create
+# with a remote reaches it, which is what the marker's absence asserts.
+cat >"$bin/git" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"${GIT_CALLS:-/dev/null}"
+printf 'git %s\n' "$*" >>"${CALL_ORDER:-/dev/null}"
+exit "${GIT_EXIT:-0}"
 EOF
 
 # The agent, stood in for: it says where it is and what it was given, which is
@@ -107,7 +123,7 @@ trap ': >"$GOT_INT"; exit 0' INT
 while :; do sleep 0.1; done
 EOF
 
-chmod +x "$bin/wt" "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
+chmod +x "$bin/wt" "$bin/git" "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
 
 # The wrapper is run by the machine's own `sh`, resolved here so a run can take
 # every tool but `wt` off the PATH (that is how a missing jq is tested). Every
@@ -120,21 +136,28 @@ if command -v dash >/dev/null 2>&1; then
 fi
 
 # Run the wrapper the way Rex runs the tab: as an argv with no shell in between,
-# the tab's own directory as cwd, and the answer under test as its parameters.
-# WRAPPER_PATH narrows the PATH for the run, RUN_SHELL picks the sh, TEST_SHELL
-# replaces the stand-in shell, TEST_WT_PATH the path worktrunk reports, and
-# STDIN_FROM what the pane's stdin is (a file of commands, for a fallback sh that
-# is not a stub). Sets $status and leaves stdout in $tmp/out, stderr in $tmp/err.
+# the tab's own directory as cwd, and the answer under test as its parameters --
+# the four positional words (create, branch, base, remote) and then the agent,
+# its arguments and the prompt. WRAPPER_PATH narrows the PATH for the run,
+# RUN_SHELL picks the sh, TEST_SHELL replaces the stand-in shell, TEST_WT_PATH
+# the path worktrunk reports, GIT_EXIT makes the stand-in git fail, and
+# STDIN_FROM what the pane's stdin is (a file of commands, for a fallback sh
+# that is not a stub). The stand-ins' records are cleared first, so an
+# assertion that something never ran reads that run alone. Sets $status and
+# leaves stdout in $tmp/out, stderr in $tmp/err.
 run_wrapper() {
-  local create=$1 branch=$2 base=$3
-  shift 3
+  local create=$1 branch=$2 base=$3 remote=$4
+  shift 4
+  rm -f "$tmp/git-calls" "$tmp/calls"
   (
     cd "$start" || exit 1
     PATH=${WRAPPER_PATH:-$bin:$PATH}
     SHELL=${TEST_SHELL:-$tmp/shell}
     WT_WORDS=$tmp/wt-words WT_PATH=${TEST_WT_PATH:-$worktree} WT_FAIL=${WT_FAIL:-0}
-    export PATH SHELL WT_WORDS WT_PATH WT_FAIL
-    "${RUN_SHELL:-$sh_bin}" -c "$script" sh "$create" "$branch" "$base" "$@"
+    WT_ENV=$tmp/wt-env GIT_CALLS=$tmp/git-calls GIT_EXIT=${GIT_EXIT:-0}
+    CALL_ORDER=$tmp/calls
+    export PATH SHELL WT_WORDS WT_PATH WT_FAIL WT_ENV GIT_CALLS GIT_EXIT CALL_ORDER
+    "${RUN_SHELL:-$sh_bin}" -c "$script" sh "$create" "$branch" "$base" "$remote" "$@"
   ) >"$tmp/out" 2>"$tmp/err" <"${STDIN_FROM:-/dev/null}"
   status=$?
 }
@@ -142,7 +165,7 @@ run_wrapper() {
 # A create run: worktrunk is asked to create the branch from the base, the agent
 # runs in the worktree it made, and a login shell is left there.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 @ agent "/brainstorming for bead p-1"
+run_wrapper 1 feat/x1 @ "" agent "/brainstorming for bead p-1"
 if [ "$status" -ne 0 ]; then
   fail "a create run finishes" "exit $status: $(cat "$tmp/err")"
 fi
@@ -174,9 +197,12 @@ if ! grep -qx "shell args: -l" "$tmp/out"; then
 fi
 
 # An existing worktree: the same run with no --create, so no second worktree
-# appears, and no --base either -- the base says what a *new* branch starts from.
+# appears, and no --base either, even though the base word is non-empty --
+# --base says what a *new* branch starts from (worktrunk answers "--base flag is
+# only used with --create, ignoring" to anything else, which would be a line of
+# noise on the pane for nothing).
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 @ agent "/brainstorming"
+run_wrapper 0 feat/x1 @ "" agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "an existing-worktree run finishes" "exit $status: $(cat "$tmp/err")"
 fi
@@ -195,17 +221,145 @@ fi
 # Creating with no base named: worktrunk's own default, so the parameter is
 # empty and --base is not sent.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 "" agent "p"
+run_wrapper 1 feat/x1 "" "" agent "p"
 printf 'switch\n--create\nfeat/x1\n--no-cd\n--format=json\n' >"$tmp/want"
 if ! diff -u "$tmp/want" "$tmp/wt-words"; then
   fail "a create run with no base sends no --base"
+fi
+
+ran=$((ran + 1))
+if grep -qx -- '--base' "$tmp/wt-words"; then
+  fail "an empty base is no --base word at all" "words: $(cat "$tmp/wt-words")"
+fi
+
+# The base and the remote ---------------------------------------------------
+#
+# A new branch starts from a real, named ref, and a ref that lives on a remote
+# is fetched first, so the branch starts from what the remote has now rather
+# than from whatever this machine last saw. Both words are the picker's answer:
+# the wrapper reads the remote it is handed and never derives "origin" from the
+# ref's shape, and it passes the base on verbatim -- a ref name with a slash is
+# one word, not a glob and not two arguments.
+
+# The fetch's guard: an invisible credential prompt is the hang
+# GIT_TERMINAL_PROMPT=0 exists to prevent, and it is exported before the fetch
+# and the switch, so worktrunk and the hooks it runs inherit it too.
+ran=$((ran + 1))
+run_wrapper 1 feat/x1 origin/main origin agent "/brainstorming"
+if ! grep -qx 'GIT_TERMINAL_PROMPT=0' "$tmp/wt-env"; then
+  fail "wt runs with GIT_TERMINAL_PROMPT=0" "recorded: $(cat "$tmp/wt-env" 2>/dev/null)"
+fi
+
+# The fetch comes first, from the remote the picker named, and the switch runs
+# after it -- so the branch is made from the ref as the fetch left it.
+ran=$((ran + 1))
+printf 'git fetch --quiet origin\nwt switch\n' >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/calls"; then
+  fail "a create fetches the base's remote before it switches"
+fi
+
+# The base reaches worktrunk as itself, right after --base.
+ran=$((ran + 1))
+printf 'switch\n--create\nfeat/x1\n--base\norigin/main\n--no-cd\n--format=json\n' >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/wt-words"; then
+  fail "the base reaches wt switch verbatim"
+fi
+
+# The fetch is the pane's business and says nothing on its stdout: the agent
+# and the shell are what wrote there, and a fetch that added a line of its own
+# -- git's progress, say -- would sit in the middle of their answers.
+ran=$((ran + 1))
+printf 'agent pwd: %s\nagent arg: /brainstorming\nshell pwd: %s\nshell args: -l\n' \
+  "$worktree" "$worktree" >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/out"; then
+  fail "a fetch adds nothing to the pane's stdout"
+fi
+
+# A base on a remote that is not origin: the wrapper fetches the word it was
+# given, upstream, and not the origin it could have assumed.
+ran=$((ran + 1))
+run_wrapper 1 feat/x1 upstream/main upstream agent "/brainstorming"
+if ! grep -qx 'fetch --quiet upstream' "$tmp/git-calls"; then
+  fail "the remote the picker named is the one fetched, not origin" \
+    "git was given: $(cat "$tmp/git-calls" 2>/dev/null)"
+fi
+
+ran=$((ran + 1))
+printf 'switch\n--create\nfeat/x1\n--base\nupstream/main\n--no-cd\n--format=json\n' >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/wt-words"; then
+  fail "a base from another remote reaches wt switch verbatim too"
+fi
+
+# A fetch that fails -- offline, a ref the remote no longer has, a credential
+# prompt nobody answers -- is one line on the pane and nothing more: the switch
+# still runs, and the branch starts from the ref as it is. Losing the work
+# because the network was down would be worse than a branch a fetch behind.
+ran=$((ran + 1))
+GIT_EXIT=1 run_wrapper 1 feat/x1 upstream/main upstream agent "/brainstorming"
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "a failed fetch still leaves a shell in the worktree" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+if ! grep -qxF 'rex-config: could not fetch upstream; feat/x1 starts from upstream/main as it is' \
+  "$tmp/err"; then
+  fail "a failed fetch names the remote, the branch and the base" "stderr: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+if [ "$(wc -l <"$tmp/err" | tr -d ' ')" -ne 1 ]; then
+  fail "a failed fetch says exactly one line" "stderr: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+printf 'switch\n--create\nfeat/x1\n--base\nupstream/main\n--no-cd\n--format=json\n' >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/wt-words"; then
+  fail "a failed fetch does not stop the switch"
+fi
+
+ran=$((ran + 1))
+if ! grep -qx "agent pwd: $worktree" "$tmp/out"; then
+  fail "a failed fetch does not stop the agent" "output: $(cat "$tmp/out")"
+fi
+
+# No remote: there is nothing to fetch, so git is never run at all. The marker
+# the stand-in writes is what tells "never" apart from "ran and did nothing".
+ran=$((ran + 1))
+run_wrapper 1 feat/x1 origin/main "" agent "/brainstorming"
+if [ -e "$tmp/git-calls" ]; then
+  fail "no remote means no fetch" "git was given: $(cat "$tmp/git-calls")"
+fi
+
+# A remote with no base to go with it: there is no ref to freshen and nothing a
+# failure line could name, so git is not run at all and the pane stays quiet --
+# the case that used to read "starts from  as it is".
+ran=$((ran + 1))
+GIT_EXIT=1 run_wrapper 1 feat/x1 "" upstream agent "/brainstorming"
+if [ "$status" -ne 0 ]; then
+  fail "a base-less remote still starts the work" \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -e "$tmp/git-calls" ]; then
+  fail "a base-less remote fetches nothing" \
+    "git was given: $(cat "$tmp/git-calls" 2>/dev/null)"
+elif [ -s "$tmp/err" ]; then
+  fail "a base-less remote says nothing about a ref" \
+    "stderr: $(cat "$tmp/err")"
+fi
+
+# And only a create fetches: an existing worktree is not created from a base at
+# all, so a fresher remote would change nothing about this switch.
+ran=$((ran + 1))
+run_wrapper 0 feat/x1 upstream/main upstream agent "/brainstorming"
+if [ -e "$tmp/git-calls" ]; then
+  fail "an existing worktree fetches nothing" "git was given: $(cat "$tmp/git-calls")"
 fi
 
 # A switch that fails: worktrunk has said why on stderr, the agent is not
 # started at all -- never in the wrong directory -- and the shell still opens,
 # in the tab's directory, so the pane is usable rather than dead.
 ran=$((ran + 1))
-WT_FAIL=1 run_wrapper 1 nope/nothing @ agent "/brainstorming"
+WT_FAIL=1 run_wrapper 1 nope/nothing @ "" agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a failed switch still leaves a shell" "exit $status: $(cat "$tmp/err")"
 fi
@@ -239,7 +393,7 @@ fi
 # reply without one gives: nothing tells the wrapper where the worktree is, so
 # the agent is not started.
 ran=$((ran + 1))
-WRAPPER_PATH=$bin run_wrapper 1 feat/x1 @ agent "/brainstorming"
+WRAPPER_PATH=$bin run_wrapper 1 feat/x1 @ "" agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a run with no jq still leaves a shell" "exit $status: $(cat "$tmp/err")"
 fi
@@ -268,7 +422,7 @@ fi
 # shell, so the wrapper has to end the options before handing the path over.
 ran=$((ran + 1))
 mkdir -p "$start/-dash"
-TEST_WT_PATH=-dash run_wrapper 0 feat/x1 "" agent "/brainstorming"
+TEST_WT_PATH=-dash run_wrapper 0 feat/x1 "" "" agent "/brainstorming"
 if ! grep -qx "agent pwd: $start/-dash" "$tmp/out"; then
   fail "a worktree path starting with a dash is entered" \
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -278,7 +432,7 @@ fi
 # between the switch and the cd. The agent must not run there either, and the
 # pane still gets its shell, in the tab's directory.
 ran=$((ran + 1))
-TEST_WT_PATH=/nonexistent/nope run_wrapper 1 feat/x1 @ agent "/brainstorming"
+TEST_WT_PATH=/nonexistent/nope run_wrapper 1 feat/x1 @ "" agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a worktree that cannot be entered still leaves a shell" \
     "exit $status: $(cat "$tmp/err")"
@@ -296,9 +450,10 @@ if ! grep -q "could not enter" "$tmp/err" || ! grep -qx "shell pwd: $start" "$tm
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 
-# A caller that sends too few parameters: `shift 3` on a short list is fatal in a
+# A caller that sends too few parameters: `shift 4` on a short list is fatal in a
 # non-interactive shell (dash exits outright), which would kill the pane with no
-# shell at all. The wrapper says what is missing and opens the shell anyway.
+# shell at all. The wrapper says which words are missing -- all four, so a caller
+# that sent three learns about the fourth -- and opens the shell anyway.
 for run_shell in $shells; do
   shell_name=${run_shell##*/}
   ran=$((ran + 1))
@@ -315,8 +470,8 @@ for run_shell in $shells; do
   fi
 
   ran=$((ran + 1))
-  if ! grep -q "create, branch and base" "$tmp/err"; then
-    fail "too few parameters say which ones are missing ($shell_name)" \
+  if ! grep -q 'create, branch, base and remote' "$tmp/err"; then
+    fail "too few parameters name all four words ($shell_name)" \
       "stderr: $(cat "$tmp/err")"
   fi
 done
@@ -328,7 +483,7 @@ ran=$((ran + 1))
 cat >"$tmp/fallback" <<'EOF'
 printf 'fallback shell pwd: %s\n' "$PWD"
 EOF
-TEST_SHELL=/nonexistent/shell STDIN_FROM=$tmp/fallback run_wrapper 0 feat/x1 "" agent "/brainstorming"
+TEST_SHELL=/nonexistent/shell STDIN_FROM=$tmp/fallback run_wrapper 0 feat/x1 "" "" agent "/brainstorming"
 if [ "$status" -ne 0 ] || ! grep -qx "fallback shell pwd: $worktree" "$tmp/out"; then
   fail "a missing \$SHELL falls back to /bin/sh in the worktree" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -337,7 +492,7 @@ fi
 # The answer is data: a branch and a prompt full of shell syntax reach worktrunk
 # and the agent as themselves, and none of it is executed.
 ran=$((ran + 1))
-run_wrapper 0 'feat/x$(id);echo pwned' "" agent 'p "quotes" $(id) `id`;echo pwned'
+run_wrapper 0 'feat/x$(id);echo pwned' "" "" agent 'p "quotes" $(id) `id`;echo pwned'
 if grep -qx "agent arg: p \"quotes\" \$(id) \`id\`;echo pwned" "$tmp/out" \
   && [ "$(sed -n 2p "$tmp/wt-words")" = 'feat/x$(id);echo pwned' ] \
   && ! grep -q '^pwned$' "$tmp/out" "$tmp/err"; then
@@ -345,6 +500,61 @@ if grep -qx "agent arg: p \"quotes\" \$(id) \`id\`;echo pwned" "$tmp/out" \
 else
   fail "the branch and the prompt are arguments, not program text" \
     "words: $(cat "$tmp/wt-words") output: $(cat "$tmp/out")"
+fi
+
+# The words the tab really gets, built by the module rather than written out by
+# hand: everything from argv[5] on -- what follows `sh -c SCRIPT sh` -- one per
+# line, so a case can run the argv new_tab_argv produced. An argument that is the
+# empty string comes back as an empty line, which is exactly how the wrapper
+# needs to receive it.
+build_tab_words() {
+  init="$PWD/init.lua" want_blank=$1 want_prompt=$2 lua -e '
+    local M = dofile(os.getenv("init"))
+    local args = { branch = "feat/x1", create = false, agent = "agent",
+      prompt = os.getenv("want_prompt") }
+    if os.getenv("want_blank") == "1" then args.blank = true end
+    local argv = M.new_tab_argv("proj", args)
+    for i = 5, #argv do io.write(argv[i], "\n") end
+  '
+}
+
+# A prompt that starts with "-" would be a flag to the agent if it travelled as
+# it was typed. The guard is new_tab_argv's -- one leading space, not two -- and
+# this runs the argv it built, so the guard is proven across the whole trip:
+# builder, wrapper, exec, agent.
+tab_words=()
+while IFS= read -r word; do tab_words[${#tab_words[@]}]=$word; done \
+  < <(build_tab_words 0 -hello)
+ran=$((ran + 1))
+run_wrapper "${tab_words[@]}"
+if [ "$status" -ne 0 ]; then
+  fail "a dash prompt reaches the agent" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+elif ! grep -qxF 'agent arg:  -hello' "$tmp/out"; then
+  fail "a prompt starting with a dash keeps its one leading space" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if grep -qxF 'agent arg: -hello' "$tmp/out"; then
+  fail "a prompt starting with a dash is not sent as a flag" \
+    "output: $(cat "$tmp/out")"
+fi
+
+# The blank answer, end to end: no prompt parameter at all, so the agent starts
+# bare rather than with an empty argument -- and the pane still ends in a shell.
+tab_words=()
+while IFS= read -r word; do tab_words[${#tab_words[@]}]=$word; done \
+  < <(build_tab_words 1 hello)
+ran=$((ran + 1))
+run_wrapper "${tab_words[@]}"
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "a blank answer still starts the agent and leaves a shell" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if grep -q '^agent arg:' "$tmp/out"; then
+  fail "a blank answer gives the agent no prompt argument" \
+    "output: $(cat "$tmp/out")"
 fi
 
 # A ^C in the pane: it goes to the whole process group, so the agent AND this
@@ -367,7 +577,7 @@ interrupt_run() {
     WT_WORDS=$tmp/wt-words WT_PATH=$worktree WT_FAIL=0
     READY=$tmp/ready GOT_INT=$tmp/got-int
     export PATH SHELL WT_WORDS WT_PATH WT_FAIL READY GOT_INT
-    "${RUN_SHELL:-$sh_bin}" -c "$script" sh 0 feat/x1 "" "$agent_name" "$@" &
+    "${RUN_SHELL:-$sh_bin}" -c "$script" sh 0 feat/x1 "" "" "$agent_name" "$@" &
     local child=$! waited=0
     while [ ! -e "$tmp/ready" ] && [ "$waited" -lt 100 ]; do
       sleep 0.1
@@ -430,7 +640,7 @@ done
 # the prompt -- which has nowhere to go -- is printed above that shell rather
 # than disappearing with the float that collected it.
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 "" "" "look before you leap"
+run_wrapper 0 feat/x1 "" "" "" "look before you leap"
 if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "no agent still lands in a shell in the worktree" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -451,7 +661,7 @@ fi
 # The switch is worktrunk's, not the agent's, so a create still happens -- and
 # with no agent there is no agent's arguments to give to anyone.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 @ "" "p"
+run_wrapper 1 feat/x1 @ "" "" "p"
 printf 'switch\n--create\nfeat/x1\n--base\n@\n--no-cd\n--format=json\n' >"$tmp/want"
 if ! diff -u "$tmp/want" "$tmp/wt-words"; then
   fail "no agent still asks worktrunk to create the branch from the base"
@@ -466,7 +676,7 @@ fi
 # An empty prompt is nothing to say: the pane is the shell, with no line about
 # a prompt nobody wrote.
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 "" "" ""
+run_wrapper 0 feat/x1 "" "" "" ""
 if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "no agent and no prompt still lands in the shell" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -477,7 +687,7 @@ fi
 # A switch that fails with no agent names what is not started: "not starting "
 # followed by nothing is not a sentence.
 ran=$((ran + 1))
-WT_FAIL=1 run_wrapper 1 nope/nothing @ "" "/brainstorming"
+WT_FAIL=1 run_wrapper 1 nope/nothing @ "" "" "/brainstorming"
 if ! grep -q 'wt switch nope/nothing failed' "$tmp/err"; then
   fail "a failed switch with no agent says why" "stderr: $(cat "$tmp/err")"
 elif ! grep -q 'not starting an agent' "$tmp/err"; then

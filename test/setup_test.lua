@@ -244,7 +244,9 @@ eq("agent default", M.options.agent, "pi")
 eq("agent_args default", M.options.agent_args, {})
 eq("bead_prompt default", M.options.bead_prompt, "/brainstorming for bead {id}")
 eq("no_bead_prompt default", M.options.no_bead_prompt, "/brainstorming")
-eq("base default", M.options.base, "@")
+-- Unset, so the picker resolves the remote's own default branch rather than
+-- being told one here: a configured base moves the cycle's first entry instead.
+eq("base default", M.options.base, nil)
 eq("bounds default", M.options.bounds, { 0.15, 0.1, 0.7, 0.8 })
 eq("script default is new-work.sh", (tostring(M.options.script):match("/new%-work%.sh$") ~= nil), true)
 local script_file = io.open(tostring(M.options.script), "r")
@@ -447,7 +449,7 @@ eq("the float's label", layer.layout.block.label, "new work")
 eq("the picker starts in the main worktree", layer.layout.block.options.cwd, "/x/pmm-iris/main")
 eq("the picker command", layer.layout.block.options.command,
   { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--base", "@", "--agents", "pi" })
+    "--project", "pmm-iris", "--agents", "pi" })
 
 -- A second press replaces the picker instead of stacking another one.
 local ok_again, result_again = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
@@ -495,13 +497,17 @@ eq("a bd that cannot be consulted is not called a missing database", broken_bd_m
   "bd failed in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
 eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
 
--- base = false means "let worktrunk choose", so there is nothing to pass on.
+-- base = false means "let worktrunk choose", so there is no ref to name -- and
+-- the picker is told so, because a picker that is told nothing resolves the
+-- remote's default branch and opens the screen on a base the configuration
+-- opted out of. The screen then opens on "wt default" and ctrl-r can still move
+-- off it: the opt-out sets the answer it starts on, it does not pin the field.
 stub = project_stub()
 M.setup{ base = false }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("no --base when base is false", stub.layers[1].layout.block.options.command,
   { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--agents", "pi" })
+    "--project", "pmm-iris", "--no-base", "--agents", "pi" })
 
 -- The agent question is a list, so every name is handed over in order: the first
 -- is the one the picker offers as its default. A configured list replaces the

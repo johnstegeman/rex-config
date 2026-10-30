@@ -338,7 +338,7 @@ eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
 -- behind when the agent exits. Everything the flow knows travels as a
 -- positional parameter --
 --
---   sh -c SCRIPT sh <create 0|1> <branch> <base> <agent> <agent args…>
+--   sh -c SCRIPT sh <create 0|1> <branch> <base> <remote> <agent> <agent args…>
 --
 -- because that is the only way a branch, a prompt or an agent name can reach
 -- the wrapper without any shell parsing it as text. These assertions pin the
@@ -355,34 +355,38 @@ eq("sh is told what $0 is", M.new_tab_argv(PROJECT, { branch = BRANCH })[4], "sh
 
 eq("new_tab_argv for an existing worktree",
   M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
+  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "", "pi", "/brainstorming for bead " .. BEAD })
 
+-- A create with no base answered and none configured: the picker resolves the
+-- default itself, so the wrapper is told nothing and adds no --base.
 eq("new_tab_argv for a new branch",
   M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD, title = "Diff" }),
-  { "sh", "-c", WRAPPER, "sh", "1", BRANCH, "@", "pi", "/brainstorming for bead " .. BEAD })
+  { "sh", "-c", WRAPPER, "sh", "1", BRANCH, "", "", "pi", "/brainstorming for bead " .. BEAD })
 
 eq("new_tab_argv without a bead asks for plain brainstorming",
   M.new_tab_argv(PROJECT, { branch = "x", create = true, bead = "" }),
-  { "sh", "-c", WRAPPER, "sh", "1", "x", "@", "pi", "/brainstorming" })
+  { "sh", "-c", WRAPPER, "sh", "1", "x", "", "", "pi", "/brainstorming" })
 
 -- A missing bead and an empty one are the same answer: no bead.
 eq("new_tab_argv with no bead field at all",
   M.new_tab_argv(PROJECT, { branch = "x", create = false }),
-  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "pi", "/brainstorming" })
+  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "pi", "/brainstorming" })
 
 -- A hand-back always says whether to create, but leaving the field out must not
 -- read as "create": that would add a worktree nobody asked for.
 eq("new_tab_argv with no create field switches, creating nothing",
   M.new_tab_argv(PROJECT, { branch = "x", bead = "" }),
-  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "pi", "/brainstorming" })
+  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "pi", "/brainstorming" })
 
--- The base is what a new branch starts from, so it only travels for a create:
--- an empty parameter is the wrapper's "worktrunk's own default".
+-- base = false is the picker's "let worktrunk choose": an empty base parameter,
+-- which is the wrapper's "no --base at all" -- and no remote to fetch.
 do
   local base = M.options.base
   M.options.base = false
   eq("no base parameter when the option says so",
     M.new_tab_argv(PROJECT, { branch = "x", create = true })[7], "")
+  eq("no remote parameter when the option says so",
+    M.new_tab_argv(PROJECT, { branch = "x", create = true })[8], "")
   M.options.base = base
 end
 
@@ -399,9 +403,9 @@ do
   local argv = M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD })
   eq("the branch is one argument", argv[6], BRANCH)
   eq("the agent's arguments and the prompt are arguments too",
-    { argv[8], argv[9], argv[10], argv[11] }, { "pi", "--thinking", "high", prompt })
-  eq("the prompt keeps its newline", argv[11]:match("\n(.*)$"), "second line; " .. BEAD)
-  eq("the number of arguments is the number of values", #argv, 11)
+    { argv[9], argv[10], argv[11], argv[12] }, { "pi", "--thinking", "high", prompt })
+  eq("the prompt keeps its newline", argv[12]:match("\n(.*)$"), "second line; " .. BEAD)
+  eq("the number of arguments is the number of values", #argv, 12)
   eq("the branch is not pasted into the program text", argv[3]:find(BRANCH, 1, true), nil)
   eq("the prompt is not pasted into the program text", argv[3]:find(prompt, 1, true), nil)
   eq("the prompt's second line is not in the program text",
@@ -417,7 +421,7 @@ do
   M.options.agent = "claude"
   eq("new_tab_argv renders the configured prompt",
     M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-    { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "claude",
+    { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "", "claude",
       "work on pmm-iris/bug/58h for " .. BEAD .. ": Diff" })
   M.options.bead_prompt, M.options.agent = bead_prompt, agent
 end
@@ -439,14 +443,14 @@ end
 -- asked, in place of either template.
 eq("new_tab_argv starts the agent the picker chose",
   M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff", agent = "claude" }),
-  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "claude", "/brainstorming for bead " .. BEAD })
+  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "", "claude", "/brainstorming for bead " .. BEAD })
 
 eq("new_tab_argv sends the prompt the picker was given",
   M.new_tab_argv(PROJECT, { branch = "x", create = true, prompt = "why is the guard flaky?" }),
-  { "sh", "-c", WRAPPER, "sh", "1", "x", "@", "pi", "why is the guard flaky?" })
+  { "sh", "-c", WRAPPER, "sh", "1", "x", "", "", "pi", "why is the guard flaky?" })
 
 eq("a typed prompt wins over the bead's",
-  M.new_tab_argv(PROJECT, { branch = "x", bead = BEAD, title = "Diff", prompt = "just look" })[9],
+  M.new_tab_argv(PROJECT, { branch = "x", bead = BEAD, title = "Diff", prompt = "just look" })[10],
   "just look")
 
 -- "none" is an empty agent parameter, and an empty parameter is what keeps the
@@ -460,9 +464,9 @@ do
   M.options.agent_args = { "--thinking", "high" }
   eq("new_tab_argv with no agent",
     M.new_tab_argv(PROJECT, { branch = "x", agent = "" }),
-    { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "" })
+    { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "", "" })
   eq("new_tab_argv with no agent keeps a prompt that was typed",
-    M.new_tab_argv(PROJECT, { branch = "x", agent = "", prompt = "look first" })[9],
+    M.new_tab_argv(PROJECT, { branch = "x", agent = "", prompt = "look first" })[10],
     "look first")
   M.options.agent_args = agent_args
 end
@@ -693,14 +697,14 @@ pcall(M.work_new_go, { origin = "cli" },
   payload{ bead = "", title = "", agent = "", prompt = "look before you leap" })
 do
   local command = request_of(stub, "session.new_window").layout.block.options.command
-  eq("no agent means a tab that starts none", command[8], "")
+  eq("no agent means a tab that starts none", command[9], "")
   eq("no agent still carries the prompt", command[#command], "look before you leap")
 end
 
 stub = new_branch_stub()
 pcall(M.work_new_go, { origin = "cli" }, payload{ agent = "claude" })
 eq("the agent the picker chose is the one the tab starts",
-  request_of(stub, "session.new_window").layout.block.options.command[8], "claude")
+  request_of(stub, "session.new_window").layout.block.options.command[9], "claude")
 eq("the configured agent is left alone", M.options.agent, "pi")
 
 -- Switching to a worktree that already exists, with no tab for it yet: the tab
@@ -792,10 +796,68 @@ do
   end
   eq("work_new_go is registered", type(go), "table")
   eq("work_new_go declares its arguments", sorted_keys(go and go.args and go.args.properties),
-    { "agent", "bead", "branch", "create", "main", "project", "prompt", "root", "title" })
+    { "agent", "base", "base_remote", "bead", "blank", "branch", "create",
+      "main", "project", "prompt", "root", "title" })
   eq("work_new_go requires what the picker always sends",
     go and go.args.required, { "project", "root", "main", "branch" })
   eq("the arguments are typed", go and go.args.properties.create, { type = "boolean" })
+  eq("blank is declared a boolean", go and go.args.properties.blank,
+    { type = "boolean" })
+  eq("base admits both the ref and the wt-default sentinel",
+    go and go.args.properties.base, { type = { "string", "boolean" } })
+  eq("base_remote is declared a string", go and go.args.properties.base_remote,
+    { type = "string" })
+end
+
+-- The answers the last two tasks added, taken through Rex rather than handed
+-- to the action directly. An action only sees the pairs its schema declares --
+-- `rex do work_new_go blank=true` is refused outright without the declaration,
+-- and a payload filtered against it loses the field -- so a field the picker
+-- sends but the action never names can be gone before new_tab_argv sees it, and
+-- the flow then falls back to the old behaviour (a configured base, the no-bead
+-- prompt) with nothing on screen to show for it. Filtering the payload through
+-- the registered declaration pins the declaration and the tab's argv together.
+local function as_rex_passes(name, args)
+  local declared = {}
+  for _, spec in ipairs(rex_stub.actions) do
+    if spec.name == name then
+      declared = (spec.args and spec.args.properties) or {}
+    end
+  end
+  local typed = {}
+  for key, value in pairs(args or {}) do
+    if declared[key] ~= nil then typed[key] = value end
+  end
+  return typed
+end
+
+stub = new_branch_stub()
+pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
+  base = "upstream/main", base_remote = "upstream", blank = true,
+}))
+do
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("the base the picker chose reaches the tab", command[7], "upstream/main")
+  eq("the remote that base lives on reaches the tab", command[8], "upstream")
+  eq("a blank answer appends no prompt word", #command, 9)
+  eq("a blank answer leaves the agent last", command[#command], M.options.agent)
+end
+
+-- The wt-default sentinel is false, and it has to stay false all the way: a
+-- configuration naming a base must not undo the picker's answer, and a
+-- declaration that turned it into the string "false" would send `--base false`
+-- to worktrunk.
+do
+  local saved = M.options.base
+  M.options.base = "main"
+  stub = new_branch_stub()
+  pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
+    base = false,
+  }))
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("the wt-default sentinel reaches the tab as no base", command[7], "")
+  eq("the wt-default sentinel carries no remote", command[8], "")
+  M.options.base = saved
 end
 
 if fails > 0 then os.exit(1) end
