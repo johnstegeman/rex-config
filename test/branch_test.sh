@@ -242,48 +242,72 @@ run_bases() {
   fi
 }
 
-# The shape most cases start from: a clone of origin/main, whose jj knows the
-# remote-tracking bookmark, jj's own mirror of it, and the bare local form that
-# every bookmark also has. The last two are what the cycle must never offer.
+# The shape most cases start from: the committed fixture, whose jj knows the
+# remote-tracking bookmark main, its own mirror of it, the bare local form every
+# bookmark also has, and a topic on origin -- but no master, so master is not a
+# revision this clone can offer. The mirror and the bare form are never rows.
 run_bases 'the default branch on origin opens the cycle' \
-  $'main@origin\n@\nmain\nmaster' \
+  $'main@origin\n@\nmain' \
   --base-bookmarks test/fixtures/bookmarks.txt --origin-head origin/main
+
+# A clone that also has master offers all four: the two bare local revisions are
+# exactly what the cycle is for.
+bookmarks_file "$tmp/bookmarks.both" \
+  main@ main@origin master@ master@origin
+run_bases 'both local branches are offered after @' \
+  $'main@origin\n@\nmain\nmaster' \
+  --base-bookmarks "$tmp/bookmarks.both" --origin-head origin/main
 
 # origin/HEAD is the branch this clone says it tracks, so it is asked before any
 # fixed name -- and the answer is that branch on origin, in jj's vocabulary: the
-# branch name and the remote it lives on, as one revision.
-bookmarks_file "$tmp/bookmarks.develop" develop@ develop@ origin@
+# branch name and the remote it lives on, as one revision. This clone has no main
+# and no master, so the opening answer and @ are the whole cycle.
+bookmarks_file "$tmp/bookmarks.develop" develop@ develop@origin
 run_bases 'origin/HEAD decides the opening answer' \
-  $'develop@origin\n@\nmain\nmaster' \
+  $'develop@origin\n@' \
   --base-bookmarks "$tmp/bookmarks.develop" --origin-head origin/develop
 
 # With no origin/HEAD named -- a clone that has none, or a run standing in for
 # one -- the fixed names speak, in the order they always have.
 bookmarks_file "$tmp/bookmarks.main" main@ main@origin
 run_bases 'main@origin opens the cycle when there is no origin/HEAD' \
-  $'main@origin\n@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.main"
+  $'main@origin\n@\nmain' --base-bookmarks "$tmp/bookmarks.main"
 
 bookmarks_file "$tmp/bookmarks.master" master@ master@origin
 run_bases 'master@origin opens it when there is no main on origin' \
-  $'master@origin\n@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.master"
+  $'master@origin\n@\nmaster' --base-bookmarks "$tmp/bookmarks.master"
 
-# Nothing on origin at all -- a bookmark only this machine has, or none -- leaves
-# @ to open: the working copy is always a revision to start from.
+# A bookmark a remote has implies the local one jj tracks, so a list with only
+# the remote rendering still offers the bare name.
+bookmarks_file "$tmp/bookmarks.remote-only" main@origin
+run_bases 'a remote bookmark implies the local one' \
+  $'main@origin\n@\nmain' --base-bookmarks "$tmp/bookmarks.remote-only"
+
+# Nothing on origin at all -- a bookmark only this machine has -- leaves @ to
+# open, because the working copy is always a revision to start from; main is
+# still offered, because this clone really has it.
 bookmarks_file "$tmp/bookmarks.local-only" main@
-run_bases 'a bookmark no remote has opens the cycle on @' \
-  $'@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.local-only"
+run_bases 'a bookmark no remote has opens the cycle on @, and is still offered' \
+  $'@\nmain' --base-bookmarks "$tmp/bookmarks.local-only"
+
+# A cycle with no main and no master in it at all: the opening answer and @, and
+# nothing else. A bare name is a promise jj can resolve it, so it is only made
+# where the bookmark list says the branch is there.
+bookmarks_file "$tmp/bookmarks.topic-only" topic@origin
+run_bases 'a clone with no main and no master offers only @ beside the answer' \
+  $'topic@origin\n@' \
+  --base-bookmarks "$tmp/bookmarks.topic-only" --origin-head origin/topic
 
 : >"$tmp/bookmarks.none"
-run_bases 'no bookmarks at all still offers @, main and master' \
-  $'@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.none"
+run_bases 'no bookmarks at all is @ and nothing else' \
+  $'@' --base-bookmarks "$tmp/bookmarks.none"
 
-# The two renderings jj adds around the bookmarks a person cares about: `<name>@`
-# for a bookmark no remote has, and `<name>@git` for jj's own mirror of the
-# remote-tracking refs. Neither is somewhere a new workspace can be started
-# from, so neither is ever a row.
+# jj's own mirror of the remote-tracking refs is not a bookmark anyone starts a
+# workspace from, and it is no evidence that one exists: a list holding only the
+# mirror offers @.
 bookmarks_file "$tmp/bookmarks.git-only" main@git
-run_bases 'a @git mirror is no base at all' \
-  $'@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.git-only"
+run_bases 'a @git mirror is neither a row nor evidence of one' \
+  $'@' --base-bookmarks "$tmp/bookmarks.git-only"
 
 ran=$((ran + 1))
 if ./new-work.sh bases --base-bookmarks test/fixtures/bookmarks.txt \
@@ -297,27 +321,27 @@ fi
 # get to refuse a revision it cannot resolve, because the workspace is made
 # later, in the tab, where jj will answer for it.
 run_bases '--base is the opening answer, verbatim' \
-  $'main@origin\n@\nmain\nmaster' \
+  $'main@origin\n@\nmain' \
   --base-bookmarks test/fixtures/bookmarks.txt --base main@origin
 run_bases 'an --base that resolves to nothing is still the answer' \
-  $'refresh\n@\nmain\nmaster' \
+  $'refresh\n@\nmain' \
   --base-bookmarks test/fixtures/bookmarks.txt --base refresh
 
 # The configured default is @, and the cycle offers @ once: an opening answer is
 # a row like any other, not a second copy of one.
 run_bases '--base @ is the opening answer and appears once' \
-  $'@\nmain\nmaster' --base-bookmarks test/fixtures/bookmarks.txt --base '@'
+  $'@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.both" --base '@'
 
 # --no-base is "no revision at all": an empty first line, then the same cycle,
 # because ctrl-r still moves off it.
 run_bases '--no-base opens on an empty line' \
-  $'\n@\nmain\nmaster' --base-bookmarks test/fixtures/bookmarks.txt --no-base
+  $'\n@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.both" --no-base
 
 # --base-bookmarks is the whole source, so --main is never opened -- and a
 # directory that is not there therefore costs nothing. The mirror of the
 # candidates case.
 run_bases '--base-bookmarks is read instead of --main' \
-  $'main@origin\n@\nmain\nmaster' \
+  $'main@origin\n@\nmain' \
   --main "$tmp/nowhere" --base-bookmarks test/fixtures/bookmarks.txt \
   --origin-head origin/main
 
@@ -375,7 +399,7 @@ bases_refuses '--base with --no-base' \
 mkdir -p "$tmp/jj-bin"
 cat >"$tmp/jj-bin/jj" <<'EOF'
 #!/bin/sh
-printf 'main@\nmain@git\nmain@origin\n'
+printf 'main@\nmain@git\nmain@origin\nmaster@\nmaster@origin\n'
 EOF
 chmod +x "$tmp/jj-bin/jj"
 ran=$((ran + 1))
@@ -392,6 +416,44 @@ if [ "$status" -ne 0 ]; then
   fail 'bases from a repository' "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'bases from a repository' 'output differs from the expected cycle'
+fi
+
+# The same read in a repository that names no origin/HEAD at all -- a clone whose
+# remote was renamed, or one that never had a symref. git exits non-zero, and
+# that is an empty answer rather than a failure: the cycle falls through to the
+# bookmarks, the run still succeeds, and nothing is said about a lookup that is
+# allowed to miss.
+ran=$((ran + 1))
+git init -q "$tmp/base-repo-headless" && git -C "$tmp/base-repo-headless" \
+  -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo-headless" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'no origin/HEAD falls through to the bookmarks' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'no origin/HEAD is not a failure' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'no origin/HEAD falls through to the bookmarks' \
+    'output differs from the expected cycle'
+fi
+
+# --base-bookmarks stands in for the repository as a whole, so a run that has
+# both reads the fixture for the bookmarks and never asks git for origin/HEAD:
+# this repository's symref points at trunk, and the fixture's main@origin is what
+# opens the cycle.
+ran=$((ran + 1))
+printf 'main@origin\n@\nmain\n' >"$tmp/base.expected"
+PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
+  --base-bookmarks test/fixtures/bookmarks.txt >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a bookmark fixture beside a real --main' "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a bookmark fixture beside a real --main' \
+    'the fixture does not win the opening row'
 fi
 
 if [ "$fails" -ne 0 ]; then

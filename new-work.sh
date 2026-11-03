@@ -411,12 +411,14 @@ cmd_candidates() {
   candidate_rows "$main" "$wt_json" "$refs"
 }
 
-# The bookmarks jj knows, one "<name>@<remote>" per line: the fixture when one
-# is given (tests and dry runs), else the lookup. Asking once, with the rendering
-# written out here, is what makes the two forms jj also prints -- the bare
-# "<name>@" of a bookmark no remote has, and "<name>@git", jj's own mirror of the
-# remote-tracking refs -- visible to base_chain rather than silently equal to
-# something it would offer.
+# The bookmarks jj knows, one rendering per line: the fixture when one is given
+# (tests and dry runs), else the lookup. The rendering is written out here so
+# base_chain can tell the two apart -- "<name>@<remote>" for a bookmark a remote
+# has, and the bare "<name>@" for one no remote has. Both are kept: the bare form
+# is never a row, but it is the only evidence that the local bookmark exists, and
+# that is what decides whether main and master can be offered at all. The one
+# line thrown away is "<name>@git", jj's own mirror of the remote-tracking refs,
+# which is nothing anyone starts a workspace from.
 bookmark_records() {
   local main=$1 fixture=$2
   if [ -n "$fixture" ]; then
@@ -482,11 +484,21 @@ base_chain() {
     {
       # An empty line is what an empty bookmark list prints, not a bookmark.
       if ($0 == "") next
-      # The two renderings that are not a place to start from: a bookmark no
-      # remote has, and the local mirror of the remote-tracking refs.
+      # The local mirror of the remote-tracking refs is not a bookmark anyone
+      # starts a workspace from, so it is not evidence of one either.
       if ($0 ~ /@git$/) next
-      if ($0 ~ /@$/) next
-      known[$0] = 1
+      # Everything else is "<name>@<remote>", and an empty remote says this
+      # clone has the bookmark itself. A bookmark a remote has implies the local
+      # one jj tracks, so either form is enough to offer the bare name -- but
+      # only a remote one is a revision in the "@remote" rendering.
+      name = $0
+      sub(/@[^@]*$/, "", name)
+      if (substr($0, length(name) + 2) == "") {
+        is_local[name] = 1
+      } else {
+        on_remote[name] = 1
+        known[$0] = 1
+      }
     }
 
     END {
@@ -516,14 +528,17 @@ base_chain() {
         open = "@"
       }
 
-      # The cycle: the opening answer first, then @, then main and master -- all
-      # three are revisions wherever they resolve, @ is what the branch question
-      # did before there was a cycle, and first sighting wins.
+      # The cycle: the opening answer first, then @, then main and master once
+      # this clone has them. @ always resolves -- it is the working copy, and it
+      # is what the branch question did before there was a cycle -- but a bare
+      # main or master is a promise that jj can resolve it, and `jj workspace add
+      # -r master` in a clone with no master fails in the pane. First sighting
+      # wins.
       n = 0
       cand[++n] = open
       cand[++n] = "@"
-      cand[++n] = "main"
-      cand[++n] = "master"
+      if (("main" in is_local) || ("main" in on_remote)) cand[++n] = "main"
+      if (("master" in is_local) || ("master" in on_remote)) cand[++n] = "master"
 
       for (i = 1; i <= n; i++) {
         if (cand[i] in seen) continue
