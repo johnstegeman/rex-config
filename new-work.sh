@@ -81,9 +81,11 @@ created from (origin/HEAD's branch on origin, then main@origin, then
 master@origin, then @), or none at all with --no-base -- which reads "none",
 because it is a real answer rather than a missing one. It is one jj revision: the
 remote a base comes from is the @remote in its own name, so there is nothing for
-the tab to fetch by a second word. The rest of the cycle is @ and the local main
-and master, and --base-bookmarks reads a saved bookmark list instead of the
-repository, as bases does.
+the tab to fetch by a second word. The rest of the cycle is @, then the local
+main and master -- the last two only where the bookmark list says this clone
+has them, since a bare name is a promise jj can resolve it -- and
+--base-bookmarks reads a saved bookmark list instead of the repository, as
+bases does.
 
 pick's --bead, --prompt, --blank, --agent and --branch answer a question
 instead of asking it, and an empty value means none -- so a run given one of the
@@ -575,6 +577,11 @@ base_chain() {
       # The local mirror of the remote-tracking refs is not a bookmark anyone
       # starts a workspace from, so it is not evidence of one either.
       if ($0 ~ /@git$/) next
+      # A record with no @ at all is not one of the renderings above but a
+      # hand-written fixture spoilt to "main" where "main@" was meant. Left to
+      # the split below it would keep its whole self as the name and pass for a
+      # local bookmark, which is a row offered on no evidence, so it is dropped.
+      if (index($0, "@") == 0) next
       # Everything else is "<name>@<remote>", and an empty remote says this
       # clone has the bookmark itself. A bookmark a remote has implies the local
       # one jj tracks, so either form is enough to offer the bare name -- but

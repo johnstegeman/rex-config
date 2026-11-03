@@ -181,10 +181,27 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
     "output differs from the expected branch list"
 fi
 
+# A --wt-json that cannot be opened is the caller's mistake, not a repository
+# this machine cannot read, so it is not forgiven the way a failed `wt list` is:
+# the run stops at the failed read and prints no rows at all -- git's half
+# included, because half a list is a guess dressed as an answer.
+ran=$((ran + 1))
+./new-work.sh candidates --main "$tmp/repo" --wt-json "$tmp/no-such-wt.json" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -eq 0 ]; then
+  fail "candidates with an unopenable --wt-json exits non-zero" \
+    "exit $status"
+elif [ -s "$tmp/out" ]; then
+  fail "candidates with an unopenable --wt-json prints no rows" \
+    "output: $(cat "$tmp/out")"
+fi
+
 # A worktrunk that cannot read the repository: its worktree rows are lost, but
 # git's branches still come through -- and the partial list says so, naming the
-# directory, because a branch missing from it is one the picker would offer to
-# create rather than switch to.
+# directory. Only this subcommand answers from half the list: a pick given a
+# name missing here is refused rather than guessed at, since the guess would be
+# a create (or an attach) for a branch that already has a worktree.
 mkdir -p "$tmp/bad-wt"
 cat >"$tmp/bad-wt/wt" <<'EOF'
 #!/bin/sh
@@ -289,6 +306,14 @@ run_bases 'a remote bookmark implies the local one' \
 bookmarks_file "$tmp/bookmarks.local-only" main@
 run_bases 'a bookmark no remote has opens the cycle on @, and is still offered' \
   $'@\nmain' --base-bookmarks "$tmp/bookmarks.local-only"
+
+# A record with no @ at all is not one of jj's renderings but a fixture typo --
+# `main` where `main@` was meant. Read as a local bookmark it would offer a row
+# this clone may not have, so it is skipped: the row below is there because
+# master@origin is a real record, and the bare main is not.
+bookmarks_file "$tmp/bookmarks.no-at" master@origin main
+run_bases 'a record with no @ is ignored, not read as a local bookmark' \
+  $'master@origin\n@\nmaster' --base-bookmarks "$tmp/bookmarks.no-at"
 
 # A cycle with no main and no master in it at all: the opening answer and @, and
 # nothing else. A bare name is a promise jj can resolve it, so it is only made

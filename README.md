@@ -425,9 +425,10 @@ worktrees — with nothing uncommitted in any of them.
    there: the post-start `copy-ignored` hook and the post-remove
    `jj workspace forget {{ branch }}` hook in `.config/wt.toml`, the
    `.worktreeinclude`, and the ignore lines `.env` and `.worktrees/`. `ginit`
-   writes both files in its second step, so copy them from there. They have to be
-   committed to `main` **before** `main` is re-created, because the hooks have to
-   be in the tree the new workspace gets.
+   writes all three in its second step — those two files and the `.gitignore`
+   lines — so copy them from there. They have to be committed to `main` **before**
+   `main` is re-created, because the hooks have to be in the tree the new
+   workspace gets.
 2. **Remove the existing worktrees; do not adopt them.** `jj workspace add`
    refuses a directory that has anything in it, and an ordinary git worktree
    left behind in a converted repo is a hazard: a `jj` command run inside one
