@@ -202,6 +202,23 @@ need() {
   exit 1
 }
 
+# Exit 1: the same for a fish function, which is not on PATH and cannot be: gws
+# is a function in ~/.config/fish/functions, and it is the one thing that knows
+# how to make a jj colocated workspace. fish itself missing is the plainer
+# failure need() already has a message for, so the two do not differ in shape.
+# The words to fish go through $argv rather than a string, so a name with a
+# space or a quote in it is still one name.
+need_fish_function() {
+  need fish
+  if fish -c 'functions -q $argv[1]' "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s is not a fish function — add it to ~/.config/fish/functions — press any key\n' \
+    "$1" >&2
+  wait_for_key
+  exit 1
+}
+
 # Ready beads as JSON: the fixture when one is given (tests and dry runs), else
 # `bd ready` run from the main worktree, which is the worktree every bd call
 # uses.
@@ -1444,6 +1461,14 @@ cmd_pick() {
   if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ] ||
     { [ -z "$bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
+    # Being there is not enough: the new workspace is made by gws inside the
+    # wrapper around main, which is the directory that must hold .jj/repo as a
+    # directory. (main's own .jj/repo is a file in a colocated wrapper -- that
+    # is how gws tells the two apart.) A repo that was never ginit'd has no
+    # fallback here, by design: a plain git worktree would quietly recreate the
+    # problem jj is there to solve, so this refuses and names the thing to run.
+    [ -d "$(dirname "$main")/.jj/repo" ] ||
+      die "pick: $main is not ginit'd — $(dirname "$main") has no .jj/repo; run ginit first"
   fi
 
   # The screen's own requirements, before any work, and only where the screen
@@ -1466,6 +1491,12 @@ cmd_pick() {
   # for-each-ref is the branch list, so git is not optional either: without it
   # every name would come back "not a valid branch name".
   need git
+  # The workspace itself is made by jj and by gws, and no fixture stands in for
+  # either: a run that got this far and cannot create is a bead picked and a
+  # pane that dies with nothing on screen to explain it. Last of the tools, so
+  # a run missing several of them names the first one it needed.
+  need jj
+  need_fish_function gws
 
   local ready rows
   if ! ready=$(ready_json "$main" "$bd_json"); then

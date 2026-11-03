@@ -36,6 +36,15 @@ fail() {
 # writes a directory of its own and names it in front of run_pick.
 export XDG_STATE_HOME=$tmp/state
 
+# gws is the fish function that knows how to make one jj colocated workspace,
+# and it lives in the developer's ~/.config/fish/functions, which is not here.
+# The picker asks fish whether the name is a function, so fish's search path is
+# pointed at a directory of its own with a stand-in in it: a case that wants
+# the refusal points it at an empty one instead.
+mkdir -p "$tmp/fish-functions"
+printf 'function gws\nend\n' >"$tmp/fish-functions/gws.fish"
+export fish_function_path=$tmp/fish-functions
+
 # Stand-ins for the tools that would otherwise talk to the outside world. rex
 # records its arguments, so "the hand-back never ran" is proven by a missing
 # file rather than by reading the script; fzf leaves a mark when it is started,
@@ -562,10 +571,13 @@ elif ! grep -q 'git not found on PATH' "$tmp/err"; then
   fail "a missing git is named" "stderr: $(cat "$tmp/err")"
 fi
 
-# Every tool the run needs except fzf: with no terminal nothing is asked, so the
-# run must reach the empty-branch exit instead of complaining about fzf.
+# Every tool the run needs except fzf and gum: with no terminal nothing is asked,
+# so the run must reach the empty-branch exit instead of complaining about the
+# two tools only the screen calls. jj and fish are on this PATH because gws is
+# the only thing that makes the workspace and this machine has it (a stand-in,
+# as the fish function path at the top of the file says).
 mkdir -p "$tmp/no-fzf-bin"
-for tool in bash cat cut grep sed awk tr git bd wt jq; do
+for tool in bash cat cut grep sed awk tr git bd wt jq jj fish; do
   found=$(command -v "$tool") || continue
   ln -sf "$found" "$tmp/no-fzf-bin/$tool"
 done
@@ -606,6 +618,95 @@ else
   assert_json "a typed branch needs no fzf: create is true" "$json" \
     '.create == true'
 fi
+
+# (g2) A machine or a repo that cannot make a jj workspace is refused before the
+# screen opens and before anything is claimed: a bead picked for a pane that can
+# only fail is worse than a refusal. Three things can be missing, and each is
+# named -- the wrapper's .jj/repo (this repo was never ginit'd), jj on PATH (the
+# base cycle runs it), and gws as a fish function (the one thing that knows the
+# order a workspace and a worktree are made in). Nothing has been asked, handed
+# back or even started when one of them is: stdout, the stand-in fzf and the
+# stand-in rex are all left untouched.
+#
+# refused <name> <fragment stderr must hold> <command...>, the environment as
+# leading WORDS: what differs between the four is only what each one lacks.
+refused() {
+  local name=$1 want=$2
+  shift 2
+  ran=$((ran + 1))
+  rm -rf "$tmp/rex-args" "$tmp/fzf-ran"
+  env FZF_MARKER="$tmp/fzf-ran" REX_ARGS_FILE="$tmp/rex-args" "$@" \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  local got=$?
+  if [ "$got" -ne 1 ]; then
+    fail "$name" "exit $got: $(cat "$tmp/err")"
+  elif ! grep -qF "$want" "$tmp/err"; then
+    fail "$name is named" "stderr: $(cat "$tmp/err")"
+  elif [ -s "$tmp/out" ]; then
+    fail "$name leaves no prompt and no payload" \
+      "stdout: $(cat "$tmp/out")"
+  elif [ -e "$tmp/rex-args" ]; then
+    fail "$name hands nothing back" "$(cat "$tmp/rex-args")"
+  elif [ -e "$tmp/fzf-ran" ]; then
+    fail "$name opens no screen" 'fzf was started'
+  fi
+}
+
+# A wrapper that was never ginit'd -- no .jj/repo beside main -- while main
+# itself is there, so the refusal is about the workspace and not about a
+# directory that does not exist. No fixtures at all here: a run given all four
+# never opens --main, and this one has to.
+mkdir -p "$tmp/plain/main"
+refused "a repo that was never ginit'd exits 1" "not ginit'd" \
+  ./new-work.sh pick --main "$tmp/plain/main" --root /p/demo --project demo \
+  --bead '' --branch feat/x --dry-run
+ran=$((ran + 1))
+if ! grep -qF "$(dirname "$tmp/plain/main") has no .jj/repo" "$tmp/err"; then
+  fail "the never-ginit'd refusal names the wrapper" "stderr: $(cat "$tmp/err")"
+elif ! grep -qF 'run ginit first' "$tmp/err"; then
+  fail "the never-ginit'd refusal names ginit" "stderr: $(cat "$tmp/err")"
+fi
+
+# jj, missing from a PATH that is otherwise every tool the run needs: without it
+# there is no bookmark list for the base cycle to open on.
+mkdir -p "$tmp/no-jj-bin"
+for tool in bash cat cut grep sed awk tr git bd wt jq fish; do
+  found=$(command -v "$tool") || continue
+  ln -sf "$found" "$tmp/no-jj-bin/$tool"
+done
+refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
+  PATH="$tmp/no-jj-bin" ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-jj --dry-run
+
+# gws is a fish function rather than a program, and an empty function path is a
+# machine that has none: the pane would open and then create nothing.
+mkdir -p "$tmp/no-fish-functions"
+refused "a missing gws exits 1" 'gws is not a fish function' \
+  fish_function_path="$tmp/no-fish-functions" ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-gws --dry-run
+
+# A machine with no fish at all cannot even be asked, and is named the way every
+# other missing tool is -- by need, whose message this one inherits.
+mkdir -p "$tmp/no-fish-bin"
+for tool in bash cat cut grep sed awk tr git bd wt jq jj; do
+  found=$(command -v "$tool") || continue
+  ln -sf "$found" "$tmp/no-fish-bin/$tool"
+done
+refused "a missing fish exits 1" 'fish not found on PATH — press any key' \
+  PATH="$tmp/no-fish-bin" ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-fish --dry-run
 
 # (h) pick without the project it is working on. stdin is /dev/null so a run
 # started from a terminal asks for no keypress: the picker holds a failure open
