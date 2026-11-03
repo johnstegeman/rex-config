@@ -22,38 +22,42 @@ commands:
   candidates --main DIR [--wt-json FILE] [--refs FILE]
       print the branch names that already exist, one per line, worktree
       branches first
-  bases --main DIR [--base-refs FILE] [--base REF | --no-base]
-      print the bases the screen opens on and cycles through, one
-      "ref<TAB>remote" row each, the opening answer first; an empty ref means
-      no --base at all, which leaves it to worktrunk
+  bases --main DIR [--base-bookmarks FILE] [--origin-head REF]
+        [--base REF | --no-base]
+      print the revisions the screen opens on and cycles through, one jj
+      revision per line, the opening answer first; an empty line means no
+      revision at all, so the new workspace sits on main's working copy
   fzf-answer STATUS
       read fzf's --print-query --expect reply on stdin and print what it means
       as one "bead<TAB>prompt<TAB>blank" row, empty where there is no answer;
       STATUS is the status fzf exited with
   pick --main DIR --root PATH --project NAME [--base REF | --no-base]
-       [--base-refs FILE] [--bead ID | --prompt TEXT | --blank]
+       [--base-bookmarks FILE] [--origin-head REF]
+       [--bead ID | --prompt TEXT | --blank]
        [--agents NAME]... [--agent NAME] [--branch NAME] [--dry-run]
       open the one screen and hand its answers to Rex as one JSON object: the
-      bead (or prompt, or nothing said at all), the agent, the branch, the base
-      a new branch is created from and the remote that base lives on; exit 3
-      when no branch or agent was chosen, exit 2 when the name typed for a new
-      branch is not a valid ref
+      bead (or prompt, or nothing said at all), the agent, the branch and the
+      jj revision a new workspace is started from; exit 3 when no branch or
+      agent was chosen, exit 2 when the name typed for a new branch is not a
+      valid ref
   composer rows --state DIR
   composer header --state DIR --project NAME [--no-base]
   composer cycle-agent --state DIR --project NAME [--agents NAME]...
   composer cycle-base --state DIR --project NAME [--main DIR]
-           [--base-refs FILE] [--base REF | --no-base]
+           [--base-bookmarks FILE] [--origin-head REF]
+           [--base REF | --no-base]
   composer branch-field --state DIR [--project NAME]
       the one screen's answers, one verb each, kept in DIR so a key can read and
       change them while the screen is up: rows and header print what fzf shows,
       cycle-agent, cycle-base and branch-field are what ctrl-a, ctrl-r and ctrl-b
       run, and branch-field prints nothing
 
---bd-json, --wt-json, --refs and --base-refs read saved tool output instead of
-asking the tools, which is how the tests and dry runs work: --bd-json stands in
-for bd, --wt-json with --refs for both of the lookups --main would be read for,
---base-refs for the one bases reads, so a run given all four never touches
---main at all. PICK_SCREEN=1 in the environment says the run has the float's
+--bd-json, --wt-json, --refs and --base-bookmarks read saved tool output instead
+of asking the tools, which is how the tests and dry runs work: --bd-json stands
+in for bd, --wt-json with --refs for both of the lookups --main would be read
+for, --base-bookmarks for the bookmark list bases reads, so a run given all four
+never touches --main at all. --origin-head is the same seam for the one ref git is
+still asked about. PICK_SCREEN=1 in the environment says the run has the float's
 terminal, which is how the screen's own paths are driven without one.
 
 The one screen asks everything at once: the ready beads with "✎  write a prompt
@@ -71,13 +75,14 @@ the tab is then the new worktree and a login shell, with the prompt it could
 not deliver printed above that shell rather than dropped. The branch starts as
 the name derived from the bead and a bare Enter keeps it.
 
-The base field opens on the one --base names, or the one this clone would be
-created from (origin/HEAD's target, then origin/main, origin/master, main,
-master), or none at all with --no-base -- which reads "wt default", because it
-is a real answer rather than a missing one. The base travels to the tab with the
-remote it lives on so the tab can fetch that one; a base on no remote carries no
-remote, and nothing is fetched for it. --base-refs reads a saved for-each-ref
-instead of the repository, as bases does.
+The base field opens on the one --base names, or the one a new workspace would be
+created from (origin/HEAD's branch on origin, then main@origin, then
+master@origin, then @), or none at all with --no-base -- which reads "none",
+because it is a real answer rather than a missing one. It is one jj revision: the
+remote a base comes from is the @remote in its own name, so there is nothing for
+the tab to fetch by a second word. The rest of the cycle is @ and the local main
+and master, and --base-bookmarks reads a saved bookmark list instead of the
+repository, as bases does.
 
 pick's --bead, --prompt, --blank, --agent and --branch answer a question
 instead of asking it, and an empty value means none -- so a run given one of the
@@ -406,125 +411,138 @@ cmd_candidates() {
   candidate_rows "$main" "$wt_json" "$refs"
 }
 
-# The ref records `git for-each-ref` prints for refs/remotes and refs/heads, one
-# per line: the fixture when one is given (tests and dry runs), else the lookup.
-# A NUL cannot live in a shell variable, so it becomes the tab separating a
-# record's two fields -- no refname and no symref target can contain one.
-base_ref_records() {
+# The bookmarks jj knows, one "<name>@<remote>" per line: the fixture when one
+# is given (tests and dry runs), else the lookup. Asking once, with the rendering
+# written out here, is what makes the two forms jj also prints -- the bare
+# "<name>@" of a bookmark no remote has, and "<name>@git", jj's own mirror of the
+# remote-tracking refs -- visible to base_chain rather than silently equal to
+# something it would offer.
+bookmark_records() {
   local main=$1 fixture=$2
   if [ -n "$fixture" ]; then
     # A fixture that cannot be opened is refused here rather than left to the
-    # redirect: the shell's own "line 409: ... No such file or directory" names
+    # redirect: the shell's own "line NNN: ... No such file or directory" names
     # a line of this script instead of the file, and it arrives beside the
     # message below rather than instead of it.
     [ -r "$fixture" ] || return 1
-    tr '\0' '\t' <"$fixture"
+    cat "$fixture"
   else
-    ( cd "$main" && git for-each-ref --format='%(refname)%00%(symref)' \
-        refs/remotes refs/heads ) | tr '\0' '\t'
+    ( cd "$main" && jj bookmark list --all-remotes \
+        -T 'name ++ "@" ++ remote ++ "\n"' )
   fi
 }
 
-# The base cycle for --main: one "ref<TAB>remote" row each, the answer the
-# screen opens on first. One for-each-ref call settles every "does this ref
-# exist" question, and it is answered by whole refnames, so refs/heads/main/topic
-# cannot stand in for refs/heads/main. remote is the remote a ref lives on and
-# is empty for everything else, and it is the ref record that says so rather
-# than a slash in the name: feat/x is a local branch and nothing to fetch.
+# The branch this clone calls origin's HEAD, short -- origin/main -- which is
+# the default branch the cycle opens on. --origin-head is the same answer given
+# outright, which is how a test or a dry run says it without a repository to ask;
+# empty output or a failed lookup means this clone names no such branch, which is
+# a fall-through rather than an error, because the fixed names answer for it.
+origin_head_ref() {
+  local main=$1 fixture=$2
+  if [ -n "$fixture" ]; then
+    printf '%s\n' "$fixture"
+    return 0
+  fi
+  # git exits non-zero where the symref is not there, and that status is an
+  # empty answer here: a clone of nothing in particular is not a broken clone.
+  ( cd "$main" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null ) ||
+    true
+}
+
+# The base cycle for --main: one jj revision per line, the answer the screen
+# opens on first. One `jj bookmark list` settles every "does this revision
+# exist" question, and it is answered by the whole "<name>@<remote>" rendering,
+# so a bookmark called main@origin-eu cannot stand in for main@origin. A
+# revision carries its own remote in that suffix -- main@origin is what git used
+# to call origin/main -- so there is one carrier for "where the base comes from"
+# rather than a second field that could disagree with it.
 #
 # LABEL is the command a failure is reported under -- bases, pick, composer
 # cycle-base -- because the same read is made from all three and a person
 # reading the float's one line needs the verb they ran.
 base_chain() {
-  local main=$1 fixture=$2 base=$3 no_base=$4 label=${5:-bases}
-  local records
+  local main=$1 bookmarks=$2 origin_head=$3 base=$4 no_base=$5 label=${6:-bases}
+  local records head=''
 
-  if ! records=$(base_ref_records "$main" "$fixture"); then
-    die "$label: could not read the refs of ${fixture:-$main}"
+  if ! records=$(bookmark_records "$main" "$bookmarks"); then
+    die "$label: could not read the bookmarks of ${bookmarks:-$main}"
   fi
 
-  printf '%s\n' "$records" | awk -F'\t' -v base="$base" -v no_base="$no_base" '
+  # A saved bookmark list stands in for the repository as a whole, so the symref
+  # lookup is skipped rather than failed against a directory that need not
+  # exist: --origin-head is then the only way to say what this clone tracks.
+  if [ -n "$origin_head" ]; then
+    head=$(origin_head_ref "$main" "$origin_head")
+  elif [ -z "$bookmarks" ]; then
+    head=$(origin_head_ref "$main" '')
+  fi
+
+  printf '%s\n' "$records" | awk -v base="$base" -v no_base="$no_base" \
+    -v head="$head" '
     {
-      # An empty line is what an empty record list prints, not a ref.
-      if ($1 == "") next
-      refs[$1] = 1
-      symref[$1] = $2
-      if ($1 ~ /^refs\/remotes\//) {
-        short = $1
-        sub(/^refs\/remotes\//, "", short)
-        slash = index(short, "/")
-        if (slash > 1) remote_of[short] = substr(short, 1, slash - 1)
-      }
+      # An empty line is what an empty bookmark list prints, not a bookmark.
+      if ($0 == "") next
+      # The two renderings that are not a place to start from: a bookmark no
+      # remote has, and the local mirror of the remote-tracking refs.
+      if ($0 ~ /@git$/) next
+      if ($0 ~ /@$/) next
+      known[$0] = 1
     }
 
     END {
-      # The answer the screen opens on. --no-base is the worktrunk default and
-      # --base names it outright, so neither asks the refs for one; otherwise
-      # origin/HEAD -- the branch this clone says it is a clone of -- is asked
-      # before any fixed name. Exact refname equality throughout, so a branch
-      # named main/something is not main.
+      # The answer the screen opens on. --no-base is the answer "no revision at
+      # all" and --base names it outright, so neither asks the bookmarks for one;
+      # otherwise origin/HEAD -- the branch this clone says it is a clone of -- is
+      # asked before any fixed name -- and it is asked as that branch on origin,
+      # which is what the remote has rather than what this machine has.
       if (no_base == "1") {
         open = ""
       } else if (base != "") {
-        # --base can be given as the refname it really is, and every row here
-        # speaks the short name. One left whole would match no ref record, so a
-        # base on a remote would read as local and the tab would skip the
-        # fetch it needs.
+        # Verbatim, and kept even when nothing here resolves it: the workspace is
+        # made later, in the tab, where jj answers for the revision and a fetch
+        # has already had its chance.
         open = base
-        sub(/^refs\/remotes\//, "", open)
-        sub(/^refs\/heads\//, "", open)
-      } else if ("refs/remotes/origin/HEAD" in refs \
-                 && symref["refs/remotes/origin/HEAD"] ~ /^refs\/remotes\//) {
-        # A symref pointing out of refs/remotes names no base this clone
-        # tracks, so it falls through to the fixed names as any miss does.
-        target = symref["refs/remotes/origin/HEAD"]
-        open = target
-        sub(/^refs\/remotes\//, "", open)
-        # The target can be gone from the dump while the symref still names
-        # it -- a branch deleted upstream. No record then says which remote
-        # it lives on, and the first segment of the name is all that is left;
-        # without it the tab would skip the fetch that ref needs.
-        if (!(target in refs)) {
-          cut = index(open, "/")
-          if (cut > 1) remote_of[open] = substr(open, 1, cut - 1)
-        }
-      } else if ("refs/remotes/origin/main" in refs) {
-        open = "origin/main"
-      } else if ("refs/remotes/origin/master" in refs) {
-        open = "origin/master"
-      } else if ("refs/heads/main" in refs) {
-        open = "main"
-      } else if ("refs/heads/master" in refs) {
-        open = "master"
+      } else if (head != "") {
+        # origin/develop is develop@origin, and the suffix is the first cut: git
+        # puts the remote first in a remote-tracking ref, jj puts it last.
+        open = head
+        sub(/^origin\//, "", open)
+        open = open "@origin"
+      } else if ("main@origin" in known) {
+        open = "main@origin"
+      } else if ("master@origin" in known) {
+        open = "master@origin"
       } else {
         open = "@"
       }
 
-      # The cycle: the opening answer first, then @, then main and master once
-      # this clone has them. @ is always offered -- it is what the branch
-      # question did before there was a cycle -- and first sighting wins.
+      # The cycle: the opening answer first, then @, then main and master -- all
+      # three are revisions wherever they resolve, @ is what the branch question
+      # did before there was a cycle, and first sighting wins.
       n = 0
       cand[++n] = open
       cand[++n] = "@"
-      if ("refs/heads/main" in refs) cand[++n] = "main"
-      if ("refs/heads/master" in refs) cand[++n] = "master"
+      cand[++n] = "main"
+      cand[++n] = "master"
 
       for (i = 1; i <= n; i++) {
         if (cand[i] in seen) continue
         seen[cand[i]] = 1
-        printf "%s\t%s\n", cand[i], ((cand[i] in remote_of) ? remote_of[cand[i]] : "")
+        printf "%s\n", cand[i]
       }
     }
   '
 }
 
-# `new-work.sh bases --main DIR [--base-refs FILE] [--base REF | --no-base]`
+# `new-work.sh bases --main DIR [--base-bookmarks FILE] [--origin-head REF]`
+#       `[--base REF | --no-base]`
 #
-# The bases the branch question cycles through, the one it opens on first, as
-# "ref<TAB>remote" rows. --base-refs reads a saved for-each-ref instead of
-# asking the repository, which is how the tests and dry runs work.
+# The revisions the branch question cycles through, the one it opens on first,
+# one per line. --base-bookmarks reads a saved `jj bookmark list` rendering
+# instead of asking jj, and --origin-head says what origin/HEAD names instead of
+# asking git; between them a test or a dry run needs no repository at all.
 cmd_bases() {
-  local main='' base_refs='' base='' no_base=''
+  local main='' bookmarks='' origin_head='' base='' no_base=''
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -533,9 +551,14 @@ cmd_bases() {
         main=$2
         shift 2
         ;;
-      --base-refs)
-        [ $# -ge 2 ] || usage_error 'bases: --base-refs needs a file'
-        base_refs=$2
+      --base-bookmarks)
+        [ $# -ge 2 ] || usage_error 'bases: --base-bookmarks needs a file'
+        bookmarks=$2
+        shift 2
+        ;;
+      --origin-head)
+        [ $# -ge 2 ] || usage_error 'bases: --origin-head needs a ref'
+        origin_head=$2
         shift 2
         ;;
       --base)
@@ -551,20 +574,20 @@ cmd_bases() {
     esac
   done
 
-  if [ -z "$main" ] && [ -z "$base_refs" ]; then
-    usage_error 'bases: need --main DIR (or --base-refs FILE)'
+  if [ -z "$main" ] && [ -z "$bookmarks" ]; then
+    usage_error 'bases: need --main DIR (or --base-bookmarks FILE)'
   fi
   [ -z "$base" ] || [ -z "$no_base" ] ||
     usage_error 'bases: --base and --no-base answer the same question'
-  # The refs are read from --main, so a directory that is not there is refused
-  # here, by name: left to base_chain it reaches `cd` inside a subshell, whose
-  # failure reads as a line number in this script rather than as a place that
-  # does not exist. With --base-refs the directory is never read.
-  if [ -z "$base_refs" ]; then
+  # The bookmarks are read from --main, so a directory that is not there is
+  # refused here, by name: left to base_chain it reaches `cd` inside a subshell,
+  # whose failure reads as a line number in this script rather than as a place
+  # that does not exist. With --base-bookmarks the directory is never read.
+  if [ -z "$bookmarks" ]; then
     [ -d "$main" ] || die "bases: no such directory: $main"
   fi
 
-  base_chain "$main" "$base_refs" "$base" "$no_base" 'bases'
+  base_chain "$main" "$bookmarks" "$origin_head" "$base" "$no_base" 'bases'
 }
 
 # `new-work.sh preview ID --main DIR`
@@ -626,8 +649,8 @@ shell_quote() {
 #   agent         the agent's name, empty for none
 #   branch        the branch, empty until a bead or a key gives it one
 #   branch_edited 1 once it was typed by hand, which stops it tracking the bead
-#   bases         the base cycle, one "ref<TAB>remote" row each, the opening
-#                 answer first, an empty ref for the worktrunk-default sentinel
+#   bases         the base cycle, one jj revision per line, the opening answer
+#                 first, an empty line for the "no revision at all" sentinel
 #   base_index    which of those rows the screen is showing, 1-based
 #   rows          the fzf rows: the prompt row, then the beads
 
@@ -724,13 +747,12 @@ remember_agent() { # NAME
   printf 'agent=%s\n' "$1" >"$file" 2>/dev/null || return 0
 }
 
-# The cycle entry the screen is showing, as the "ref<TAB>remote" line base_chain
-# prints: field 1 the ref, field 2 the remote it lives on. Field 1 is empty for
-# the worktrunk-default sentinel, which is a real answer and not a missing one.
-# NO_BASE only matters when the state holds no cycle at all -- a screen opened by
-# hand -- and is then what says which of the two the empty ref means. Nothing
-# named and nothing said about it falls back to @, which is what base_chain
-# itself settles on when no ref resolves.
+# The cycle entry the screen is showing, as the single revision base_chain
+# prints for it. An empty line is the "no revision at all" sentinel, which is a
+# real answer and not a missing one. NO_BASE only matters when the state holds no
+# cycle at all -- a screen opened by hand -- and is then what says which of the
+# two an empty entry means. Nothing named and nothing said about it falls back to
+# @, which is what base_chain itself settles on when no revision resolves.
 composer_base_row() {
   local state=$1 no_base=${2:-0}
   local index row=''
@@ -739,13 +761,15 @@ composer_base_row() {
     '' | *[!0-9]*) index=1 ;;
   esac
   [ "$index" -ge 1 ] || index=1
-  row=$(state_get "$state" bases | sed -n "${index}p")
-  if [ -z "$row" ]; then
-    if [ "$no_base" -eq 1 ]; then
-      row=$'\t'
-    else
-      row="@"$'\t'
-    fi
+  # Counted before it is read: an entry that is there and empty is the "no
+  # revision at all" answer, and a cycle with nothing at that index is the state
+  # falling back -- the two are not the same thing, and `sed` prints neither.
+  if [ "$(state_lines "$state" bases)" -ge "$index" ]; then
+    row=$(state_get "$state" bases | sed -n "${index}p")
+  elif [ "$no_base" -eq 1 ]; then
+    row=''
+  else
+    row='@'
   fi
   printf '%s\n' "$row"
 }
@@ -754,19 +778,19 @@ composer_base_row() {
 # change, then the legend. The leading space is part of both lines -- fzf indents
 # the header anyway, and without a field of its own a blank one would swallow it.
 # An empty agent reads "none" -- the cycle's no-agent answer -- and an empty base
-# ref reads "wt default", so neither field is ever blank and neither lies about
-# what the tab will do. A branch that nothing has given a name to yet -- no bead
-# to derive one from, no ctrl-b -- reads "(none yet)" for the same reason: a blank
-# field would print as a doubled space and read as a bug.
+# reads "none" too, because there is no revision to start from, so neither field
+# is ever blank and neither lies about what the tab will do. A branch that nothing
+# has given a name to yet -- no bead to derive one from, no ctrl-b -- reads
+# "(none yet)" for the same reason: a blank field would print as a doubled space
+# and read as a bug.
 composer_header_lines() {
   local state=$1 project=$2 no_base=${3:-0}
-  local agent branch base_row base_ref
+  local agent branch base_ref
   agent=$(state_get "$state" agent)
   branch=$(state_get "$state" branch)
-  base_row=$(composer_base_row "$state" "$no_base")
-  base_ref=${base_row%%$'\t'*}
+  base_ref=$(composer_base_row "$state" "$no_base")
   printf ' %s · agent: %s · branch: %s · base: %s\n' \
-    "$project" "${agent:-none}" "${branch:-(none yet)}" "${base_ref:-wt default}"
+    "$project" "${agent:-none}" "${branch:-(none yet)}" "${base_ref:-none}"
   printf ' %s\n' "$composer_hints"
 }
 
@@ -794,17 +818,18 @@ composer_cycle_agent() {
 }
 
 # ctrl-r: the next base in the cycle, wrapping. The cycle was resolved once,
-# before the screen opened -- one for-each-ref per picker run, not one per
+# before the screen opened -- one bookmark list per picker run, not one per
 # keystroke -- so this only moves an index. --main and the rest are here for a
 # state that holds no cycle, which is a screen opened by hand: then the cycle is
 # resolved the way bases resolves it, and only then.
 composer_cycle_base() {
-  local state=$1 project=$2 main=$3 base_refs=$4 base=$5 no_base=$6
+  local state=$1 project=$2 main=$3 bookmarks=$4 origin_head=$5 base=$6
+  local no_base=$7
   local total index next=1
   total=$(state_lines "$state" bases)
-  if [ "$total" -eq 0 ] && { [ -n "$main" ] || [ -n "$base_refs" ]; }; then
-    base_chain "$main" "$base_refs" "$base" "$no_base" 'composer cycle-base' \
-      >"$state/bases"
+  if [ "$total" -eq 0 ] && { [ -n "$main" ] || [ -n "$bookmarks" ]; }; then
+    base_chain "$main" "$bookmarks" "$origin_head" "$base" "$no_base" \
+      'composer cycle-base' >"$state/bases"
     total=$(state_lines "$state" bases)
   fi
   index=$(state_get "$state" base_index)
@@ -904,16 +929,20 @@ composer_branch_field() {
 # through, and the script's own path is absolute because fzf runs them in the
 # project's directory rather than this one.
 composer_screen() {
-  local state=$1 main=$2 project=$3 base=$4 base_refs=$5 no_base=$6 names=$7
+  local state=$1 main=$2 project=$3 base=$4 bookmarks=$5 no_base=$6 names=$7
+  local origin_head=${8:-}
   local self script main_q state_q project_q
-  local base_q='' base_refs_q='' no_base_q='' agents_q='' name
+  local base_q='' bookmarks_q='' origin_head_q='' no_base_q='' agents_q='' name
   self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
   script=$(printf '%q' "$self")
   main_q=$(printf '%q' "$main")
   state_q=$(printf '%q' "$state")
   project_q=$(printf '%q' "$project")
   [ -z "$base" ] || base_q=" --base $(printf '%q' "$base")"
-  [ -z "$base_refs" ] || base_refs_q=" --base-refs $(printf '%q' "$base_refs")"
+  [ -z "$bookmarks" ] ||
+    bookmarks_q=" --base-bookmarks $(printf '%q' "$bookmarks")"
+  [ -z "$origin_head" ] ||
+    origin_head_q=" --origin-head $(printf '%q' "$origin_head")"
   [ "$no_base" -eq 0 ] || no_base_q=' --no-base'
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -935,7 +964,7 @@ composer_screen() {
       --bind 'load:pos(2)+refresh-preview' \
       --bind "ctrl-a:transform-header($script composer cycle-agent --state $state_q --project $project_q$agents_q)" \
       --bind "ctrl-b:execute($script composer branch-field --state $state_q --project $project_q)+transform-header($script composer header --state $state_q --project $project_q$no_base_q)+refresh-preview" \
-      --bind "ctrl-r:transform-header($script composer cycle-base --state $state_q --project $project_q --main $main_q$base_refs_q$base_q$no_base_q)"
+      --bind "ctrl-r:transform-header($script composer cycle-base --state $state_q --project $project_q --main $main_q$bookmarks_q$origin_head_q$base_q$no_base_q)"
 }
 
 # `new-work.sh composer <verb> --state DIR [...]`
@@ -1065,11 +1094,11 @@ cmd_composer_cycle_agent() {
   composer_cycle_agent "$composer_opt_state" "$composer_opt_project" "$names"
 }
 
-# The header again, after the base moved on. --main and --base-refs are
-# alternatives, as they are for bases: the refs are read from one or the other,
-# and a state that already holds a cycle reads neither.
+# The header again, after the base moved on. --main and --base-bookmarks are
+# alternatives, as they are for bases: the bookmarks are read from one or the
+# other, and a state that already holds a cycle reads neither.
 cmd_composer_cycle_base() {
-  local main='' base_refs='' base='' no_base=0
+  local main='' bookmarks='' origin_head='' base='' no_base=0
   composer_common_args 'composer cycle-base' "$@"
   set -- ${composer_rest[@]+"${composer_rest[@]}"}
   while [ $# -gt 0 ]; do
@@ -1080,10 +1109,16 @@ cmd_composer_cycle_base() {
         main=$2
         shift 2
         ;;
-      --base-refs)
+      --base-bookmarks)
         [ $# -ge 2 ] ||
-          usage_error 'composer cycle-base: --base-refs needs a file'
-        base_refs=$2
+          usage_error 'composer cycle-base: --base-bookmarks needs a file'
+        bookmarks=$2
+        shift 2
+        ;;
+      --origin-head)
+        [ $# -ge 2 ] ||
+          usage_error 'composer cycle-base: --origin-head needs a ref'
+        origin_head=$2
         shift 2
         ;;
       --base)
@@ -1102,12 +1137,12 @@ cmd_composer_cycle_base() {
     usage_error 'composer cycle-base: need --state DIR'
   [ -n "$composer_opt_project" ] ||
     usage_error 'composer cycle-base: need --project NAME'
-  [ -n "$main" ] || [ -n "$base_refs" ] ||
-    usage_error 'composer cycle-base: need --main DIR (or --base-refs FILE)'
+  [ -n "$main" ] || [ -n "$bookmarks" ] ||
+    usage_error 'composer cycle-base: need --main DIR (or --base-bookmarks FILE)'
   [ -z "$base" ] || [ "$no_base" -eq 0 ] ||
     usage_error 'composer cycle-base: --base and --no-base answer the same question'
   composer_cycle_base "$composer_opt_state" "$composer_opt_project" "$main" \
-    "$base_refs" "$base" "$no_base"
+    "$bookmarks" "$origin_head" "$base" "$no_base"
 }
 
 # The branch field: it writes an answer and prints none.
@@ -1239,25 +1274,25 @@ branch_for_bead() {
 }
 
 # `new-work.sh pick --main DIR --root PATH --project NAME`
-#       `[--base REF | --no-base] [--base-refs FILE]`
+#       `[--base REF | --no-base] [--base-bookmarks FILE] [--origin-head REF]`
 #       `[--bead ID | --prompt TEXT | --blank] [--agents NAME]...`
 #       `[--agent NAME] [--branch NAME] [--dry-run]`
 #
 # The one screen behind ctrl+space>n, and everything it answers: the bead (or a
-# prompt, or neither), the agent, the branch and the base a new branch starts
-# from with the remote it lives on. The answer goes back to Rex as one JSON
-# object, built by jq so no value is ever interpolated into a command line.
+# prompt, or neither), the agent, the branch and the jj revision a new branch
+# starts from. The answer goes back to Rex as one JSON object, built by jq so no
+# value is ever interpolated into a command line.
 # --bead, --prompt, --blank, --agent and --branch answer a question without
 # asking it, which is how the tests and scripts drive the picker: --blank is
 # ctrl-n's blank answer -- an agent, and nothing to say -- which a pipe cannot
-# press for itself. --base, --no-base and --base-refs answer the base the screen
-# opens on, which the payload carries to the tab.
+# press for itself. --base, --no-base, --base-bookmarks and --origin-head answer
+# the revision the screen opens on, which the payload carries to the tab.
 cmd_pick() {
   local main='' root='' project='' base='' bead='' branch=''
   local prompt='' agent='' agent_choices=''
   local bead_set=0 prompt_set=0 agent_set=0 branch_set=0 dry_run=0 no_base=0
   local blank_set=0
-  local bd_json='' wt_json='' refs='' base_refs=''
+  local bd_json='' wt_json='' refs='' bookmarks='' origin_head=''
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -1338,9 +1373,14 @@ cmd_pick() {
         refs=$2
         shift 2
         ;;
-      --base-refs)
-        [ $# -ge 2 ] || usage_error 'pick: --base-refs needs a file'
-        base_refs=$2
+      --base-bookmarks)
+        [ $# -ge 2 ] || usage_error 'pick: --base-bookmarks needs a file'
+        bookmarks=$2
+        shift 2
+        ;;
+      --origin-head)
+        [ $# -ge 2 ] || usage_error 'pick: --origin-head needs a ref'
+        origin_head=$2
         shift 2
         ;;
       --dry-run)
@@ -1387,7 +1427,7 @@ cmd_pick() {
   # place that does not exist. Only when one of those lookups will really be made:
   # a run given all four fixtures never touches --main.
   if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ] ||
-    { [ -z "$base_refs" ] && [ "$no_base" -eq 0 ]; }; then
+    { [ -z "$bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
   fi
 
@@ -1468,9 +1508,9 @@ cmd_pick() {
         "$(branch_for_bead "$ready" \
           "$(printf '%s\n' "$rows" | sed -n 1p | cut -f1)")"
     fi
-    # The base cycle, resolved once for the whole run: one for-each-ref here, and
-    # ctrl-r only ever moves the index into it.
-    base_chain "$main" "$base_refs" "$base" "$no_base" 'pick' \
+    # The base cycle, resolved once for the whole run: one bookmark list here,
+    # and ctrl-r only ever moves the index into it.
+    base_chain "$main" "$bookmarks" "$origin_head" "$base" "$no_base" 'pick' \
       >"$composer_state/bases"
     state_put "$composer_state" base_index 1
     {
@@ -1497,7 +1537,7 @@ cmd_pick() {
     else
       local reply='' asked=0 answer=''
       reply=$(composer_screen "$composer_state" "$main" "$project" "$base" \
-        "$base_refs" "$no_base" "$agent_choices") || asked=$?
+        "$bookmarks" "$no_base" "$agent_choices" "$origin_head") || asked=$?
       if ! answer=$(printf '%s\n' "$reply" | fzf_answer "$asked"); then
         exit 1
       fi
@@ -1669,29 +1709,23 @@ cmd_pick() {
     exit 2
   fi
 
-  # The base the tab creates from: it travels in the payload with the remote it
-  # lives on so the tab can fetch that one, and nothing is said about it on stderr,
-  # where the announcement used to be. On the screen it is ctrl-r's answer, the
-  # cycle entry the base_index points at; off a terminal it is the cycle's first
-  # row, which is what `bases` prints first -- --base names it outright, whatever
-  # this clone would have opened on, and --no-base is the worktrunk default, no
-  # ref at all. The remote comes from the row rather than from a slash in the name,
-  # because feat/x is a local branch and nothing to fetch.
-  local base_ref='' base_remote='' base_default=0 base_row=''
+  # The revision the tab creates from: one string, because a jj revision carries
+  # the remote it came from in its own @remote suffix -- main@origin is what git
+  # used to spell origin/main -- and nothing is said about it on stderr, where the
+  # announcement used to be. On the screen it is ctrl-r's answer, the cycle entry
+  # the base_index points at; off a terminal it is the cycle's first row, which is
+  # what `bases` prints first -- --base names it outright, whatever this clone
+  # would have opened on, and --no-base is that same first row, empty, which the
+  # payload sends as false.
+  local base_ref='' base_default=0
   if [ -n "$composer_state" ]; then
-    base_row=$(composer_base_row "$composer_state" "$no_base")
-    base_ref=${base_row%%$'\t'*}
-    base_remote=${base_row#*$'\t'}
+    base_ref=$(composer_base_row "$composer_state" "$no_base")
     [ -n "$base_ref" ] || base_default=1
   elif [ "$no_base" -eq 1 ]; then
     base_default=1
   else
-    base_row=$(base_chain "$main" "$base_refs" "$base" '' 'pick' | sed -n 1p)
-    # The row's own first field, not the --base word: base_chain opens on that
-    # word and prints where it resolved, which is the short name the cycle
-    # speaks -- what the tab and its fetch can use.
-    base_ref=${base_row%%$'\t'*}
-    base_remote=${base_row#*$'\t'}
+    base_ref=$(base_chain "$main" "$bookmarks" "$origin_head" "$base" '' 'pick' |
+      sed -n 1p)
   fi
 
   # prompt and agent travel only when they were answered: an absent prompt leaves
@@ -1710,7 +1744,6 @@ cmd_pick() {
     --arg title "$title" \
     --argjson create "$create" \
     --arg base "$base_ref" \
-    --arg base_remote "$base_remote" \
     --argjson base_default "$base_default" \
     --arg prompt "$prompt" \
     --argjson prompt_set "$prompt_set" \
@@ -1720,7 +1753,6 @@ cmd_pick() {
     '{project: $project, root: $root, main: $main, branch: $branch,
       bead: $bead, title: $title, create: $create,
       base: (if $base_default == 1 then false else $base end)}
-     + (if $base_remote == "" then {} else {base_remote: $base_remote} end)
      + (if $prompt_set == 1 then {prompt: $prompt} else {} end)
      + (if $blank_set == 1 then {blank: true} else {} end)
      + (if $agent_set == 1 then {agent: $agent} else {} end)')

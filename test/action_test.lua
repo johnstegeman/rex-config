@@ -796,17 +796,20 @@ do
   end
   eq("work_new_go is registered", type(go), "table")
   eq("work_new_go declares its arguments", sorted_keys(go and go.args and go.args.properties),
-    { "agent", "base", "base_remote", "bead", "blank", "branch", "create",
+    { "agent", "base", "bead", "blank", "branch", "create",
       "main", "project", "prompt", "root", "title" })
   eq("work_new_go requires what the picker always sends",
     go and go.args.required, { "project", "root", "main", "branch" })
   eq("the arguments are typed", go and go.args.properties.create, { type = "boolean" })
   eq("blank is declared a boolean", go and go.args.properties.blank,
     { type = "boolean" })
-  eq("base admits both the ref and the wt-default sentinel",
+  eq("base admits both the revision and the no-revision sentinel",
     go and go.args.properties.base, { type = { "string", "boolean" } })
-  eq("base_remote is declared a string", go and go.args.properties.base_remote,
-    { type = "string" })
+  -- The remote a base comes from is the @remote in the revision itself, so a
+  -- second carrier is not declared: an undeclared pair is filtered before the
+  -- action, which is exactly what should happen to one.
+  eq("no second carrier for the base's remote is declared",
+    go and go.args.properties.base_remote, nil)
 end
 
 -- The answers the last two tasks added, taken through Rex rather than handed
@@ -833,17 +836,18 @@ end
 
 stub = new_branch_stub()
 pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
-  base = "upstream/main", base_remote = "upstream", blank = true,
+  base = "main@upstream", blank = true,
 }))
 do
   local command = request_of(stub, "session.new_window").layout.block.options.command
-  eq("the base the picker chose reaches the tab", command[7], "upstream/main")
-  eq("the remote that base lives on reaches the tab", command[8], "upstream")
+  eq("the base the picker chose reaches the tab", command[7], "main@upstream")
+  eq("the base carries its remote in its own name, and nowhere else",
+    command[8], "")
   eq("a blank answer appends no prompt word", #command, 9)
   eq("a blank answer leaves the agent last", command[#command], M.options.agent)
 end
 
--- The wt-default sentinel is false, and it has to stay false all the way: a
+-- The no-revision sentinel is false, and it has to stay false all the way: a
 -- configuration naming a base must not undo the picker's answer, and a
 -- declaration that turned it into the string "false" would send `--base false`
 -- to worktrunk.
@@ -855,8 +859,8 @@ do
     base = false,
   }))
   local command = request_of(stub, "session.new_window").layout.block.options.command
-  eq("the wt-default sentinel reaches the tab as no base", command[7], "")
-  eq("the wt-default sentinel carries no remote", command[8], "")
+  eq("the no-revision sentinel reaches the tab as no base", command[7], "")
+  eq("no revision carries no remote word either", command[8], "")
   M.options.base = saved
 end
 

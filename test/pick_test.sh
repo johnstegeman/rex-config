@@ -4,8 +4,8 @@
 # pick is the two-stage picker behind ctrl+space>n: a bead, then a branch, then
 # one JSON object handed back to Rex. The bead question is fzf, which cannot be
 # driven without a terminal, so it is bypassed with --bead or served by saved
-# tool output (--bd-json/--wt-json/--refs/--base-refs). The branch question is
-# typed, so its answers arrive on stdin like a person's would.
+# tool output (--bd-json/--wt-json/--refs/--base-bookmarks). The branch
+# question is typed, so its answers arrive on stdin like a person's would.
 #
 # Three things are outside what a pipe can reach, so a pty and a hand are what
 # verify them: the prompt text `branch [name]> ` as it appears on a terminal, the
@@ -100,7 +100,7 @@ run_pick() {
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json "$fixture" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-    --base-refs "$tmp/base-refs" "$@" \
+    --base-bookmarks "$tmp/base-bookmarks" "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
 }
@@ -128,7 +128,7 @@ run_pick_answer() {
       --main /p/demo/main --root /p/demo --project demo \
       --bd-json "$fixture" \
       --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-      --base-refs "$tmp/base-refs" "$@" \
+      --base-bookmarks "$tmp/base-bookmarks" "$@" \
       >"$tmp/out" 2>"$tmp/err"
   status=$?
 }
@@ -175,19 +175,18 @@ feat/abc123
 main
 EOF
 
-# The refs the base is resolved from, exactly what
+# The bookmarks the base is resolved from, exactly what
 #
-#   git for-each-ref --format='%(refname)%00%(symref)' refs/remotes refs/heads
+#   jj bookmark list --all-remotes -T 'name ++ "@" ++ remote ++ "\n"'
 #
-# prints for a clone of origin/main with both of the local branches: a refname,
-# a NUL, then that ref's symref target -- empty for everything but origin/HEAD.
-printf 'refs/remotes/origin/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' \
-  >"$tmp/base-refs"
+# prints for a clone of origin/main whose jj also carries the bare local form
+# and its own mirror of the remote-tracking refs: one "<name>@<remote>" per line,
+# and the two forms the cycle must never offer beside them.
+printf 'main@\nmain@git\nmain@origin\n' >"$tmp/base-bookmarks"
 
-# The same for a clone whose one remote is upstream: the remote a base lives on
-# is what its ref record says, not the slash in its name.
-printf 'refs/remotes/upstream/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' \
-  >"$tmp/base-refs-upstream"
+# The same for a clone whose one remote is upstream: the remote a base comes
+# from is the suffix in the revision, not a second field.
+printf 'main@upstream\n' >"$tmp/base-bookmarks-upstream"
 
 # A ready list with nothing on it: the branch question on its own.
 printf '[]\n' >"$tmp/empty-beads.json"
@@ -232,7 +231,7 @@ else
   assert_json "exact branch: project, root, main" "$json" \
     '.project == "demo" and .root == "/p/demo" and .main == "/p/demo/main"'
   assert_json "exact branch: exactly the nine keys" "$json" \
-    'keys == ["base", "base_remote", "bead", "branch", "create", "main",
+    'keys == ["base", "bead", "branch", "create", "main",
               "project", "root", "title"]'
 fi
 ran=$((ran + 1))
@@ -531,7 +530,7 @@ PATH=/nonexistent REX_ARGS_FILE=$tmp/rex-args "${BASH:-bash}" ./new-work.sh pick
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 1 ]; then
@@ -553,7 +552,7 @@ PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch feat/needs-git --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
@@ -575,7 +574,7 @@ PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 3 ]; then
@@ -593,7 +592,7 @@ printf 'feat/no-fzf\n' |
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json test/fixtures/ready.json \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-    --base-refs "$tmp/base-refs" \
+    --base-bookmarks "$tmp/base-bookmarks" \
     --bead pmm-iris-a4l --dry-run >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -640,10 +639,10 @@ elif grep -q 'cd:' "$tmp/err"; then
     "bash's own cd error is still in: $(cat "$tmp/err")"
 fi
 
-# (h3) The same directory, this time with --no-base and no --base-refs: nothing
-# is read for the base, so the guard above never opens --main and a directory
-# that is not there costs nothing. The arm every run_pick case hides, because
-# every one of them names a --base-refs.
+# (h3) The same directory, this time with --no-base and no --base-bookmarks:
+# nothing is read for the base, so the guard above never opens --main and a
+# directory that is not there costs nothing. The arm every run_pick case hides,
+# because every one of them names a --base-bookmarks.
 ran=$((ran + 1))
 ./new-work.sh pick --main "$tmp/nowhere" --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
@@ -657,7 +656,7 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "a --no-base pick prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out")"
 else
-  assert_json "a --no-base pick: the worktrunk default, and no remote" "$json" \
+  assert_json "a --no-base pick: no revision at all" "$json" \
     '.base == false and (has("base_remote") | not)'
 fi
 
@@ -780,7 +779,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args \
   ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch bug/a4l \
   >"$tmp/out" 2>"$tmp/err" </dev/null
 status=$?
@@ -811,7 +810,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args REX_FAIL='no server' \
   ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch bug/a4l \
   >"$tmp/out" 2>"$tmp/err" < <(sleep 10)
 status=$?
@@ -928,7 +927,7 @@ else
   assert_json "--blank picks no bead and no title" "$json" \
     '.bead == "" and .title == ""'
   assert_json "--blank's keys are the flag and nothing else" "$json" \
-    'keys == ["base", "base_remote", "bead", "blank", "branch", "create",
+    'keys == ["base", "bead", "blank", "branch", "create",
               "main", "project", "root", "title"]'
 fi
 
@@ -957,7 +956,7 @@ else
   assert_json "a typed prompt replaces the bead" "$json" \
     '.bead == "" and .title == ""'
   assert_json "a typed prompt is the only new key" "$json" \
-    'keys == ["base", "base_remote", "bead", "branch", "create", "main",
+    'keys == ["base", "bead", "branch", "create", "main",
               "project", "prompt", "root", "title"]'
 fi
 
@@ -1008,7 +1007,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "the agent list leads with its default" "$json" '.agent == "pi"'
   assert_json "the agent question asks nobody off a terminal" "$json" \
-    'keys == ["agent", "base", "base_remote", "bead", "branch", "create",
+    'keys == ["agent", "base", "bead", "branch", "create",
               "main", "project", "root", "title"]'
 fi
 
@@ -1052,7 +1051,7 @@ PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --agents pi --branch feat/no-gum --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
@@ -1090,55 +1089,69 @@ elif [ -e "$tmp/called" ]; then
     "called: $(sort -u "$tmp/called" 2>/dev/null)"
 fi
 
-# (r) The base. The picker resolves the ref new branches are created from and
-# hands it over with the remote it lives on, so the tab can fetch that one; the
-# tab owns the fetch, so the picker says nothing about the base on stderr.
-run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch feat/x --dry-run
+# (r) The base. The picker resolves the jj revision new workspaces are started
+# from and hands it over as one string -- the remote it came from is the @remote
+# in that name -- and the tab owns the fetch, so the picker says nothing about
+# the base on stderr.
+run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch feat/x \
+  --origin-head origin/main --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "the base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "the branch question opens on origin/main" "$json" \
-    '.base == "origin/main"'
-  assert_json "the base names the remote it lives on" "$json" \
-    '.base_remote == "origin"'
+  assert_json "the branch question opens on main@origin" "$json" \
+    '.base == "main@origin"'
+  assert_json "the base is one revision and no second carrier" "$json" \
+    '(has("base_remote") | not)'
 fi
 
-# --base is the answer whatever this clone would have opened on, and it is not
-# a ref this clone has: the picker does not get to refuse it. A ref with no
-# record of its own is on no remote, so the tab fetches nothing for it.
-run_pick test/fixtures/ready.json --branch feat/x --base refresh --dry-run
+# With no origin/HEAD named, the cycle's fixed answer is the one that travels --
+# the default branch as the remote has it, not this machine's copy.
+run_pick test/fixtures/ready.json --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "the fallback base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a clone with no origin/HEAD opens on main@origin" "$json" \
+    '.base == "main@origin"'
+fi
+
+# --base is the answer whatever this clone would have opened on, and it is not a
+# revision this clone has: the picker does not get to refuse it, because the
+# workspace is made later, in the tab, where jj answers for it.
+run_pick test/fixtures/ready.json --branch feat/x --base refresh@origin \
+  --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "--base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "--base is the base, verbatim" "$json" '.base == "refresh"'
-  assert_json "a base on no remote carries no remote" "$json" \
+  assert_json "--base is the base, verbatim" "$json" '.base == "refresh@origin"'
+  assert_json "a leaf revision carries no second carrier" "$json" \
     '(has("base_remote") | not)'
 fi
 
-# --no-base is the worktrunk default: a boolean false, not the string an --arg
-# would have made of it, and no remote to fetch.
+# --no-base is "no revision at all": a boolean false, not the string an --arg
+# would have made of it.
 run_pick test/fixtures/ready.json --branch feat/x --no-base --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "--no-base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
   assert_json "--no-base is false, not a word" "$json" '.base == false'
-  assert_json "--no-base fetches nothing" "$json" \
+  assert_json "--no-base sends no second carrier" "$json" \
     '(has("base_remote") | not)'
 fi
 
-# The remote comes from the ref record, so a base on a remote that is not
-# origin says so, and the tab fetches that one rather than origin.
-run_pick test/fixtures/ready.json --branch feat/x --base upstream/main \
-  --base-refs "$tmp/base-refs-upstream" --dry-run
+# A base on a remote that is not origin says so in the revision itself, which is
+# what tells the tab which remote to fetch.
+run_pick test/fixtures/ready.json --branch feat/x --base main@upstream \
+  --base-bookmarks "$tmp/base-bookmarks-upstream" --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "an upstream base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "an upstream base says upstream" "$json" \
-    '.base == "upstream/main" and .base_remote == "upstream"'
+  assert_json "an upstream base says upstream in its own name" "$json" \
+    '.base == "main@upstream" and (has("base_remote") | not)'
 fi
 
 # A base and no base are two answers to one question, so both at once is a
@@ -1149,33 +1162,20 @@ if [ "$status" -ne 2 ]; then
   fail "a base and no base together exit 2" "exit $status: $(cat "$tmp/err")"
 fi
 
-# --base given as the refname it really is travels as the short name: that is
-# what the cycle speaks, and it is the form the remote was found under -- the
-# payload carries the base the tab can use rather than the words it was given.
-run_pick test/fixtures/ready.json --branch feat/x \
-  --base refs/remotes/origin/main --dry-run
-if ! json=$(payload_of "$(cat "$tmp/out")"); then
-  fail "a full refname base prints runnable rex do work_new_go --args" \
-    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
-else
-  assert_json "a full refname base is the short name, on its remote" "$json" \
-    '.base == "origin/main" and .base_remote == "origin"'
-fi
-
-# A --base-refs that cannot be read is one line under this verb's own name,
+# A --base-bookmarks that cannot be read is one line under this verb's own name,
 # and no shell line number beside it.
 ran=$((ran + 1))
 ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/no-such-refs" --bead '' --branch feat/x --dry-run \
+  --base-bookmarks "$tmp/no-such-bookmarks" --bead '' --branch feat/x --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 1 ]; then
-  fail "an unreadable --base-refs exits 1" "exit $status: $(cat "$tmp/err")"
+  fail "an unreadable --base-bookmarks exits 1" "exit $status: $(cat "$tmp/err")"
 elif [ "$(cat "$tmp/err")" != \
-  "new-work.sh: pick: could not read the refs of $tmp/no-such-refs" ]; then
-  fail "an unreadable --base-refs is named under pick" "stderr: $(cat "$tmp/err")"
+  "new-work.sh: pick: could not read the bookmarks of $tmp/no-such-bookmarks" ]; then
+  fail "an unreadable --base-bookmarks is named under pick" "stderr: $(cat "$tmp/err")"
 fi
 
 # The note is gone. Where a new branch starts from is now a word in the payload
@@ -1246,44 +1246,44 @@ check_header() { # NAME WANT
 
 # The header the screen opens on: the project, then the three answers, then the
 # line of keys. An empty agent is "none" -- the cycle's no-agent row -- and an
-# empty base ref is the worktrunk-default sentinel, named rather than blanked.
+# empty base is the "no revision at all" sentinel, named rather than blanked.
 composer_state "$tmp/cs1" pi 'bug/58h' 1
-printf 'origin/main\torigin\n@\t\nmain\t\n' >"$tmp/cs1/bases"
+printf 'main@origin\n@\nmain\n' >"$tmp/cs1/bases"
 run_composer header --state "$tmp/cs1" --project rex-config
 check_header "the header's two lines" \
-  "$(heading rex-config pi 'bug/58h' origin/main)"
+  "$(heading rex-config pi 'bug/58h' main@origin)"
 
 composer_state "$tmp/cs2" '' 'feat/x' 1
-printf '\t\n@\t\nmain\t\n' >"$tmp/cs2/bases"
+printf '\n@\nmain\n' >"$tmp/cs2/bases"
 run_composer header --state "$tmp/cs2" --project rex-config
-check_header "an empty agent is none and an empty base is the wt default" \
-  "$(heading rex-config none 'feat/x' 'wt default')"
+check_header "an empty agent is none and an empty base is none" \
+  "$(heading rex-config none 'feat/x' 'none')"
 
 # The branch the screen opens on is the name a bare Enter would create, seeded
 # from the bead the cursor lands on (load:pos(2)), so the field describes the tab
 # the pick would make before anything is pressed. This is that state, the way the
 # picker writes it: the first bead's derived name.
 composer_state "$tmp/cs1b" pi 'feat/58h' 1
-printf 'origin/main\torigin\n@\t\n' >"$tmp/cs1b/bases"
+printf 'main@origin\n@\n' >"$tmp/cs1b/bases"
 run_composer header --state "$tmp/cs1b" --project rex-config
 check_header "a branch seeded from the first bead is the header's branch" \
-  "$(heading rex-config pi 'feat/58h' origin/main)"
+  "$(heading rex-config pi 'feat/58h' main@origin)"
 
 # With nothing to name -- no bead to derive a branch from, and no ctrl-b -- the
 # field says so in words: an empty one would print as a doubled space and read
 # as a bug.
 composer_state "$tmp/cs1c" pi '' 1
-printf 'origin/main\torigin\n@\t\n' >"$tmp/cs1c/bases"
+printf 'main@origin\n@\n' >"$tmp/cs1c/bases"
 run_composer header --state "$tmp/cs1c" --project rex-config
 check_header "a branch nothing has named yet says so" \
-  "$(heading rex-config pi '(none yet)' origin/main)"
+  "$(heading rex-config pi '(none yet)' main@origin)"
 
 # ctrl-a: the next name on the agent list, then none, then round again -- and
 # only the header is repainted. The rows are beads, so nothing about them
 # depends on the agent and a key that reloaded them would clear the list and
 # drop the cursor back to the top for a one-word change.
 composer_state "$tmp/cs3" pi 'feat/one' 1
-printf 'origin/main\torigin\n@\t\n' >"$tmp/cs3/bases"
+printf 'main@origin\n@\n' >"$tmp/cs3/bases"
 rows_before=$(cat "$tmp/cs3/rows")
 cycle_agent() { # NAME WANT_LABEL WANT_AGENT
   local name=$1 label=$2 file=$3
@@ -1294,7 +1294,7 @@ cycle_agent() { # NAME WANT_LABEL WANT_AGENT
     return
   fi
   if [ "$(cat "$tmp/out")" != \
-    "$(heading rex-config "$label" feat/one origin/main)" ]; then
+    "$(heading rex-config "$label" feat/one main@origin)" ]; then
     fail "$name repaints the header" "stdout: $(cat "$tmp/out")"
   fi
   if [ "$(cat "$tmp/cs3/agent")" != "$file" ]; then
@@ -1310,10 +1310,10 @@ cycle_agent 'the name after the last is none' none ''
 cycle_agent 'the cycle wraps to the first name' pi pi
 
 # ctrl-r: the next base in the cycle, then round again. The cycle was resolved
-# once, before the screen opened -- one for-each-ref per run, not one per
-# keystroke -- so a --main that is not even there proves no ref was read.
+# once, before the screen opened -- one bookmark list per run, not one per
+# keystroke -- so a --main that is not even there proves nothing was read.
 composer_state "$tmp/cs4" pi 'feat/one' 1
-printf 'origin/main\torigin\n@\t\nmain\t\n' >"$tmp/cs4/bases"
+printf 'main@origin\n@\nmain\n' >"$tmp/cs4/bases"
 cycle_base() { # NAME WANT_INDEX WANT_LABEL
   local name=$1 index=$2 label=$3
   run_composer cycle-base --state "$tmp/cs4" --project rex-config \
@@ -1332,13 +1332,13 @@ cycle_base() { # NAME WANT_INDEX WANT_LABEL
 }
 cycle_base 'the next base is @' 2 '@'
 cycle_base 'the base after that is main' 3 'main'
-cycle_base 'the cycle wraps to the opening answer' 1 'origin/main'
+cycle_base 'the cycle wraps to the opening answer' 1 'main@origin'
 
 # The cycle is counted by entries, not by newlines: a bases file whose last line
 # has none -- one written by hand -- must not lose its last base, which would
 # shorten the cycle and wrap one entry early.
 composer_state "$tmp/cs8" pi 'feat/one' 1
-printf 'origin/main\torigin\n@\t' >"$tmp/cs8/bases"
+printf 'main@origin\n@' >"$tmp/cs8/bases"
 cycle_base_no_newline() { # NAME WANT_INDEX WANT_LABEL
   local name=$1 index=$2 label=$3
   run_composer cycle-base --state "$tmp/cs8" --project rex-config \
@@ -1356,7 +1356,7 @@ cycle_base_no_newline() { # NAME WANT_INDEX WANT_LABEL
 }
 cycle_base_no_newline 'a bases file with no final newline cycles to its last entry' \
   2 '@'
-cycle_base_no_newline 'a bases file with no final newline wraps after it' 1 'origin/main'
+cycle_base_no_newline 'a bases file with no final newline wraps after it' 1 'main@origin'
 
 # ctrl-b: the branch, typed. gum asks it in the float and stdin carries it in a
 # pipe, so this is the real path either way. The answer is trimmed, the edit is
@@ -1461,24 +1461,24 @@ usage_case 'branch-field refuses an unknown option' \
   'composer branch-field: unknown option --nope' branch-field \
   --state "$tmp/cs1" --nope
 
-# ctrl-r reads its cycle from --base-refs when the state holds none, as `bases`
-# does: the two arguments are alternatives -- one of them names the refs -- and
-# neither is a --main the other merely decorates.
+# ctrl-r reads its cycle from --base-bookmarks when the state holds none, as
+# `bases` does: the two arguments are alternatives -- one of them names the
+# bookmarks -- and neither is a --main the other merely decorates.
 composer_state "$tmp/cs9" pi 'feat/one' 1
 : >"$tmp/cs9/bases"
 run_composer cycle-base --state "$tmp/cs9" --project rex-config \
-  --base-refs "$tmp/base-refs"
+  --base-bookmarks "$tmp/base-bookmarks"
 if [ "$status" -ne 0 ]; then
-  fail "cycle-base takes --base-refs on its own" "exit $status: $(cat "$tmp/err")"
+  fail "cycle-base takes --base-bookmarks on its own" "exit $status: $(cat "$tmp/err")"
 elif [ "$(cat "$tmp/out")" != \
   "$(heading rex-config pi feat/one '@')" ]; then
-  fail "cycle-base resolves its cycle from --base-refs" "stdout: $(cat "$tmp/out")"
+  fail "cycle-base resolves its cycle from --base-bookmarks" "stdout: $(cat "$tmp/out")"
 elif [ "$(cat "$tmp/cs9/base_index")" != 2 ]; then
   fail "cycle-base moves to the second entry" \
     "base_index: $(cat "$tmp/cs9/base_index")"
 fi
-usage_case 'cycle-base needs one of --main and --base-refs' \
-  'composer cycle-base: need --main DIR (or --base-refs FILE)' cycle-base \
+usage_case 'cycle-base needs one of --main and --base-bookmarks' \
+  'composer cycle-base: need --main DIR (or --base-bookmarks FILE)' cycle-base \
   --state "$tmp/cs9" --project rex-config
 
 
@@ -1612,7 +1612,7 @@ run_screen() {
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json "${SCREEN_BEADS:-test/fixtures/ready.json}" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-    --base-refs "$tmp/base-refs" --dry-run "$@" \
+    --base-bookmarks "$tmp/base-bookmarks" --dry-run "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
 }
@@ -1977,7 +1977,7 @@ else
   assert_json "a remembered agent is the payload's agent" "$json" \
     '.agent == "claude"'
   assert_json "a remembered agent adds no key to the payload" "$json" \
-    'keys == ["agent", "base", "base_remote", "bead", "branch", "create",
+    'keys == ["agent", "base", "bead", "branch", "create",
               "main", "project", "root", "title"]'
 fi
 PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-known \

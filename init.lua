@@ -1002,15 +1002,15 @@ function M.setup(opts)
         bead = { type = "string" },
         title = { type = "string" },
         create = { type = "boolean" },
-        -- What the branch is created from, and the remote that ref lives on.
-        -- The base is three-valued -- a string is the ref, false is worktrunk's
-        -- own default (no --base word at all), and absent means the picker never
-        -- answered -- so both types are declared: a `string` alone would call
-        -- the picker's sentinel an illegal value, and a validator that took that
-        -- at its word would drop it and let a configured base speak instead.
-        -- The remote is present only for a remote-tracking ref.
+        -- The jj revision the new workspace is started from: a string is the
+        -- revision, false is "no revision at all" (no -r, so the workspace sits
+        -- on main's working copy), and absent means the picker never answered --
+        -- so both types are declared: a `string` alone would call the picker's
+        -- sentinel an illegal value, and a validator that took that at its word
+        -- would drop it and let a configured base speak instead. There is no
+        -- second field for where the base comes from: a revision carries its
+        -- remote in its own @remote suffix, and two carriers could disagree.
         base = { type = { "string", "boolean" } },
-        base_remote = { type = "string" },
         -- ctrl-n: an agent, and nothing to say. Not a prompt and not the
         -- configured template, so a payload without it keeps the template.
         blank = { type = "boolean" },
