@@ -80,16 +80,28 @@ fi
 bin=$tmp/bin
 worktree=$tmp/worktree
 start=$tmp/start
-mkdir -p "$bin" "$worktree" "$start" "$tmp/functions"
+# The main workspace of the project under test, which is where the real gws cd's
+# before it does anything, and where a create that fails leaves the shell.
+main=$tmp/main
+mkdir -p "$bin" "$worktree" "$start" "$main" "$tmp/functions"
 
-# gws, stood in for: it records the words it was given, writes the path into
-# whatever file --path-file names, and exits 0 or 1 the way the real function
-# does. It is a fish *function*, found through fish_function_path, because that
-# is how the real gws reaches the tab: a program on the PATH would prove a
-# different thing.
+# gws, stood in for: it records the words it was given and the guard it
+# inherited, writes the path into whatever file --path-file names, and exits 0 or
+# 1 the way the real function does. It is a fish *function*, found through
+# fish_function_path, because that is how the real gws reaches the tab: a program
+# on the PATH would prove a different thing.
 cat >"$tmp/functions/gws.fish" <<'EOF'
 function gws
     printf '%s\n' $argv >$GWS_WORDS
+    # Every record is optional here too, and the guard the wrapper exported is
+    # one of them: a create runs the hooks gws runs, so it has to inherit it.
+    set -l env_file /dev/null
+    set -q GWS_ENV; and set env_file $GWS_ENV
+    if set -q GIT_TERMINAL_PROMPT
+        printf 'GIT_TERMINAL_PROMPT=%s\n' "$GIT_TERMINAL_PROMPT" >$env_file
+    else
+        printf 'GIT_TERMINAL_PROMPT=unset\n' >$env_file
+    end
     set -l pf
     set -l i 0
     while test $i -lt (count $argv)
@@ -97,6 +109,16 @@ function gws
         if test "$argv[$i]" = --path-file
             set pf $argv[(math $i + 1)]
         end
+    end
+    # The real gws walks up to the wrapper and cds into <wrapper>/main before it
+    # runs `jj workspace add`, and a fish function's cd stays put when it
+    # returns: so a gws that fails has already moved the caller. A case below
+    # asserts where that leaves the shell, and a stand-in that never moved would
+    # pass for a reason production does not have. `builtin` because a user's cd
+    # is very often a jumper that lands nowhere -- which is also why the wrapper
+    # itself has to say `builtin cd`.
+    if set -q GWS_CD; and test "$GWS_CD" != 0; and test -d "$GWS_MAIN"
+        builtin cd $GWS_MAIN
     end
     if test "$GWS_FAIL" = 1
         echo "gws: the stand-in was asked to fail" >&2
@@ -108,6 +130,26 @@ function gws
         printf '%s\n' $GWS_PATH >$pf
     end
     echo "gws: $GWS_PATH ready"
+end
+EOF
+
+# The user's own fish functions are standing in the run's function path, so the
+# run cannot see them -- and a wrapper that quietly called one of them would
+# look perfect here and fail on a real machine. Two are planted in their place,
+# both taken from this machine: `rm` is a `trash` wrapper that rejects -f and
+# leaves the file, and `cd` is a directory jumper that changes nothing. A
+# wrapper that used either would print on every create and land nowhere.
+cat >"$tmp/functions/rm.fish" <<'EOF'
+function rm --wraps=trash
+    printf '# Un-recognized argument %s at index 1\n' "$argv[1]" >&2
+    return 1
+end
+EOF
+
+cat >"$tmp/functions/cd.fish" <<'EOF'
+function cd --description 'alias cd=ze'
+    printf 'cd: the jumper took %s\n' "$argv[1]" >&2
+    return 0
 end
 EOF
 
@@ -195,14 +237,15 @@ chmod +x "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
 # arguments and the prompt. TEST_SHELL replaces the stand-in shell or
 # UNSET_SHELL takes SHELL away, TEST_WT_PATH (explicitly empty included) and
 # WT_FAIL choose what worktrunk reports, GWS_PATH, GWS_FAIL and GWS_WRITE choose
-# what the stand-in gws does, and STDIN_FROM is what the pane's stdin is (a file
-# of commands, for a fallback sh that is not a stub). The stand-ins' records are
+# what the stand-in gws does, GWS_CD=0 keeps it from moving the shell, GWS_MAIN
+# is where it moves to, and STDIN_FROM is what the pane's stdin is (a file of
+# commands, for a fallback sh that is not a stub). The stand-ins' records are
 # cleared first, so an assertion that something never ran reads that run alone.
 # Sets $status and leaves stdout in $tmp/out, stderr in $tmp/err.
 run_wrapper() {
   local create=$1 branch=$2 base=$3
   shift 3
-  rm -f "$tmp/gws-words" "$tmp/wt-words" "$tmp/git-calls"
+  rm -f "$tmp/gws-words" "$tmp/gws-env" "$tmp/wt-words" "$tmp/git-calls"
   (
     cd "$start" || exit 1
     PATH=$bin:$PATH
@@ -219,9 +262,10 @@ run_wrapper() {
     WT_WORDS=$tmp/wt-words WT_PATH=${TEST_WT_PATH-$worktree} WT_FAIL=${WT_FAIL:-0}
     WT_ENV=$tmp/wt-env GIT_CALLS=$tmp/git-calls
     GWS_WORDS=$tmp/gws-words GWS_PATH=${GWS_PATH:-$worktree}
+    GWS_ENV=$tmp/gws-env GWS_MAIN=${GWS_MAIN:-$main} GWS_CD=${GWS_CD:-1}
     GWS_FAIL=${GWS_FAIL:-0} GWS_WRITE=${GWS_WRITE:-1}
     export PATH fish_function_path WT_WORDS WT_PATH WT_FAIL WT_ENV GIT_CALLS
-    export GWS_WORDS GWS_PATH GWS_FAIL GWS_WRITE
+    export GWS_WORDS GWS_PATH GWS_ENV GWS_MAIN GWS_CD GWS_FAIL GWS_WRITE
     "$fish_bin" -c "$script" "$create" "$branch" "$base" "$@"
   ) >"$tmp/out" 2>"$tmp/err" <"${STDIN_FROM:-/dev/null}"
   status=$?
@@ -229,23 +273,35 @@ run_wrapper() {
 
 # A create run: gws is asked to make the worktree from the base and to write its
 # path into a file, the agent runs in the worktree it made, and a login shell is
-# left there.
+# left there -- with nothing on stderr, which is what a wrapper that called one
+# of the user's own fish functions (`rm` is a `trash` wrapper here, `cd` a
+# jumper) would fail: an error-looking line on every create.
 ran=$((ran + 1))
 run_wrapper 1 feat/x1 @ agent "/brainstorming for bead p-1"
-if [ "$status" -ne 0 ]; then
-  fail "a create run finishes" "exit $status: $(cat "$tmp/err")"
+if [ "$status" -ne 0 ] || [ -s "$tmp/err" ]; then
+  fail "a create run finishes without saying anything" \
+    "exit $status: stderr: $(cat "$tmp/err")"
 fi
 
-# The words, and the file they name: the base is passed verbatim, and the path
-# file is one this wrapper made rather than something it composed from the
-# branch.
+# The words, the file they name, and nothing else: the base is passed verbatim,
+# the path file is one this wrapper made rather than something it composed from
+# the branch, and an extra word would be an argument the real gws would refuse.
 ran=$((ran + 1))
-if [ "$(sed -n 1p "$tmp/gws-words")" != "feat/x1" ] \
+if [ "$(wc -l <"$tmp/gws-words" | tr -d ' ')" != 4 ] \
+  || [ "$(sed -n 1p "$tmp/gws-words")" != "feat/x1" ] \
   || [ "$(sed -n 2p "$tmp/gws-words")" != "@" ] \
   || [ "$(sed -n 3p "$tmp/gws-words")" != "--path-file" ] \
   || [ -z "$(sed -n 4p "$tmp/gws-words")" ]; then
   fail "a create calls gws with the branch, the base and a path file" \
     "gws was given: $(cat "$tmp/gws-words" 2>/dev/null)"
+fi
+
+# The guard reaches gws as well as the switch: a create runs the project's
+# post-start hooks, and a hook that talks to git must not stop on a credential
+# prompt either.
+ran=$((ran + 1))
+if ! grep -qx 'GIT_TERMINAL_PROMPT=0' "$tmp/gws-env"; then
+  fail "gws runs with GIT_TERMINAL_PROMPT=0" "recorded: $(cat "$tmp/gws-env" 2>/dev/null)"
 fi
 
 ran=$((ran + 1))
@@ -327,8 +383,13 @@ if ! grep -qx 'GIT_TERMINAL_PROMPT=0' "$tmp/wt-env"; then
 fi
 
 # A create that fails: gws has said why on stderr, the agent is not started at
-# all -- never in the wrong directory -- and the shell still opens, in the tab's
-# directory, so the pane is usable rather than dead.
+# all -- never in the wrong directory -- and the shell still opens, so the pane is
+# usable rather than dead. The directory it opens in is gws's own last one: the
+# real function cds into the project's main workspace before it runs `jj workspace
+# add`, and a fish function's cd stays put when it returns, so a create that
+# failed has already moved the caller there. That is the tab's own directory in
+# production, which is why nothing is done about it -- but the assertion is that
+# directory, not "somewhere".
 ran=$((ran + 1))
 GWS_FAIL=1 run_wrapper 1 feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
@@ -341,8 +402,8 @@ if grep -q "agent pwd" "$tmp/out"; then
 fi
 
 ran=$((ran + 1))
-if ! grep -qx "shell pwd: $start" "$tmp/out"; then
-  fail "after a failing gws the shell stays in the tab's directory" \
+if ! grep -qx "shell pwd: $main" "$tmp/out"; then
+  fail "after a failing gws the shell is in the workspace gws moved it to" \
     "output: $(cat "$tmp/out")"
 fi
 
@@ -354,10 +415,11 @@ fi
 
 # gws said it worked and the path file is empty -- the workspace is there and
 # nothing tells the wrapper where: the agent must not start in the wrong place,
-# and the line names the step that lost the path rather than the create.
+# and the line names the step that lost the path rather than the create. The
+# shell opens in the workspace gws moved to, exactly as after a failed create.
 ran=$((ran + 1))
 GWS_WRITE=0 run_wrapper 1 feat/x1 @ agent "/brainstorming"
-if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $start" "$tmp/out"; then
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $main" "$tmp/out"; then
   fail "a create whose path file was never written starts nothing" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
@@ -476,8 +538,8 @@ if ! grep -qx "agent pwd: $start/-dash" "$tmp/out"; then
 fi
 
 # A path worktrunk reported but the shell cannot enter -- the worktree going away
-# between the create and the cd. The agent must not run there either, and the
-# pane still gets its shell, in the tab's directory.
+# between the create and the cd. The agent must not run there either, and the pane
+# still gets its shell, in the workspace gws moved to.
 ran=$((ran + 1))
 GWS_PATH=/nonexistent/nope run_wrapper 1 feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
@@ -493,7 +555,7 @@ fi
 
 ran=$((ran + 1))
 if ! grep -q "could not enter /nonexistent/nope" "$tmp/err" \
-  || ! grep -qx "shell pwd: $start" "$tmp/out"; then
+  || ! grep -qx "shell pwd: $main" "$tmp/out"; then
   fail "a worktree that cannot be entered is named, and the shell stays put" \
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
@@ -660,11 +722,14 @@ interrupt_run() {
 # The run, plus its own precondition: an INT that never reached the group would
 # leave the assertions below to fail for whatever the missing signal caused --
 # or, worse, to pass because the run finished some other way -- so the delivery
-# is asserted by name before they look at the result.
+# is asserted by name before they look at the result. The wrapper's own exit
+# status is captured here, before any grep runs: a failure report that showed the
+# exit of the grep that looked for the shell would name the wrong number.
 interrupt() {
   local agent_name=$1
   shift
   interrupt_run "$agent_name" "$@"
+  interrupted=$status
   ran=$((ran + 1))
   if [ -e "$tmp/no-group" ]; then
     fail "the ^C reaches the whole process group ($agent_name)" "$(cat "$tmp/no-group")"
@@ -675,20 +740,20 @@ ran=$((ran + 1))
 interrupt agent-killed "/brainstorming"
 if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "a ^C that kills the agent still leaves the shell" \
-    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+    "exit $interrupted: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 
 ran=$((ran + 1))
 interrupt agent-trapping "/brainstorming"
 if [ ! -e "$tmp/got-int" ]; then
   fail "the ^C reaches the agent itself" \
-    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+    "exit $interrupted: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 
 ran=$((ran + 1))
 if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "a ^C the agent catches still leaves the shell" \
-    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+    "exit $interrupted: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 
 # No agent: the picker's "none". The pane is the worktree and a login shell, and

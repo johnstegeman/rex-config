@@ -215,9 +215,19 @@ end
 # is already on this pane -- or a path that cannot be read means the agent is
 # not started at all. The path file is read and removed either way: it is this
 # pane's litter, and an empty one is how "gws never wrote it" arrives here.
+#
+# The programs borrowed here are called through `command`, and the directory is
+# entered with `builtin cd`. fish's function namespace belongs to the user: on
+# this machine `rm` is a `trash` wrapper (so `rm -f` prints "Un-recognized
+# argument -f" and leaves the file) and `cd` is a directory jumper that lands
+# nowhere, so a plain `rm` or `cd` would put a line on every create and start the
+# agent in the wrong place. The two exceptions are `gws` and `wt`, which are
+# looked up as plain names because that is what they are: gws exists only as a
+# fish function, and the user's `wt` is how worktrunk's shell integration gets
+# in.
 set -l path
 if test "$create" = 1
-  set -l pf (mktemp)
+  set -l pf (command mktemp)
   if test -n "$base"
     gws $branch $base --path-file $pf
   else
@@ -227,9 +237,9 @@ if test "$create" = 1
   set -l created $status
   if test $created -eq 0
     # the one line gws wrote, and not whatever else may have landed there
-    set path (head -n 1 $pf)
+    set path (command head -n 1 $pf)
   end
-  rm -f $pf
+  command rm -f $pf
   if test $created -ne 0
     printf 'rex-config: gws %s failed (exit %s); not starting %s\n' "$branch" "$created" "$what" >&2
     leave_shell
@@ -244,7 +254,7 @@ else
   # runs: a worktrunk that failed has already said why, on this pane's stderr.
   set -l switched $status
   if test $switched -eq 0
-    set path (printf '%s\n' $listing | jq -r '.path // empty')
+    set path (printf '%s\n' $listing | command jq -r '.path // empty')
   end
   if test -z "$path"
     # Two steps can leave no path: a switch that failed, whose own message is
@@ -263,9 +273,10 @@ end
 # A path that starts with a dash is a directory like any other, and fish's `cd`
 # reads one as an option: unlike sh's it has no `--` to end them with, so the
 # current-directory spelling is what keeps it a path. An absolute path, which is
-# what gws and worktrunk report, is left alone.
+# what gws and worktrunk report, is left alone -- and `builtin`, because a plain
+# `cd` is the user's jumper (see above).
 set -l dir (string replace -r '^-' './-' -- $path)
-cd $dir
+builtin cd $dir
 or begin
   printf 'rex-config: could not enter %s; not starting %s\n' "$path" "$what" >&2
   leave_shell
