@@ -354,6 +354,15 @@ wt_branches() {
 # The first half of the candidate list: the branches worktrunk already has a
 # worktree for, main's at the top (wt lists it first). A branch in this list is
 # a worktree to switch to.
+#
+# A worktrunk that cannot read the repository is a failed read, not an empty
+# one: it says so, naming the directory, and returns 1. What happens next is the
+# caller's, and the message says only what happened, because the two callers
+# differ -- `candidates` still lists git's branches (a partial list is still a
+# suggestion, and its comment below says so), while `branch_mode` cannot tell a
+# worktree branch from one only git knows without this half, so a pick stops
+# rather than guess. Guessing would send a branch that has a worktree to
+# `gws --attach`, which refuses on the directory that is already there.
 wt_branch_rows() {
   local main=$1 wt_json=$2
   local listing
@@ -361,16 +370,11 @@ wt_branch_rows() {
   if [ -n "$wt_json" ]; then
     wt_branches <"$wt_json"
   elif [ -n "$main" ]; then
-    # A repository worktrunk cannot read still has branches git can name, so a
-    # broken `wt` costs the picker its worktree rows, not the command. The loss
-    # is said out loud, naming the directory: a branch left out of the list is
-    # one the picker would offer to attach to rather than switch to, which is the
-    # wrong mode for a worktree that is right there.
     if listing=$( cd "$main" && wt list --format=json ); then
       printf '%s\n' "$listing" | wt_branches
     else
-      printf '%s: could not read the worktrees of %s; only its git branches are listed\n' \
-        "$PROG" "$main" >&2
+      printf '%s: could not read the worktrees of %s\n' "$PROG" "$main" >&2
+      return 1
     fi
   fi
 }
@@ -392,11 +396,24 @@ local_branch_rows() {
 # Worktree branches come first -- wt lists the main worktree at the top --
 # then the local branches git knows about. One branch can be both, so the
 # first sighting wins.
+#
+# A worktrunk that could not be read costs this list its worktree rows and
+# nothing else: the warning above has already been said, and the branches git
+# knows are still worth offering as suggestions. That is the whole difference
+# from branch_mode, which has to refuse rather than answer from half the list.
 candidate_rows() {
   local main=$1 wt_json=$2 refs=$3
 
   {
-    wt_branch_rows "$main" "$wt_json"
+    # Only a live `wt` is forgiven here. A --wt-json that cannot be opened is a
+    # caller's mistake rather than a repository this machine cannot read, and it
+    # travels up like any other failed read -- silently, since no message about a
+    # directory would be true of it.
+    if [ -n "$wt_json" ]; then
+      wt_branch_rows "$main" "$wt_json"
+    else
+      wt_branch_rows "$main" "$wt_json" || true
+    fi
     local_branch_rows "$main" "$refs"
   } | awk 'NF && !/\/HEAD$/ && !seen[$0]++'
 }
@@ -1318,8 +1335,15 @@ cmd_fzf_answer() {
 # name like @{-1} and prints what that resolved to, so only an answer equal to
 # the input means the input itself is a branch name. Without the comparison the
 # literal @{-1} would pass the check and be created as a branch so named.
+#
+# `@` is refused before git is asked. Git is willing to accept it, but this flow
+# speaks jj's revision language -- the base it hands gws is a jj revision -- and
+# in that language `@` is the working copy. A bookmark called `@` would be read
+# as an answer to a different question everywhere a revision is read, so it is
+# not a name to make, however willing git is.
 valid_branch_name() {
   local resolved
+  [ "$1" != '@' ] || return 1
   resolved=$(git check-ref-format --branch "$1" 2>/dev/null) || return 1
   [ "$resolved" = "$1" ]
 }
@@ -1808,15 +1832,22 @@ cmd_pick() {
   # what `bases` prints first -- --base names it outright, whatever this clone
   # would have opened on, and --no-base is that same first row, empty, which the
   # payload sends as false.
+  #
+  # Only a create is read for a revision at all. A switch and an attach name a
+  # branch that already exists, and their payload carries no base, so resolving
+  # the cycle for them would be a `jj` call on behalf of an answer nobody uses --
+  # and a failure in it would stop a pick whose tab never wanted a revision.
   local base_ref='' base_default=0
-  if [ -n "$composer_state" ]; then
-    base_ref=$(composer_base_row "$composer_state" "$no_base")
-    [ -n "$base_ref" ] || base_default=1
-  elif [ "$no_base" -eq 1 ]; then
-    base_default=1
-  else
-    base_ref=$(base_chain "$main" "$bookmarks" "$origin_head" "$base" '' 'pick' |
-      sed -n 1p)
+  if [ "$mode" = create ]; then
+    if [ -n "$composer_state" ]; then
+      base_ref=$(composer_base_row "$composer_state" "$no_base")
+      [ -n "$base_ref" ] || base_default=1
+    elif [ "$no_base" -eq 1 ]; then
+      base_default=1
+    else
+      base_ref=$(base_chain "$main" "$bookmarks" "$origin_head" "$base" '' 'pick' |
+        sed -n 1p)
+    fi
   fi
 
   # prompt and agent travel only when they were answered: an absent prompt leaves

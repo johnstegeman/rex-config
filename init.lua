@@ -165,6 +165,12 @@ function leave_shell
   exec /bin/sh -l
 end
 
+# What a caller is told when it does not know the contract: too few words before
+# the agent, or a first word that is none of the three modes. One sentence, said
+# from the two places that can learn it, so a caller that fixes one mistake is
+# never answered in different words by the next.
+set -l contract 'rex-config: the tab needs create, branch and base'
+
 # The three words come before the agent, and they are read before they are used:
 # the count here, and the mode word in the dispatch below. Reading them anyway
 # would be harmless -- fish answers a missing word with nothing where sh's
@@ -173,7 +179,7 @@ end
 # The message names all three, so a caller that sends two learns about the
 # third.
 if test (count $argv) -lt 3
-  printf 'rex-config: the tab needs create, branch and base\n' >&2
+  printf '%s\n' $contract >&2
   leave_shell
 end
 
@@ -289,10 +295,10 @@ else if test "$mode" = create -o "$mode" = attach
 else
   # The first word is none of the three: a caller that does not know the
   # contract, or one still sending the old `1`/`0`. It is refused with the same
-  # line too few words get, because it is the same mistake seen from the other
-  # side -- and before either program runs, since guessing what worktrunk or gws
-  # would make of the word happens on a pane nobody is watching.
-  printf 'rex-config: the tab needs create, branch and base\n' >&2
+  # sentence too few words get, because it is the same mistake seen from the
+  # other side -- and before either program runs, since guessing what worktrunk
+  # or gws would make of the word happens on a pane nobody is watching.
+  printf '%s\n' $contract >&2
   leave_shell
 end
 
@@ -401,10 +407,18 @@ function M.new_tab_argv(project, args)
   -- have: `create = true` is a branch to make, and no `create` at all is the
   -- switch it always was. That is the whole of the fallback -- an absent
   -- `worktree` is never read as create -- so a hand-run `rex do` and a line
-  -- copied out of an old dry run both keep doing what they said.
+  -- copied out of an old dry run both keep doing what they said. An empty string
+  -- is no word either: it says nothing, so it falls back like a field that was
+  -- never sent.
+  --
+  -- Any other word is refused here, beside the branch and the agent: the wrapper
+  -- would answer it with its contract line and start nothing, and a tab with
+  -- nothing in it is a worse answer than a refusal the caller can read.
   local mode = "switch"
-  if type(args.worktree) == "string" then
+  if type(args.worktree) == "string" and args.worktree ~= "" then
     mode = args.worktree
+    assert(mode == "switch" or mode == "create" or mode == "attach",
+      'new_tab_argv: the mode is switch, create or attach, not "' .. mode .. '"')
   elseif args.create == true then
     mode = "create"
   end
@@ -414,16 +428,20 @@ function M.new_tab_argv(project, args)
   -- the revision to create from, false is the picker's "start from nothing" (and
   -- travels as the empty parameter, which is gws's own default), and absent
   -- means the picker never answered -- a hand-run `rex do` -- so the configured
-  -- base is the fallback. A switch and an attach carry it too and ignore it: the
-  -- payload has no base for either, so in practice it is empty, and the wrapper
-  -- hands a base word to a create alone. The remote a base lives on is part of
-  -- the revision's own name (`main@origin`), so there is no word of its own for
-  -- it.
+  -- base is the fallback. The remote a base lives on is part of the revision's
+  -- own name (`main@origin`), so there is no word of its own for it.
+  --
+  -- Only a create is given one. A switch and an attach name a branch that already
+  -- exists, so there is nothing to start it from: the word is empty whatever the
+  -- payload or the configuration said, because a base reaching the tab for either
+  -- of them is an answer to a question neither asked.
   local base = ""
-  if type(args.base) == "string" then
-    base = args.base
-  elseif args.base == nil and type(M.options.base) == "string" then
-    base = M.options.base
+  if mode == "create" then
+    if type(args.base) == "string" then
+      base = args.base
+    elseif args.base == nil and type(M.options.base) == "string" then
+      base = M.options.base
+    end
   end
 
   local argv = {

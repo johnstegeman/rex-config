@@ -158,9 +158,28 @@ do
   eq("the mode wins over the old boolean",
     M.new_tab_argv("proj", { branch = "feat/x1", worktree = "attach",
       create = true })[4], "attach")
+  -- An empty string is no word: it says nothing, so it falls back like a field
+  -- that was never sent -- rather than building a tab the wrapper would refuse.
+  eq("an empty mode word falls back to the old boolean",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "",
+      create = true })[4], "create")
+  eq("an empty mode word and nothing else is a switch",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "" })[4], "switch")
+  -- Any other word is refused where the branch and the agent are refused: the
+  -- wrapper would print its contract line and start nothing, and a tab that
+  -- does nothing quietly is worse than a caller's own error.
+  local built, refused = pcall(M.new_tab_argv, "proj",
+    { branch = "feat/x1", worktree = "attatch" })
+  eq("a mode word that is none of the three is refused", built, false)
+  eq("the refusal says which words there are",
+    type(refused) == "string" and
+      refused:find("switch, create or attach", 1, true) ~= nil, true)
 
-  local answered = M.new_tab_argv("proj", { branch = "feat/x1", create = true,
-    base = "origin/main", base_remote = "origin" })
+  -- The mode-bearing path is the one that carries a base: a create is the only
+  -- mode with a revision to start from, and these assertions drive the word the
+  -- picker really sends rather than the old boolean it falls back to.
+  local answered = M.new_tab_argv("proj", { branch = "feat/x1",
+    worktree = "create", base = "origin/main", base_remote = "origin" })
   eq("the base travels as the third positional word", answered[6], "origin/main")
   eq("the answer's words leave the agent and the prompt after them",
     { answered[7], answered[8] }, { "pi", "/brainstorming" })
@@ -169,26 +188,44 @@ do
   -- "start from nothing", and a configured fallback must not quietly undo it.
   M.options.base = "main"
   eq("a configured base does not replace the answer",
-    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = "origin/main" })[6],
-    "origin/main")
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create",
+      base = "origin/main" })[6], "origin/main")
   eq("base = false sends an empty base",
-    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = false })[6], "")
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create",
+      base = false })[6], "")
   -- A remote handed over anyway is not a word: the agent follows the base
   -- whether or not there is one, so nothing sits between them.
   eq("a base_remote in the payload is not a word of its own",
-    M.new_tab_argv("proj", { branch = "feat/x1", create = true, base = false,
-      base_remote = "origin" })[7], "pi")
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create",
+      base = false, base_remote = "origin" })[7], "pi")
 
   -- No base in the payload is a hand-run `rex do`: the configuration is the
   -- fallback, and only when it names a revision.
   eq("no base in the payload falls back to the configured one",
-    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[6], "main")
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create" })[6], "main")
   M.options.base = false
   eq("a configured base of false sends an empty base",
-    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[6], "")
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create" })[6], "")
   M.options.base = nil
   eq("a base the picker never answered and no configuration sends nothing",
-    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[6], "")
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create" })[6], "")
+
+  -- A switch and an attach are given no base at all -- not the payload's, not
+  -- the configuration's. The branch already exists, so there is nothing to start
+  -- it from, and the wrapper hands its base word to a create alone: a base here
+  -- would be an answer to a question neither mode asked.
+  M.options.base = "main"
+  eq("a switch sends no base, whatever was configured",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "switch" })[6], "")
+  eq("a switch sends no base even when the payload named one",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "switch",
+      base = "origin/main" })[6], "")
+  eq("an attach sends no base, whatever was configured",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "attach" })[6], "")
+  eq("an attach sends no base even when the payload named one",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "attach",
+      base = "origin/main" })[6], "")
+  M.options.base = nil
 
   M.options.base = saved
 end
@@ -207,7 +244,7 @@ do
   M.options.agent_args = { "--mode", "plan" }
 
   local function prompt_argv(prompt)
-    return M.new_tab_argv("proj", { branch = "feat/x1", create = true,
+    return M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create",
       prompt = prompt })
   end
   -- Seven words take the argv to the agent, two more are its own arguments,
@@ -229,7 +266,7 @@ do
   -- blank with a prompt set is the interesting case: the payload never carries
   -- both, but the picker's answer has the last word either way, so a blank
   -- answer must drop a prompt even when one was handed over.
-  local blank = M.new_tab_argv("proj", { branch = "feat/x1", create = true,
+  local blank = M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create",
     prompt = "hello", blank = true })
   eq("a blank answer appends no prompt word", #blank, 9)
   eq("a blank answer puts no word after the agent's arguments",

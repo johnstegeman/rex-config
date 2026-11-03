@@ -35,7 +35,7 @@ fail() {
 ran=$((ran + 1))
 script=$(init="$PWD/init.lua" lua -e '
   local M = dofile(os.getenv("init"))
-  local argv = M.new_tab_argv("proj", { branch = "feat/x1", create = true })
+  local argv = M.new_tab_argv("proj", { branch = "feat/x1", worktree = "switch" })
   io.write(argv[3] or "")
 ' 2>"$tmp/lua-err")
 if [ -z "$script" ]; then
@@ -52,7 +52,7 @@ fi
 ran=$((ran + 1))
 runner=$(init="$PWD/init.lua" lua -e '
   local M = dofile(os.getenv("init"))
-  local argv = M.new_tab_argv("proj", { branch = "feat/x1", create = true })
+  local argv = M.new_tab_argv("proj", { branch = "feat/x1", worktree = "switch" })
   io.write(tostring(argv[1]) .. " " .. tostring(argv[2]) .. "\n")
 ')
 if [ "$runner" != "fish -c" ]; then

@@ -389,31 +389,114 @@ else
     '.base == "main@origin"'
 fi
 
-# The worktrunk shortcuts are gone. `pr:7` and `mr:12` named a pull or merge
-# request's branch when worktrunk resolved them, and this flow does not ask it
-# to: neither is on either list, and neither is a branch name git will accept,
-# so the name is refused here -- with the reason, while the picker is still on
-# screen -- rather than resolving in a tab to a name nothing can carry back.
-ran=$((ran + 1))
-pick_mode 'pr:7'
-if [ "$status" -ne 2 ]; then
-  fail "a pr: name exits 2" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qxF 'new-work.sh: not a valid branch name: pr:7' "$tmp/err"; then
-  fail "a pr: name says it is not a branch name" "stderr: $(cat "$tmp/err")"
+# (b4a) The base cycle is read for a create alone. A switch and an attach name a
+# branch that already exists, and their payload carries no revision, so nothing is
+# asked of jj for them -- a bookmark list that cannot even be opened is not their
+# failure. The same list does stop a create, which is what proves these two cases
+# are about the mode rather than about a failure that stopped happening.
+pick_without_bookmarks() {
+  local mode_branch=$1
+  ran=$((ran + 1))
+  ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json "$tmp/empty-beads.json" \
+    --wt-json "$tmp/mode-wt.json" --refs "$tmp/mode-refs" \
+    --base-bookmarks "$tmp/no-such-bookmarks" \
+    --bead '' --branch "$mode_branch" --dry-run \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+pick_without_bookmarks feat/on-worktree
+if [ "$status" -ne 0 ]; then
+  fail "a switch needs no bookmarks" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a switch needs no bookmarks: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a switch is handed back without the base cycle" "$json" \
+    '.worktree == "switch"'
 fi
 ran=$((ran + 1))
-if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
-  fail "a pr: name starts nothing" \
-    "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
+if grep -q 'bookmarks' "$tmp/err"; then
+  fail "a switch never reads the bookmarks" "stderr: $(cat "$tmp/err")"
 fi
 
-ran=$((ran + 1))
-pick_mode 'mr:12'
-if [ "$status" -ne 2 ]; then
-  fail "an mr: name exits 2" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qxF 'new-work.sh: not a valid branch name: mr:12' "$tmp/err"; then
-  fail "an mr: name says it is not a branch name" "stderr: $(cat "$tmp/err")"
+pick_without_bookmarks feat/bare-branch
+if [ "$status" -ne 0 ]; then
+  fail "an attach needs no bookmarks" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "an attach needs no bookmarks: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "an attach is handed back without the base cycle" "$json" \
+    '.worktree == "attach"'
 fi
+
+pick_without_bookmarks feat/brand-new
+if [ "$status" -ne 1 ]; then
+  fail "a create still reads the bookmarks" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF "new-work.sh: pick: could not read the bookmarks of $tmp/no-such-bookmarks" \
+  "$tmp/err"; then
+  fail "a create says which bookmarks it could not read" "stderr: $(cat "$tmp/err")"
+fi
+
+# (b4b) A live `wt list` that fails is a read that failed, not a repository with
+# no worktrees. The two are different answers to different questions: a name the
+# list would have held is a worktree to switch to, and taking it for a branch
+# only git knows would send the tab to `gws --attach`, which refuses on the
+# directory that is already there. So the pick stops, naming what it could not
+# read -- where `candidates` still prints git's branches, because a partial list
+# of suggestions is still worth having (test/branch_test.sh pins that half).
+mkdir -p "$tmp/nowt/main" "$tmp/nowt/.jj/repo" "$tmp/bad-wt"
+cat >"$tmp/bad-wt/wt" <<'EOF'
+#!/bin/sh
+printf 'wt: not a worktrunk repository\n' >&2
+exit 1
+EOF
+chmod +x "$tmp/bad-wt/wt"
+
+ran=$((ran + 1))
+PATH="$tmp/bad-wt:$PATH" ./new-work.sh pick \
+  --main "$tmp/nowt/main" --root /p/demo --project demo \
+  --bd-json "$tmp/empty-beads.json" --refs "$tmp/mode-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead '' --branch feat/on-worktree --dry-run \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+if [ "$status" -ne 1 ]; then
+  fail "a wt that cannot be read stops a pick" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF "new-work.sh: pick: could not list the branches of $tmp/nowt/main" \
+  "$tmp/err"; then
+  fail "a wt that cannot be read is named" "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ]; then
+  fail "a wt that cannot be read hands nothing back" "stdout: $(cat "$tmp/out")"
+fi
+
+# The worktrunk shortcuts are gone, and four more names are refused with them.
+# `pr:7` and `mr:12` named a pull or merge request's branch when worktrunk
+# resolved them, and this flow does not ask it to; `^` and `-` were worktrunk's
+# default branch and its previous worktree; `@` is jj's own name for the working
+# copy, which git will happily accept as a branch name and this flow will not,
+# because the revision language it now speaks would read a bookmark called `@` as
+# the working copy. None of them is on either list, so each is refused here, with
+# the reason, while the picker is still on screen -- rather than resolving in a
+# tab to a name nothing can carry back.
+for refused in '^' '-' '@' 'pr:7' 'mr:12'; do
+  ran=$((ran + 1))
+  pick_mode "$refused"
+  if [ "$status" -ne 2 ]; then
+    fail "the name $refused exits 2" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -qxF "new-work.sh: not a valid branch name: $refused" "$tmp/err"; then
+    fail "the name $refused says it is not a branch name" \
+      "stderr: $(cat "$tmp/err")"
+  fi
+  ran=$((ran + 1))
+  if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+    fail "the name $refused starts nothing" \
+      "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
+  fi
+done
 
 # (b5) `git check-ref-format --branch` *expands* a name like @{-1} and prints
 # what it resolved to, so the check on its own would let the literal through and
