@@ -667,23 +667,27 @@ elif ! grep -qF 'run ginit first' "$tmp/err"; then
   fail "the never-ginit'd refusal names ginit" "stderr: $(cat "$tmp/err")"
 fi
 
-# jj, missing from a PATH that is otherwise every tool the run needs: without it
-# there is no bookmark list for the base cycle to open on.
+# jj reads the base cycle, so it is named only where that cycle is really read:
+# no --base-bookmarks fixture stands in for the bookmark list here, which is
+# also why --main has to exist -- and, being a wrapper gws could create in, to
+# hold .jj/repo itself, which the preflight finds with dirname.
+mkdir -p "$tmp/ginit/main" "$tmp/ginit/.jj/repo"
 mkdir -p "$tmp/no-jj-bin"
-for tool in bash cat cut grep sed awk tr git bd wt jq fish; do
+for tool in bash cat cut grep sed awk tr dirname git bd wt jq fish; do
   found=$(command -v "$tool") || continue
   ln -sf "$found" "$tmp/no-jj-bin/$tool"
 done
 refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
   PATH="$tmp/no-jj-bin" ./new-work.sh pick \
-  --main /p/demo/main --root /p/demo --project demo \
+  --main "$tmp/ginit/main" --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-bookmarks "$tmp/base-bookmarks" \
-  --bead pmm-iris-a4l --branch feat/no-jj --dry-run
+  --bead pmm-iris-a4l --branch feat/no-jj
 
 # gws is a fish function rather than a program, and an empty function path is a
-# machine that has none: the pane would open and then create nothing.
+# machine that has none: the pane would open and then create nothing. No
+# --dry-run here, because that is exactly the run that makes no workspace and so
+# is not stopped for the tool.
 mkdir -p "$tmp/no-fish-functions"
 refused "a missing gws exits 1" 'gws is not a fish function' \
   fish_function_path="$tmp/no-fish-functions" ./new-work.sh pick \
@@ -691,7 +695,7 @@ refused "a missing gws exits 1" 'gws is not a fish function' \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
   --base-bookmarks "$tmp/base-bookmarks" \
-  --bead pmm-iris-a4l --branch feat/no-gws --dry-run
+  --bead pmm-iris-a4l --branch feat/no-gws
 
 # A machine with no fish at all cannot even be asked, and is named the way every
 # other missing tool is -- by need, whose message this one inherits.
@@ -706,7 +710,53 @@ refused "a missing fish exits 1" 'fish not found on PATH — press any key' \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
   --base-bookmarks "$tmp/base-bookmarks" \
-  --bead pmm-iris-a4l --branch feat/no-fish --dry-run
+  --bead pmm-iris-a4l --branch feat/no-fish
+
+# (g3) The same two checks, seen from the other side: a preflight never stops a
+# run for a tool that run would not call. A --dry-run hands its answers back
+# and creates no workspace, so gws is never asked for; and a bookmark fixture
+# stands in for the one thing jj is read for, so jj is never asked for either.
+# The payload is the proof: a run on a machine with neither still prints the
+# line that carries its branch.
+ran=$((ran + 1))
+fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-jj-bin" \
+  REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-jj --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a dry run needs neither jj nor gws" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a dry run needs neither jj nor gws: no payload" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a dry run needs neither jj nor gws: the branch" "$json" \
+    '.branch == "feat/no-jj" and .create == true'
+fi
+
+# --no-base is the other way the cycle is never read, and it needs no bookmark
+# fixture to say so: the run asks jj for nothing and is not stopped for it.
+ran=$((ran + 1))
+fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-jj-bin" \
+  REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --no-base --bead '' --branch feat/no-jj-no-base --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "--no-base needs no jj" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--no-base needs no jj: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "--no-base needs no jj: no revision at all" "$json" \
+    '.base == false'
+fi
 
 # (h) pick without the project it is working on. stdin is /dev/null so a run
 # started from a terminal asks for no keypress: the picker holds a failure open

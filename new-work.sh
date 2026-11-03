@@ -1491,12 +1491,17 @@ cmd_pick() {
   # for-each-ref is the branch list, so git is not optional either: without it
   # every name would come back "not a valid branch name".
   need git
-  # The workspace itself is made by jj and by gws, and no fixture stands in for
-  # either: a run that got this far and cannot create is a bead picked and a
-  # pane that dies with nothing on screen to explain it. Last of the tools, so
-  # a run missing several of them names the first one it needed.
-  need jj
-  need_fish_function gws
+  # jj is only what reads the base cycle, so it is needed only where that cycle
+  # is really read: --base-bookmarks stands in for the bookmark list, and
+  # --no-base answers the base without asking it. Every other lookup a pick
+  # makes is git's or a fixture's.
+  [ -n "$bookmarks" ] || [ "$no_base" -eq 1 ] || need jj
+  # gws is the one thing that knows how to make a jj colocated workspace, and it
+  # is a fish function rather than a program. Nothing on a --dry-run creates a
+  # workspace, so the check belongs where a tab will really be made -- and the
+  # pair comes last of the tools, so a run missing several names the first one it
+  # needed.
+  [ "$dry_run" -eq 1 ] || need_fish_function gws
 
   local ready rows
   if ! ready=$(ready_json "$main" "$bd_json"); then
