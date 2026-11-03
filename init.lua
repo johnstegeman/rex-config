@@ -134,10 +134,10 @@ M.options = {
 
 -- The program the new tab runs, as fish (the tab gets it through `fish -c`,
 -- see new_tab_argv below for the parameters). It exists because the pane has to
--- outlive the agent: create or switch the worktree, run the agent in it, then
--- leave a login shell there, so the hook output gws and worktrunk print and the
--- agent's own last lines stay readable above a prompt that works. Exiting that
--- shell closes the tab.
+-- outlive the agent: switch to, attach or create the worktree, run the agent in
+-- it, then leave a login shell there, so the hook output gws and worktrunk print
+-- and the agent's own last lines stay readable above a prompt that works.
+-- Exiting that shell closes the tab.
 --
 -- Every value the flow knows arrives as a positional parameter, so no branch,
 -- base, agent name or prompt is ever written into this text: a branch with a
@@ -145,11 +145,13 @@ M.options = {
 -- argument, because the shell hands them over as they were. The shell is fish
 -- and not sh because gws is a fish function: a program on a PATH cannot be one.
 M.new_tab_script = [==[
-# $argv[1] = create (1 or 0), $argv[2] = branch, $argv[3] = base (empty when
-# there is none), then the agent and the arguments it is started with, the
-# prompt last. An empty agent is an answer -- the picker's "none" -- and the
-# pane then goes straight to a login shell, with the prompt said out loud
-# instead of dropped.
+# $argv[1] = mode (switch, create or attach), $argv[2] = branch, $argv[3] = base
+# (empty when there is none), then the agent and the arguments it is started
+# with, the prompt last. The mode is the one thing the pane has to know before it
+# runs anything, and it arrives as a word rather than a flag so that reading it
+# is the same as reading the branch beside it. An empty agent is an answer -- the
+# picker's "none" -- and the pane then goes straight to a login shell, with the
+# prompt said out loud instead of dropped.
 
 # A login shell is this program's last act, and every path below ends here: it
 # is what keeps the pane alive once the agent is gone, with the output above it
@@ -163,18 +165,19 @@ function leave_shell
   exec /bin/sh -l
 end
 
-# The three words come before the agent, and they are checked before they are
-# used. Reading them anyway would be harmless -- fish answers a missing word
-# with nothing where sh's `shift` would end the shell -- but an empty branch
-# would reach gws, and "could not enter ; not starting an agent" is a worse
-# answer than naming the contract. The message names all three, so a caller
-# that sends two learns about the third.
+# The three words come before the agent, and they are read before they are used:
+# the count here, and the mode word in the dispatch below. Reading them anyway
+# would be harmless -- fish answers a missing word with nothing where sh's
+# `shift` would end the shell -- but an empty branch would reach gws, and "could
+# not enter ; not starting an agent" is a worse answer than naming the contract.
+# The message names all three, so a caller that sends two learns about the
+# third.
 if test (count $argv) -lt 3
   printf 'rex-config: the tab needs create, branch and base\n' >&2
   leave_shell
 end
 
-set -l create $argv[1]
+set -l mode $argv[1]
 set -l branch $argv[2]
 set -l base $argv[3]
 # An empty agent is a real answer, and the word after it may be absent
@@ -195,26 +198,36 @@ if test -n "$agent"
   set what $agent
 end
 
-# A create is gws's, not worktrunk's: jj has to make the workspace before wt
-# can see the branch, so gws runs `jj workspace add` (from the wrapper's main
-# workspace, fetching the revision first), attaches the branch and runs the
-# post-start hooks. This program cannot follow the cd it ends with, so it hands
-# over a file and reads the new worktree's path out of it. The base is a
-# revision, not a flag: it is only passed when there is one, since an empty
-# word is a revision jj has no name for and a missing one means "start at
-# main". gws says what it did on this pane itself, so none of it is captured
-# -- and it does the fetching, which is why nothing here runs git at all.
+# The three modes are the three things a branch can want, and each is one
+# program's:
 #
-# An existing worktree is worktrunk's switch: --no-cd leaves this shell where
-# it is, so the worktree's path is read from the JSON reply rather than arrived
-# at by changing directory. Either way the project's hooks run, and their
-# output belongs on this pane.
+#   switch  an existing worktree, which is worktrunk's: `wt switch --no-cd`
+#           leaves this shell where it is, so the worktree's path is read from
+#           the JSON reply rather than arrived at by changing directory.
+#   create  a branch to make, which is gws's: jj has to make the workspace before
+#           wt can see the branch, so gws runs `jj workspace add` (from the
+#           wrapper's main workspace, fetching the revision first), attaches the
+#           branch and runs the post-start hooks.
+#   attach  a local branch with no worktree yet, which is also gws's: the
+#           workspace is made for the branch that is already there, so nothing is
+#           created from anything and no base is passed at all.
+#
+# A create and an attach are one program with two words, so they share the path
+# file: this program cannot follow the cd gws ends with, so gws is handed a file
+# and the new worktree's path is read out of it. The base is a revision, not a
+# flag: it is only passed to a create, and only when there is one, since an empty
+# word is a revision jj has no name for and a missing one means "start at main".
+# To an attach it is never passed -- the branch exists, so it was not made from
+# anything -- even when a caller sent one. gws and worktrunk say what they did on
+# this pane themselves, so none of it is captured -- and gws does the fetching,
+# which is why nothing here runs git at all.
 #
 # The worktree the answer named, and nothing else: the agent must never start in
-# the wrong directory, so a create or switch that failed -- and its own message
-# is already on this pane -- or a path that cannot be read means the agent is
-# not started at all. The path file is read and removed either way: it is this
-# pane's litter, and an empty one is how "gws never wrote it" arrives here.
+# the wrong directory, so a create, attach or switch that failed -- and its own
+# message is already on this pane -- or a path that cannot be read means the
+# agent is not started at all. The path file is read and removed either way: it
+# is this pane's litter, and an empty one is how "gws never wrote it" arrives
+# here.
 #
 # The programs borrowed here are called through `command`, and the directory is
 # entered with `builtin cd`. fish's function namespace belongs to the user: on
@@ -226,9 +239,34 @@ end
 # fish function, and the user's `wt` is how worktrunk's shell integration gets
 # in.
 set -l path
-if test "$create" = 1
+if test "$mode" = switch
+  set -l listing (wt switch $branch --no-cd --format=json)
+  # The substitution's status is the switch's own, captured before anything else
+  # runs: a worktrunk that failed has already said why, on this pane's stderr.
+  set -l switched $status
+  if test $switched -eq 0
+    set path (printf '%s\n' $listing | command jq -r '.path // empty')
+  end
+  if test -z "$path"
+    # Two steps can leave no path: a switch that failed, whose own message is
+    # already on this pane, or a switch that worked and a reply whose path cannot
+    # be read (jq missing, or no path in it). Naming the step that went wrong is
+    # the point of the line, so neither case says "no path (exit 0)".
+    if test $switched -eq 0
+      printf 'rex-config: could not read the worktree path of %s from the switch reply (jq missing, or no path in it); not starting %s\n' "$branch" "$what" >&2
+    else
+      printf 'rex-config: wt switch %s failed (exit %s); not starting %s\n' "$branch" "$switched" "$what" >&2
+    end
+    leave_shell
+  end
+else if test "$mode" = create -o "$mode" = attach
   set -l pf (command mktemp)
-  if test -n "$base"
+  # One gws, two words: an attach names the branch that is already there and is
+  # given no base, and a create names the branch to make and the revision to make
+  # it from when the picker answered one.
+  if test "$mode" = attach
+    gws --attach $branch --path-file $pf
+  else if test -n "$base"
     gws $branch $base --path-file $pf
   else
     gws $branch --path-file $pf
@@ -249,25 +287,13 @@ if test "$create" = 1
     leave_shell
   end
 else
-  set -l listing (wt switch $branch --no-cd --format=json)
-  # The substitution's status is the switch's own, captured before anything else
-  # runs: a worktrunk that failed has already said why, on this pane's stderr.
-  set -l switched $status
-  if test $switched -eq 0
-    set path (printf '%s\n' $listing | command jq -r '.path // empty')
-  end
-  if test -z "$path"
-    # Two steps can leave no path: a switch that failed, whose own message is
-    # already on this pane, or a switch that worked and a reply whose path cannot
-    # be read (jq missing, or no path in it). Naming the step that went wrong is
-    # the point of the line, so neither case says "no path (exit 0)".
-    if test $switched -eq 0
-      printf 'rex-config: could not read the worktree path of %s from the switch reply (jq missing, or no path in it); not starting %s\n' "$branch" "$what" >&2
-    else
-      printf 'rex-config: wt switch %s failed (exit %s); not starting %s\n' "$branch" "$switched" "$what" >&2
-    end
-    leave_shell
-  end
+  # The first word is none of the three: a caller that does not know the
+  # contract, or one still sending the old `1`/`0`. It is refused with the same
+  # line too few words get, because it is the same mistake seen from the other
+  # side -- and before either program runs, since guessing what worktrunk or gws
+  # would make of the word happens on a pane nobody is watching.
+  printf 'rex-config: the tab needs create, branch and base\n' >&2
+  leave_shell
 end
 
 # A path that starts with a dash is a directory like any other, and fish's `cd`
@@ -316,12 +342,12 @@ leave_shell
 -- The command the new tab runs: that wrapper, with everything it needs as a
 -- parameter --
 --
---   fish -c SCRIPT <create> <branch> <base> <agent> [agent_args...] <prompt>
+--   fish -c SCRIPT <mode> <branch> <base> <agent> [agent_args...] <prompt>
 --
 -- because a parameter is the one way a branch, a base, a prompt or an agent
 -- name reaches a shell without the shell parsing it as text. fish takes no $0
 -- word, so there is nothing between the program and the first parameter: the
--- create flag is already argv[4]. The prompt is the picker's own when it was
+-- mode is already argv[4]. The prompt is the picker's own when it was
 -- typed there, the bead's, or -- with neither -- the configured no-bead prompt.
 -- An empty agent is the picker's "none": the wrapper starts nothing and hands
 -- the pane to a login shell. An empty base is "no base revision at all", which
@@ -365,13 +391,34 @@ function M.new_tab_argv(project, args)
     end
   end
 
+  -- What the pane has to do with the branch, as one word: switch to the worktree
+  -- that already has it, create the branch, or attach a worktree to the local
+  -- branch that has not got one. The picker decides it, from the two branch lists
+  -- it already reads, and sends it as `worktree`; nothing here re-derives it, so
+  -- the word the picker chose is the word the wrapper acts on.
+  --
+  -- A payload from before the mode existed says it with the boolean it used to
+  -- have: `create = true` is a branch to make, and no `create` at all is the
+  -- switch it always was. That is the whole of the fallback -- an absent
+  -- `worktree` is never read as create -- so a hand-run `rex do` and a line
+  -- copied out of an old dry run both keep doing what they said.
+  local mode = "switch"
+  if type(args.worktree) == "string" then
+    mode = args.worktree
+  elseif args.create == true then
+    mode = "create"
+  end
+
   -- The base a new branch starts from. The picker resolves it -- no ref is read
   -- here -- so this only carries the answer, and it is three-valued: a string is
   -- the revision to create from, false is the picker's "start from nothing" (and
   -- travels as the empty parameter, which is gws's own default), and absent
   -- means the picker never answered -- a hand-run `rex do` -- so the configured
-  -- base is the fallback. The remote a base lives on is part of the revision's
-  -- own name (`main@origin`), so there is no word of its own for it.
+  -- base is the fallback. A switch and an attach carry it too and ignore it: the
+  -- payload has no base for either, so in practice it is empty, and the wrapper
+  -- hands a base word to a create alone. The remote a base lives on is part of
+  -- the revision's own name (`main@origin`), so there is no word of its own for
+  -- it.
   local base = ""
   if type(args.base) == "string" then
     base = args.base
@@ -381,7 +428,7 @@ function M.new_tab_argv(project, args)
 
   local argv = {
     "fish", "-c", M.new_tab_script,
-    args.create and "1" or "0",
+    mode,
     args.branch,
     base,
     agent,
@@ -997,7 +1044,13 @@ function M.setup(opts)
         prompt = { type = "string" },
         bead = { type = "string" },
         title = { type = "string" },
-        create = { type = "boolean" },
+        -- What the tab does with the branch, as one word: switch to the
+        -- worktree that already has it, create the branch, or attach a worktree
+        -- to the local branch that has none. A string, because it is read as a
+        -- word -- and because the old boolean was the wrong shape for three
+        -- answers. A payload from before the mode existed carries no `worktree`
+        -- and says `create = true` instead; new_tab_argv still reads that.
+        worktree = { type = "string" },
         -- The jj revision the new workspace is started from: a string is the
         -- revision, false is "no revision at all" (no -r, so the workspace sits
         -- on main's working copy), and absent means the picker never answered --

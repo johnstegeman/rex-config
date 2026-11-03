@@ -105,17 +105,18 @@ eq("main_worktree non-table items", M.main_worktree({ items = "x" }), nil)
 -- The tab runs a fish wrapper, and everything the flow knows reaches it as a
 -- positional parameter --
 --
---   fish -c SCRIPT <create> <branch> <base> <agent> [args] <prompt>
+--   fish -c SCRIPT <mode> <branch> <base> <agent> [args] <prompt>
 --
 -- because a parameter is the one way a branch, a base, a prompt or an agent
 -- name reaches a shell without the shell parsing it as text. fish has no $0
--- slot, so the words start at argv[4] with nothing between: the create flag,
--- the branch, the base, the agent. The base is three-valued -- a string is
--- the revision to create from, false is "start from nothing" (the wrapper
--- passes no base word to gws at all), and absent means the picker never
--- answered, so the configured base is the fallback. The remote a base lives
--- on is part of the revision's own name (`main@origin`), so it travels with
--- the base rather than as a word of its own.
+-- slot, so the words start at argv[4] with nothing between: the mode (switch,
+-- create or attach), the branch, the base, the agent. The base is
+-- three-valued -- a string is the revision to create from, false is "start
+-- from nothing" (the wrapper passes no base word to gws at all), and absent
+-- means the picker never answered, so the configured base is the fallback.
+-- The remote a base lives on is part of the revision's own name
+-- (`main@origin`), so it travels with the base rather than as a word of its
+-- own.
 do
   local saved = M.options.base
   M.options.base = nil
@@ -126,7 +127,37 @@ do
   local plain = M.new_tab_argv("proj", { branch = "feat/x1" })
   eq("the program is fish's -c", { plain[1], plain[2], plain[3] },
     { "fish", "-c", M.new_tab_script })
-  eq("no word stands between the program and the create flag", plain[4], "0")
+  eq("no word stands between the program and the mode", plain[4], "switch")
+
+  -- The three modes, said outright by the picker as one word before the
+  -- branch. They are the whole of what the wrapper dispatches on, so each is
+  -- pinned here rather than only where it is executed.
+  eq("switch is the word a worktree branch sends",
+    { M.new_tab_argv("proj", { branch = "feat/x1", worktree = "switch" })[4],
+      M.new_tab_argv("proj", { branch = "feat/x1", worktree = "switch" })[5] },
+    { "switch", "feat/x1" })
+  eq("attach is the word a branch with no worktree sends",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "attach" })[4],
+    "attach")
+  eq("create is the word a new branch sends",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "create" })[4],
+    "create")
+  -- A payload written before the mode existed says it with the old boolean:
+  -- `create = true` is a branch to make, and nothing said at all is the switch
+  -- it always was. Neither is read as a mode of its own, so an old dry run
+  -- pasted back into `rex do` still does what it said.
+  eq("an old payload's create = true is still a create",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = true })[4],
+    "create")
+  eq("a payload with no mode and no create is a switch",
+    M.new_tab_argv("proj", { branch = "feat/x1" })[4], "switch")
+  eq("a payload with create = false is a switch",
+    M.new_tab_argv("proj", { branch = "feat/x1", create = false })[4], "switch")
+  -- The mode word beats the old boolean when both are there: only a caller
+  -- that knows about modes sends both, and what it said last is the answer.
+  eq("the mode wins over the old boolean",
+    M.new_tab_argv("proj", { branch = "feat/x1", worktree = "attach",
+      create = true })[4], "attach")
 
   local answered = M.new_tab_argv("proj", { branch = "feat/x1", create = true,
     base = "origin/main", base_remote = "origin" })

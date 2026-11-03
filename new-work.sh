@@ -36,10 +36,11 @@ commands:
        [--bead ID | --prompt TEXT | --blank]
        [--agents NAME]... [--agent NAME] [--branch NAME] [--dry-run]
       open the one screen and hand its answers to Rex as one JSON object: the
-      bead (or prompt, or nothing said at all), the agent, the branch and the
-      jj revision a new workspace is started from; exit 3 when no branch or
-      agent was chosen, exit 2 when the name typed for a new branch is not a
-      valid ref
+      bead (or prompt, or nothing said at all), the agent, the branch, what the
+      tab is to do with it (switch to its worktree, attach one to the branch, or
+      create the branch) and -- for a create alone -- the jj revision it is
+      started from; exit 3 when no branch or agent was chosen, exit 2 when the
+      name typed for a new branch is not a valid ref
   composer rows --state DIR
   composer header --state DIR --project NAME [--no-base]
   composer cycle-agent --state DIR --project NAME [--agents NAME]...
@@ -350,36 +351,86 @@ wt_branches() {
   '
 }
 
+# The first half of the candidate list: the branches worktrunk already has a
+# worktree for, main's at the top (wt lists it first). A branch in this list is
+# a worktree to switch to.
+wt_branch_rows() {
+  local main=$1 wt_json=$2
+  local listing
+
+  if [ -n "$wt_json" ]; then
+    wt_branches <"$wt_json"
+  elif [ -n "$main" ]; then
+    # A repository worktrunk cannot read still has branches git can name, so a
+    # broken `wt` costs the picker its worktree rows, not the command. The loss
+    # is said out loud, naming the directory: a branch left out of the list is
+    # one the picker would offer to attach to rather than switch to, which is the
+    # wrong mode for a worktree that is right there.
+    if listing=$( cd "$main" && wt list --format=json ); then
+      printf '%s\n' "$listing" | wt_branches
+    else
+      printf '%s: could not read the worktrees of %s; only its git branches are listed\n' \
+        "$PROG" "$main" >&2
+    fi
+  fi
+}
+
+# The second half: the branches git knows about, with no worktree among them. A
+# branch in this list and not in the one above is one waiting for a workspace of
+# its own -- an attach -- so the two lists together are the whole answer to what
+# a picked name means.
+local_branch_rows() {
+  local main=$1 refs=$2
+  if [ -n "$refs" ]; then
+    cat "$refs"
+  elif [ -n "$main" ]; then
+    ( cd "$main" && git for-each-ref refs/heads --format='%(refname:short)' )
+  fi
+}
+
 # The candidate branch names for --main, or for the given saved tool output.
 # Worktree branches come first -- wt lists the main worktree at the top --
 # then the local branches git knows about. One branch can be both, so the
 # first sighting wins.
 candidate_rows() {
   local main=$1 wt_json=$2 refs=$3
-  local listing
 
   {
-    if [ -n "$wt_json" ]; then
-      wt_branches <"$wt_json"
-    elif [ -n "$main" ]; then
-      # A repository worktrunk cannot read still has branches git can name, so a
-      # broken `wt` costs the picker its worktree rows, not the command. The loss
-      # is said out loud, naming the directory: a branch left out of the list is
-      # one the picker would offer to create rather than switch to.
-      if listing=$( cd "$main" && wt list --format=json ); then
-        printf '%s\n' "$listing" | wt_branches
-      else
-        printf '%s: could not read the worktrees of %s; only its git branches are listed\n' \
-          "$PROG" "$main" >&2
-      fi
-    fi
-
-    if [ -n "$refs" ]; then
-      cat "$refs"
-    elif [ -n "$main" ]; then
-      ( cd "$main" && git for-each-ref refs/heads --format='%(refname:short)' )
-    fi
+    wt_branch_rows "$main" "$wt_json"
+    local_branch_rows "$main" "$refs"
   } | awk 'NF && !/\/HEAD$/ && !seen[$0]++'
+}
+
+# What a picked name means, as one word: switch to the worktree that already has
+# the branch, attach a worktree to the local branch that has not got one, or
+# create the branch.
+#
+# The two lists above are the answer, in that order, and asking them in that
+# order is the whole rule -- a branch worktrunk has a worktree for is a switch
+# even when git also knows the branch, and one only git knows is an attach. There
+# is no third lookup and nothing is asked of the repository beyond what the
+# picker already reads: the mode is decided once, here, and carried to the tab.
+branch_mode() {
+  local branch=$1 main=$2 wt_json=$3 refs=$4
+  local worktrees='' locals=''
+
+  # An empty list is not a failure -- a clone with no worktrees yet, or a caller
+  # with no fixture for one of the two sources, answers "create" -- but a source
+  # that could not be read is, and travels up to the caller to be said there.
+  if [ -n "$wt_json" ] || [ -n "$main" ]; then
+    worktrees=$(wt_branch_rows "$main" "$wt_json") || return 1
+  fi
+  if [ -n "$refs" ] || [ -n "$main" ]; then
+    locals=$(local_branch_rows "$main" "$refs") || return 1
+  fi
+
+  if printf '%s\n' "$worktrees" | grep -Fxq -- "$branch"; then
+    printf 'switch\n'
+  elif printf '%s\n' "$locals" | grep -Fxq -- "$branch"; then
+    printf 'attach\n'
+  else
+    printf 'create\n'
+  fi
 }
 
 # `new-work.sh candidates --main DIR [--wt-json FILE] [--refs FILE]`
@@ -387,7 +438,9 @@ candidate_rows() {
 # Every branch name that already exists, one per line, so the picker can
 # offer "switch to this one" alongside "create that one". --wt-json and
 # --refs swap the two sources for saved output, which is how the tests and
-# dry runs work.
+# dry runs work. The worktree rows are also what tells a name that has a
+# worktree (a switch) from one that only git knows (an attach), so the order
+# here is load-bearing beyond readability.
 cmd_candidates() {
   local main='' wt_json='' refs=''
 
@@ -1260,24 +1313,6 @@ cmd_fzf_answer() {
   fzf_answer "$1"
 }
 
-# The shortcuts `wt switch` resolves itself -- ^ the default branch, - the previous
-# worktree, @ the current one, pr:N and mr:N the branch of a pull or merge
-# request -- are answers rather than names to create: they are neither refs that
-# could be made nor names `git check-ref-format` accepts, and worktrunk is the one
-# that knows what they mean.
-is_wt_shortcut() {
-  case $1 in
-    '^' | '-' | '@') return 0 ;;
-    pr:* | mr:*)
-      case ${1#*:} in
-        '' | *[!0-9]*) return 1 ;;
-        *) return 0 ;;
-      esac
-      ;;
-  esac
-  return 1
-}
-
 # Whether worktrunk could create a branch with this name.
 # `git check-ref-format --branch` is the test, with one twist: it *expands* a
 # name like @{-1} and prints what that resolved to, so only an answer equal to
@@ -1677,11 +1712,6 @@ cmd_pick() {
     agent_set=1
   fi
 
-  local candidates
-  if ! candidates=$(candidate_rows "$main" "$wt_json" "$refs"); then
-    die "pick: could not list the branches of $main"
-  fi
-
   # The screen's branch wins over --branch when it was edited: what the header
   # showed while the pick was being made is what gets handed back, or the float
   # would promise one branch and the tab create another.
@@ -1747,19 +1777,25 @@ cmd_pick() {
     exit "$cancelled"
   fi
 
-  # An exact match is a worktree that already exists: switch to it. So is a
-  # worktrunk shortcut -- worktrunk resolves what ^, -, @, pr:N and mr:N mean --
-  # and neither is a name to check or a ref to create. Anything else is a name to
-  # create, even when it looks like something on the list.
-  local create=true
-  if is_wt_shortcut "$branch" ||
-    printf '%s\n' "$candidates" | grep -Fxq -- "$branch"; then
-    create=false
+  # What the name means, decided here and once: switch to the worktree that
+  # already has it, make a worktree for a branch only git knows (an attach), or
+  # create the branch. The two lists branch_mode reads are the ones candidates
+  # prints, so the answer is the same list the picker offers -- there is no
+  # second look at the repository, and no worktrunk shortcut: ^, -, @, pr:N and
+  # mr:N named things worktrunk resolved for us, and nothing here asks it to any
+  # more. A name it would have resolved is just a name now, and an impossible one
+  # is refused on the line below.
+  local mode
+  if ! mode=$(branch_mode "$branch" "$main" "$wt_json" "$refs"); then
+    die "pick: could not list the branches of $main"
   fi
 
   # A name to create has to be one worktrunk can actually create: better to say
   # so here, where the float is still on screen, than in the new tab's output.
-  if [ "$create" = true ] && ! valid_branch_name "$branch"; then
+  # Only a create is checked -- a switch and an attach name a ref that exists,
+  # and `git check-ref-format` has nothing to say about a branch that is already
+  # there.
+  if [ "$mode" = create ] && ! valid_branch_name "$branch"; then
     printf '%s: not a valid branch name: %s\n' "$PROG" "$branch" >&2
     exit 2
   fi
@@ -1789,6 +1825,12 @@ cmd_pick() {
   # of those: it says "an agent, and nothing to say", so it carries the blank
   # flag and no prompt at all -- which is how the tab knows to send the agent no
   # prompt word rather than the configured template.
+  #
+  # The base travels only with a create, and is absent rather than false
+  # otherwise: a switch and an attach name a branch that already exists, so there
+  # is no revision to start it from, and a caller reading the payload cannot
+  # confuse "nothing to create from" with "created from nothing". `worktree` is
+  # the mode itself, one word, and the only thing the tab dispatches on.
   local payload
   payload=$(jq -cn \
     --arg project "$project" \
@@ -1797,7 +1839,7 @@ cmd_pick() {
     --arg branch "$branch" \
     --arg bead "$bead" \
     --arg title "$title" \
-    --argjson create "$create" \
+    --arg worktree "$mode" \
     --arg base "$base_ref" \
     --argjson base_default "$base_default" \
     --arg prompt "$prompt" \
@@ -1806,8 +1848,10 @@ cmd_pick() {
     --arg agent "$agent" \
     --argjson agent_set "$agent_set" \
     '{project: $project, root: $root, main: $main, branch: $branch,
-      bead: $bead, title: $title, create: $create,
-      base: (if $base_default == 1 then false else $base end)}
+      bead: $bead, title: $title, worktree: $worktree}
+     + (if $worktree == "create"
+        then {base: (if $base_default == 1 then false else $base end)}
+        else {} end)
      + (if $prompt_set == 1 then {prompt: $prompt} else {} end)
      + (if $blank_set == 1 then {blank: true} else {} end)
      + (if $agent_set == 1 then {agent: $agent} else {} end)')

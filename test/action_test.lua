@@ -212,7 +212,7 @@ local BEAD = "pmm-iris-58h"
 local function payload(overrides)
   local args = {
     project = PROJECT, root = ROOT, main = MAIN,
-    branch = BRANCH, bead = BEAD, title = "Diff the thing", create = true,
+    branch = BRANCH, bead = BEAD, title = "Diff the thing", worktree = "create",
   }
   for key, value in pairs(overrides or {}) do args[key] = value end
   return args
@@ -334,11 +334,11 @@ eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
 -- new_tab_argv() --------------------------------------------------------------
 
 -- The tab does not run one program any more: it runs a fish wrapper that
--- creates or switches the worktree, starts the agent in it, and leaves a login
--- shell behind when the agent exits. Everything the flow knows travels as a
--- positional parameter --
+-- switches to, attaches or creates the worktree, starts the agent in it, and
+-- leaves a login shell behind when the agent exits. Everything the flow knows
+-- travels as a positional parameter --
 --
---   fish -c SCRIPT <create 0|1> <branch> <base> <agent> <agent args…>
+--   fish -c SCRIPT <mode> <branch> <base> <agent> <agent args…>
 --
 -- because that is the only way a branch, a prompt or an agent name can reach
 -- the wrapper without any shell parsing it as text. These assertions pin the
@@ -346,41 +346,41 @@ eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
 
 -- The program fish is handed, as the module builds it: the one string an
 -- interpolating implementation would have rewritten with the answer.
-local WRAPPER = M.new_tab_argv(PROJECT, { branch = BRANCH, create = false })[3]
+local WRAPPER = M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "switch" })[3]
 eq("the wrapper program is text", type(WRAPPER), "string")
 
 -- fish has no $0 slot to fill, so no spare word sits between the program and
--- the first parameter: the word after `-c SCRIPT` is already the create flag.
-eq("fish takes no $0: the create flag follows the program",
+-- the first parameter: the word after `-c SCRIPT` is already the mode.
+eq("fish takes no $0: the mode follows the program",
   { M.new_tab_argv(PROJECT, { branch = BRANCH })[1],
     M.new_tab_argv(PROJECT, { branch = BRANCH })[2],
     M.new_tab_argv(PROJECT, { branch = BRANCH })[4] },
-  { "fish", "-c", "0" })
+  { "fish", "-c", "switch" })
 
 eq("new_tab_argv for an existing worktree",
-  M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-  { "fish", "-c", WRAPPER, "0", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
+  M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "switch", bead = BEAD, title = "Diff" }),
+  { "fish", "-c", WRAPPER, "switch", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
 
 -- A create with no base answered and none configured: the picker resolves the
 -- default itself, so the wrapper is told nothing and passes gws no base word.
 eq("new_tab_argv for a new branch",
-  M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD, title = "Diff" }),
-  { "fish", "-c", WRAPPER, "1", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
+  M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "create", bead = BEAD, title = "Diff" }),
+  { "fish", "-c", WRAPPER, "create", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
 
 eq("new_tab_argv without a bead asks for plain brainstorming",
-  M.new_tab_argv(PROJECT, { branch = "x", create = true, bead = "" }),
-  { "fish", "-c", WRAPPER, "1", "x", "", "pi", "/brainstorming" })
+  M.new_tab_argv(PROJECT, { branch = "x", worktree = "create", bead = "" }),
+  { "fish", "-c", WRAPPER, "create", "x", "", "pi", "/brainstorming" })
 
 -- A missing bead and an empty one are the same answer: no bead.
 eq("new_tab_argv with no bead field at all",
-  M.new_tab_argv(PROJECT, { branch = "x", create = false }),
-  { "fish", "-c", WRAPPER, "0", "x", "", "pi", "/brainstorming" })
+  M.new_tab_argv(PROJECT, { branch = "x", worktree = "switch" }),
+  { "fish", "-c", WRAPPER, "switch", "x", "", "pi", "/brainstorming" })
 
--- A hand-back always says whether to create, but leaving the field out must not
--- read as "create": that would add a worktree nobody asked for.
-eq("new_tab_argv with no create field switches, creating nothing",
+-- A hand-back always says which mode it means, but leaving the field out must
+-- not read as "create": that would add a worktree nobody asked for.
+eq("new_tab_argv with no mode field switches, creating nothing",
   M.new_tab_argv(PROJECT, { branch = "x", bead = "" }),
-  { "fish", "-c", WRAPPER, "0", "x", "", "pi", "/brainstorming" })
+  { "fish", "-c", WRAPPER, "switch", "x", "", "pi", "/brainstorming" })
 
 -- base = false is the picker's "start from nothing": an empty base parameter,
 -- which is the wrapper's "no base word at all" -- and no remote word either,
@@ -389,9 +389,9 @@ do
   local base = M.options.base
   M.options.base = false
   eq("no base parameter when the option says so",
-    M.new_tab_argv(PROJECT, { branch = "x", create = true })[6], "")
+    M.new_tab_argv(PROJECT, { branch = "x", worktree = "create" })[6], "")
   eq("no remote word: the agent follows the empty base",
-    M.new_tab_argv(PROJECT, { branch = "x", create = true })[7], "pi")
+    M.new_tab_argv(PROJECT, { branch = "x", worktree = "create" })[7], "pi")
   M.options.base = base
 end
 
@@ -405,7 +405,7 @@ do
   M.options.bead_prompt = 'work on {branch}: "don\'t" $(id)\nsecond line; {id}'
   M.options.agent_args = { "--thinking", "high" }
   local prompt = 'work on bug/58h: "don\'t" $(id)\nsecond line; ' .. BEAD
-  local argv = M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD })
+  local argv = M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "create", bead = BEAD })
   eq("the branch is one argument", argv[5], BRANCH)
   eq("the agent's arguments and the prompt are arguments too",
     { argv[7], argv[8], argv[9], argv[10] }, { "pi", "--thinking", "high", prompt })
@@ -425,8 +425,8 @@ do
   M.options.bead_prompt = "work on {project}/{branch} for {id}: {title}"
   M.options.agent = "claude"
   eq("new_tab_argv renders the configured prompt",
-    M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-    { "fish", "-c", WRAPPER, "0", BRANCH, "", "claude",
+    M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "switch", bead = BEAD, title = "Diff" }),
+    { "fish", "-c", WRAPPER, "switch", BRANCH, "", "claude",
       "work on pmm-iris/bug/58h for " .. BEAD .. ": Diff" })
   M.options.bead_prompt, M.options.agent = bead_prompt, agent
 end
@@ -447,12 +447,12 @@ end
 -- tab rather than changing it -- and the prompt typed there is what the agent is
 -- asked, in place of either template.
 eq("new_tab_argv starts the agent the picker chose",
-  M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff", agent = "claude" }),
-  { "fish", "-c", WRAPPER, "0", BRANCH, "", "claude", "/brainstorming for bead " .. BEAD })
+  M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "switch", bead = BEAD, title = "Diff", agent = "claude" }),
+  { "fish", "-c", WRAPPER, "switch", BRANCH, "", "claude", "/brainstorming for bead " .. BEAD })
 
 eq("new_tab_argv sends the prompt the picker was given",
-  M.new_tab_argv(PROJECT, { branch = "x", create = true, prompt = "why is the guard flaky?" }),
-  { "fish", "-c", WRAPPER, "1", "x", "", "pi", "why is the guard flaky?" })
+  M.new_tab_argv(PROJECT, { branch = "x", worktree = "create", prompt = "why is the guard flaky?" }),
+  { "fish", "-c", WRAPPER, "create", "x", "", "pi", "why is the guard flaky?" })
 
 eq("a typed prompt wins over the bead's",
   M.new_tab_argv(PROJECT, { branch = "x", bead = BEAD, title = "Diff", prompt = "just look" })[8],
@@ -469,7 +469,7 @@ do
   M.options.agent_args = { "--thinking", "high" }
   eq("new_tab_argv with no agent",
     M.new_tab_argv(PROJECT, { branch = "x", agent = "" }),
-    { "fish", "-c", WRAPPER, "0", "x", "", "", "" })
+    { "fish", "-c", WRAPPER, "switch", "x", "", "", "" })
   eq("new_tab_argv with no agent keeps a prompt that was typed",
     M.new_tab_argv(PROJECT, { branch = "x", agent = "", prompt = "look first" })[8],
     "look first")
@@ -533,7 +533,7 @@ do
   eq("the tab's block is labelled too", request.layout.block.label, BRANCH)
   eq("the tab starts in the main worktree", options.cwd, MAIN)
   eq("the tab runs the wrapper", options.command, M.new_tab_argv(PROJECT, payload()))
-  eq("the wrapper is asked to create the worktree", options.command[4], "1")
+  eq("the wrapper is asked to create the worktree", options.command[4], "create")
   eq("the wrapper is given the branch", options.command[5], BRANCH)
   eq("the wrapper is given the prompt", options.command[#options.command],
     "/brainstorming for bead " .. BEAD)
@@ -713,14 +713,30 @@ eq("the agent the picker chose is the one the tab starts",
 eq("the configured agent is left alone", M.options.agent, "pi")
 
 -- Switching to a worktree that already exists, with no tab for it yet: the tab
--- is made without --create, so no second worktree appears.
+-- is made in switch mode, so no second worktree appears.
 stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "cli" }, payload{ create = false })
+pcall(M.work_new_go, { origin = "cli" }, payload{ worktree = "switch" })
 eq("an existing worktree is switched to",
   request_of(stub, "session.new_window").layout.block.options.command,
-  M.new_tab_argv(PROJECT, payload{ create = false }))
+  M.new_tab_argv(PROJECT, payload{ worktree = "switch" }))
 eq("an existing worktree sends no base",
   request_of(stub, "session.new_window").layout.block.options.command[6], "")
+
+-- A hand-run payload from before the mode existed: `rex do work_new_go --args`
+-- with `create = true` and no `worktree`. An --args object is not filtered
+-- against the declaration, so the old boolean reaches the action, and the argv
+-- builder is where it is read -- so the tab still creates the branch rather than
+-- switching to a worktree that is not there.
+do
+  local old = payload()
+  old.worktree = nil
+  old.create = true
+  stub = new_branch_stub()
+  pcall(M.work_new_go, { origin = "cli" }, old)
+  eq("an old payload's create = true still makes the worktree",
+    request_of(stub, "session.new_window").layout.block.options.command[4],
+    "create")
+end
 
 -- A session that cannot be shown leaves the tab in place and says so, rather
 -- than throwing the work away.
@@ -801,11 +817,16 @@ do
   end
   eq("work_new_go is registered", type(go), "table")
   eq("work_new_go declares its arguments", sorted_keys(go and go.args and go.args.properties),
-    { "agent", "base", "bead", "blank", "branch", "create",
-      "main", "project", "prompt", "root", "title" })
+    { "agent", "base", "bead", "blank", "branch", "main",
+      "project", "prompt", "root", "title", "worktree" })
   eq("work_new_go requires what the picker always sends",
     go and go.args.required, { "project", "root", "main", "branch" })
-  eq("the arguments are typed", go and go.args.properties.create, { type = "boolean" })
+  eq("the arguments are typed", go and go.args.properties.worktree, { type = "string" })
+  -- The mode is what the tab dispatches on, so it is a string and not the old
+  -- boolean: a declaration left as `create` would filter the mode out before the
+  -- action saw it, and every tab would switch.
+  eq("the old create boolean is gone",
+    go and go.args.properties.create, nil)
   eq("blank is declared a boolean", go and go.args.properties.blank,
     { type = "boolean" })
   eq("base admits both the revision and the no-revision sentinel",

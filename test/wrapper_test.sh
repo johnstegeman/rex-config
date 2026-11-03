@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # The tab's command: the fish wrapper init.lua hands to Rex.
 #
-# The wrapper exists so the pane outlives the agent: gws creates the worktree or
-# worktrunk switches to it, the agent runs in it, and a login shell stays behind,
-# in the worktree, with everything printed above it still readable. It is run
-# here for real -- with a stand-in `gws` for a create, a stand-in `wt` that
-# answers the way worktrunk does, a stand-in agent, and a stand-in SHELL --
-# because what matters is shell behaviour: which directory the agent and the
-# shell end up in, which words reach `gws` and `wt switch`, that a failed create
-# or switch never starts the agent, and that the answer (a branch, a prompt) is
-# data and not program text.
+# The wrapper exists so the pane outlives the agent: gws creates or attaches to
+# the worktree -- or worktrunk switches to one that already exists -- the agent
+# runs in it, and a login shell stays behind, in the worktree, with everything
+# printed above it still readable. It is run here for real -- with a stand-in
+# `gws` for a create or an attach, a stand-in `wt` that answers the way worktrunk
+# does, a stand-in agent, and a stand-in SHELL -- because what matters is shell
+# behaviour: which directory the agent and the shell end up in, which words reach
+# `gws` and `wt switch`, that a failed create, attach or switch never starts the
+# agent, and that the answer (a branch, a prompt) is data and not program text.
 #
 # The program under test is taken out of the argv the module builds, so this
 # file runs exactly the string Rex hands to `fish -c`.
@@ -233,7 +233,7 @@ chmod +x "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
 
 # Run the wrapper the way Rex runs the tab: as an argv with no shell in between,
 # the tab's own directory as cwd, and the answer under test as its parameters --
-# the three positional words (create, branch, base) and then the agent, its
+# the three positional words (mode, branch, base) and then the agent, its
 # arguments and the prompt. TEST_SHELL replaces the stand-in shell or
 # UNSET_SHELL takes SHELL away, TEST_WT_PATH (explicitly empty included) and
 # WT_FAIL choose what worktrunk reports, GWS_PATH, GWS_FAIL and GWS_WRITE choose
@@ -243,7 +243,7 @@ chmod +x "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
 # cleared first, so an assertion that something never ran reads that run alone.
 # Sets $status and leaves stdout in $tmp/out, stderr in $tmp/err.
 run_wrapper() {
-  local create=$1 branch=$2 base=$3
+  local mode=$1 branch=$2 base=$3
   shift 3
   rm -f "$tmp/gws-words" "$tmp/gws-env" "$tmp/wt-words" "$tmp/git-calls"
   (
@@ -266,7 +266,7 @@ run_wrapper() {
     GWS_FAIL=${GWS_FAIL:-0} GWS_WRITE=${GWS_WRITE:-1}
     export PATH fish_function_path WT_WORDS WT_PATH WT_FAIL WT_ENV GIT_CALLS
     export GWS_WORDS GWS_PATH GWS_ENV GWS_MAIN GWS_CD GWS_FAIL GWS_WRITE
-    "$fish_bin" -c "$script" "$create" "$branch" "$base" "$@"
+    "$fish_bin" -c "$script" "$mode" "$branch" "$base" "$@"
   ) >"$tmp/out" 2>"$tmp/err" <"${STDIN_FROM:-/dev/null}"
   status=$?
 }
@@ -277,7 +277,7 @@ run_wrapper() {
 # of the user's own fish functions (`rm` is a `trash` wrapper here, `cd` a
 # jumper) would fail: an error-looking line on every create.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 @ agent "/brainstorming for bead p-1"
+run_wrapper create feat/x1 @ agent "/brainstorming for bead p-1"
 if [ "$status" -ne 0 ] || [ -s "$tmp/err" ]; then
   fail "a create run finishes without saying anything" \
     "exit $status: stderr: $(cat "$tmp/err")"
@@ -354,7 +354,7 @@ fi
 # empty and no base word is sent -- an empty word would be a revision jj has no
 # name for.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 "" agent "p"
+run_wrapper create feat/x1 "" agent "p"
 printf 'feat/x1\n--path-file\n%s\n' "$(sed -n 3p "$tmp/gws-words")" >"$tmp/want"
 if ! diff -u "$tmp/want" "$tmp/gws-words"; then
   fail "a create with an empty base sends gws no base word" \
@@ -368,7 +368,7 @@ fi
 # buys from the remote is gws's business -- the wrapper reads the revision it is
 # handed and never derives a remote from its shape.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 origin/main agent "/brainstorming"
+run_wrapper create feat/x1 origin/main agent "/brainstorming"
 if [ "$(sed -n 2p "$tmp/gws-words")" != "origin/main" ]; then
   fail "the base reaches gws verbatim" "gws was given: $(cat "$tmp/gws-words" 2>/dev/null)"
 fi
@@ -377,7 +377,7 @@ fi
 # prevent, and it is exported before the switch, so worktrunk and the hooks it
 # runs inherit it too.
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 origin/main agent "/brainstorming"
+run_wrapper switch feat/x1 origin/main agent "/brainstorming"
 if ! grep -qx 'GIT_TERMINAL_PROMPT=0' "$tmp/wt-env"; then
   fail "wt runs with GIT_TERMINAL_PROMPT=0" "recorded: $(cat "$tmp/wt-env" 2>/dev/null)"
 fi
@@ -391,7 +391,7 @@ fi
 # production, which is why nothing is done about it -- but the assertion is that
 # directory, not "somewhere".
 ran=$((ran + 1))
-GWS_FAIL=1 run_wrapper 1 feat/x1 @ agent "/brainstorming"
+GWS_FAIL=1 run_wrapper create feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a failing gws starts nothing and leaves a shell" "exit $status: $(cat "$tmp/err")"
 fi
@@ -418,7 +418,7 @@ fi
 # and the line names the step that lost the path rather than the create. The
 # shell opens in the workspace gws moved to, exactly as after a failed create.
 ran=$((ran + 1))
-GWS_WRITE=0 run_wrapper 1 feat/x1 @ agent "/brainstorming"
+GWS_WRITE=0 run_wrapper create feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $main" "$tmp/out"; then
   fail "a create whose path file was never written starts nothing" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -440,7 +440,7 @@ fi
 # answers "--base flag is only used with --create, ignoring" to anything else,
 # which would be a line of noise on the pane for nothing).
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 @ agent "/brainstorming"
+run_wrapper switch feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "an existing-worktree run finishes" "exit $status: $(cat "$tmp/err")"
 fi
@@ -464,10 +464,92 @@ if ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "an existing worktree ends in a shell there too" "output: $(cat "$tmp/out")"
 fi
 
+# A local branch with no worktree yet: gws's attach, which makes the workspace
+# without creating the branch. It is the second thing gws is asked to do, so it
+# is the second set of words pinned -- and it is given no base word, even with
+# one handed to the wrapper: the branch exists, so there is nothing to create it
+# from, and a revision word would be an argument the real gws reads as the base
+# of a branch it was told not to make. The base is non-empty here precisely so
+# that a wrapper which passed it on would fail this case.
+ran=$((ran + 1))
+run_wrapper attach feat/x1 origin/main agent "/brainstorming"
+if [ "$status" -ne 0 ]; then
+  fail "an attach run finishes" "exit $status: $(cat "$tmp/err")"
+fi
+
+ran=$((ran + 1))
+printf -- '--attach\nfeat/x1\n--path-file\n%s\n' "$(sed -n 4p "$tmp/gws-words" 2>/dev/null)" >"$tmp/want"
+if ! diff -u "$tmp/want" "$tmp/gws-words"; then
+  fail "an attach never sends a base word" \
+    "gws was given: $(cat "$tmp/gws-words" 2>/dev/null)"
+fi
+
+ran=$((ran + 1))
+attach_path_file=$(sed -n 4p "$tmp/gws-words" 2>/dev/null)
+case $attach_path_file in
+  /*) : ;;
+  *)
+    fail "an attach names a path file of its own, absolutely" \
+      "gws was given: $(cat "$tmp/gws-words" 2>/dev/null)"
+    ;;
+esac
+
+ran=$((ran + 1))
+if [ -n "$attach_path_file" ] && [ -e "$attach_path_file" ]; then
+  fail "an attach's path file is cleaned up" "left behind: $attach_path_file"
+fi
+
+# wt is the switch's alone: an attach is a branch worktrunk has no worktree for,
+# so asking it to switch would fail on the pane after the workspace was made.
+ran=$((ran + 1))
+if [ -e "$tmp/wt-words" ]; then
+  fail "an attach never calls wt" "wt was given: $(cat "$tmp/wt-words" 2>/dev/null)"
+fi
+
+ran=$((ran + 1))
+if ! grep -qx "agent pwd: $worktree" "$tmp/out" \
+  || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "an attach starts the agent and leaves the shell in the worktree gws named" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
+# An attach that fails is the same failure a create's is: gws said why on this
+# pane, nothing is started in a directory nobody named, and the shell still
+# opens so the pane is usable.
+ran=$((ran + 1))
+GWS_FAIL=1 run_wrapper attach feat/x1 origin/main agent "/brainstorming"
+if grep -q "agent pwd" "$tmp/out"; then
+  fail "a failing attach never starts the agent" "output: $(cat "$tmp/out")"
+fi
+ran=$((ran + 1))
+if ! grep -qxF 'rex-config: gws feat/x1 failed (exit 1); not starting agent' "$tmp/err"; then
+  fail "a failing attach names gws, its exit status and what is not started" \
+    "stderr: $(cat "$tmp/err")"
+fi
+
+# A first word that is none of the three: a caller that does not know the
+# contract is refused with the same line too few words get, before any program
+# is run -- and the pane still ends in a shell rather than dying.
+ran=$((ran + 1))
+run_wrapper attachh feat/x1 origin/main agent "/brainstorming"
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $start" "$tmp/out"; then
+  fail "an unknown mode still leaves a shell" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/gws-words" ] || [ -e "$tmp/wt-words" ]; then
+  fail "an unknown mode runs nothing" \
+    "gws: $(cat "$tmp/gws-words" 2>/dev/null) wt: $(cat "$tmp/wt-words" 2>/dev/null)"
+fi
+ran=$((ran + 1))
+if ! grep -qxF 'rex-config: the tab needs create, branch and base' "$tmp/err"; then
+  fail "an unknown mode names the contract" "stderr: $(cat "$tmp/err")"
+fi
+
 # A switch that fails: worktrunk has said why on stderr, the agent is not
 # started at all, and the shell still opens in the tab's directory.
 ran=$((ran + 1))
-WT_FAIL=1 run_wrapper 0 nope/nothing @ agent "/brainstorming"
+WT_FAIL=1 run_wrapper switch nope/nothing @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a failed switch still leaves a shell" "exit $status: $(cat "$tmp/err")"
 fi
@@ -502,7 +584,7 @@ fi
 # decide the PATH the wrapper sees, so a run cannot take jq away. The empty path
 # is the branch of that message that can be reached honestly.)
 ran=$((ran + 1))
-TEST_WT_PATH= run_wrapper 0 feat/x1 @ agent "/brainstorming"
+TEST_WT_PATH= run_wrapper switch feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a reply with no path still leaves a shell" "exit $status: $(cat "$tmp/err")"
 fi
@@ -531,7 +613,7 @@ fi
 # shape that is a path and not a flag.
 ran=$((ran + 1))
 mkdir -p "$start/-dash"
-TEST_WT_PATH=-dash run_wrapper 0 feat/x1 "" agent "/brainstorming"
+TEST_WT_PATH=-dash run_wrapper switch feat/x1 "" agent "/brainstorming"
 if ! grep -qx "agent pwd: $start/-dash" "$tmp/out"; then
   fail "a worktree path starting with a dash is entered" \
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -541,7 +623,7 @@ fi
 # between the create and the cd. The agent must not run there either, and the pane
 # still gets its shell, in the workspace gws moved to.
 ran=$((ran + 1))
-GWS_PATH=/nonexistent/nope run_wrapper 1 feat/x1 @ agent "/brainstorming"
+GWS_PATH=/nonexistent/nope run_wrapper create feat/x1 @ agent "/brainstorming"
 if [ "$status" -ne 0 ]; then
   fail "a worktree that cannot be entered still leaves a shell" \
     "exit $status: $(cat "$tmp/err")"
@@ -589,7 +671,7 @@ ran=$((ran + 1))
 cat >"$tmp/fallback" <<'EOF'
 printf 'fallback shell pwd: %s\n' "$PWD"
 EOF
-TEST_SHELL=/nonexistent/shell STDIN_FROM=$tmp/fallback run_wrapper 0 feat/x1 "" agent "/brainstorming"
+TEST_SHELL=/nonexistent/shell STDIN_FROM=$tmp/fallback run_wrapper switch feat/x1 "" agent "/brainstorming"
 if [ "$status" -ne 0 ] || ! grep -qx "fallback shell pwd: $worktree" "$tmp/out"; then
   fail "a SHELL that is not installed still leaves a shell" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -601,7 +683,7 @@ ran=$((ran + 1))
 cat >"$tmp/fallback-unset" <<'EOF'
 printf 'unset-shell pwd: %s\n' "$PWD"
 EOF
-UNSET_SHELL=1 STDIN_FROM=$tmp/fallback-unset run_wrapper 0 feat/x1 "" agent "/brainstorming"
+UNSET_SHELL=1 STDIN_FROM=$tmp/fallback-unset run_wrapper switch feat/x1 "" agent "/brainstorming"
 if [ "$status" -ne 0 ] || ! grep -qx "unset-shell pwd: $worktree" "$tmp/out"; then
   fail "no \$SHELL still leaves a usable login shell" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -610,7 +692,7 @@ fi
 # The answer is data: a branch and a prompt full of shell syntax reach worktrunk
 # and the agent as themselves, and none of it is executed.
 ran=$((ran + 1))
-run_wrapper 0 'feat/x$(id);echo pwned' "" agent 'p "quotes" $(id) `id`;echo pwned'
+run_wrapper switch 'feat/x$(id);echo pwned' "" agent 'p "quotes" $(id) `id`;echo pwned'
 if grep -qxF "agent arg: p \"quotes\" \$(id) \`id\`;echo pwned" "$tmp/out" \
   && [ "$(sed -n 2p "$tmp/wt-words")" = 'feat/x$(id);echo pwned' ] \
   && ! grep -q '^pwned$' "$tmp/out" "$tmp/err"; then
@@ -628,7 +710,7 @@ fi
 build_tab_words() {
   init="$PWD/init.lua" want_blank=$1 want_prompt=$2 lua -e '
     local M = dofile(os.getenv("init"))
-    local args = { branch = "feat/x1", create = false, agent = "agent",
+    local args = { branch = "feat/x1", worktree = "switch", agent = "agent",
       prompt = os.getenv("want_prompt") }
     if os.getenv("want_blank") == "1" then args.blank = true end
     local argv = M.new_tab_argv("proj", args)
@@ -698,7 +780,7 @@ interrupt_run() {
     READY=$tmp/ready GOT_INT=$tmp/got-int
     export PATH SHELL fish_function_path WT_WORDS WT_PATH WT_FAIL WT_ENV GIT_CALLS
     export READY GOT_INT
-    "$fish_bin" -c "$script" 0 feat/x1 "" "$agent_name" "$@" &
+    "$fish_bin" -c "$script" switch feat/x1 "" "$agent_name" "$@" &
     local child=$! waited=0
     while [ ! -e "$tmp/ready" ] && [ "$waited" -lt 100 ]; do
       sleep 0.1
@@ -760,7 +842,7 @@ fi
 # the prompt -- which has nowhere to go -- is printed above that shell rather
 # than disappearing with the float that collected it.
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 "" "" "look before you leap"
+run_wrapper switch feat/x1 "" "" "look before you leap"
 if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "no agent still lands in a shell in the worktree" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -781,7 +863,7 @@ fi
 # The create is gws's, not the agent's, so a create still happens -- and with no
 # agent there is no agent's arguments to give to anyone.
 ran=$((ran + 1))
-run_wrapper 1 feat/x1 @ "" "p"
+run_wrapper create feat/x1 @ "" "p"
 ran=$((ran + 1))
 if [ "$(sed -n 1p "$tmp/gws-words" 2>/dev/null)" != "feat/x1" ]; then
   fail "no agent still asks gws for the worktree" \
@@ -797,7 +879,7 @@ fi
 # An empty prompt is nothing to say: the pane is the shell, with no line about a
 # prompt nobody wrote.
 ran=$((ran + 1))
-run_wrapper 0 feat/x1 "" "" ""
+run_wrapper switch feat/x1 "" "" ""
 if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
   fail "no agent and no prompt still lands in the shell" \
     "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
@@ -808,7 +890,7 @@ fi
 # A create that fails with no agent names what is not started: "not starting "
 # followed by nothing is not a sentence.
 ran=$((ran + 1))
-GWS_FAIL=1 run_wrapper 1 nope/nothing @ "" "/brainstorming"
+GWS_FAIL=1 run_wrapper create nope/nothing @ "" "/brainstorming"
 if ! grep -q 'gws nope/nothing failed' "$tmp/err"; then
   fail "a failing gws with no agent says why" "stderr: $(cat "$tmp/err")"
 elif ! grep -q 'not starting an agent' "$tmp/err"; then

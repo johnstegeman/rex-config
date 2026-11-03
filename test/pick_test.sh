@@ -243,8 +243,10 @@ if [ -e "$tmp/rex-args" ]; then
   fail "empty branch never calls rex" "rex saw: $(sed -n '1,4p' "$tmp/rex-args")"
 fi
 
-# (b) A branch that is exactly on the candidate list switches to the worktree
-# that already has it; the bead and its title ride along.
+# (b) A branch that is on the list only as a local ref -- git knows it and
+# worktrunk has no worktree for it -- is an attach: the bead and its title
+# ride along, and no base does, because the branch is not being made from
+# anything.
 run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch bug/a4l --dry-run
 if [ "$status" -ne 0 ]; then
   fail "exact branch exits 0" "exit $status: $(cat "$tmp/err")"
@@ -259,15 +261,15 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "exact branch: branch" "$json" '.branch == "bug/a4l"'
-  assert_json "exact branch: create is false" "$json" '.create == false'
+  assert_json "exact branch: an attach" "$json" '.worktree == "attach"'
   assert_json "exact branch: bead" "$json" '.bead == "pmm-iris-a4l"'
   assert_json "exact branch: title" "$json" \
     '.title == "Treat index/catalog pages as non-extractable"'
   assert_json "exact branch: project, root, main" "$json" \
     '.project == "demo" and .root == "/p/demo" and .main == "/p/demo/main"'
-  assert_json "exact branch: exactly the nine keys" "$json" \
-    'keys == ["base", "bead", "branch", "create", "main",
-              "project", "root", "title"]'
+  assert_json "exact branch: exactly the seven keys, no base and no create" \
+    "$json" 'keys == ["bead", "branch", "main", "project", "root",
+              "title", "worktree"]'
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/rex-args" ]; then
@@ -275,15 +277,16 @@ if [ -e "$tmp/rex-args" ]; then
 fi
 
 # (b2) A name that merely begins like a candidate is not that candidate: an
-# exact match is a switch, a fuzzy one is a branch to create. `bug/a4` is a
-# prefix of `bug/a4l`, so a substring match would call it existing.
+# exact match is one of the two lists, a fuzzy one is a branch to create.
+# `bug/a4` is a prefix of `bug/a4l`, so a substring match would call it
+# existing.
 run_pick test/fixtures/ready.json --bead '' --branch bug/a4 --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "fuzzy prefix prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "fuzzy prefix: branch" "$json" '.branch == "bug/a4"'
-  assert_json "fuzzy prefix: create is true" "$json" '.create == true'
+  assert_json "fuzzy prefix: a create" "$json" '.worktree == "create"'
 fi
 
 # (b3) A new branch name has to be a ref worktrunk can create; the script says
@@ -302,38 +305,114 @@ if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
     "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
 fi
 
-# (b4) The worktrunk shortcuts are answers, not names: ^ is the default branch,
-# - the previous worktree, @ the current one, pr:N a pull request's branch. None
-# of them is a ref to create and git refuses most of them, so they are handed to
-# worktrunk as the switch they are.
-pick_shortcut() {
-  local name=$1 branch=$2 filter=$3
-  ran=$((ran + 1))
-  run_pick test/fixtures/ready.json --bead '' --branch "$branch" --dry-run
-  if [ "$status" -ne 0 ]; then
-    fail "the $name shortcut is accepted" "exit $status: $(cat "$tmp/err")"
-    return
-  fi
-  if ! json=$(payload_of "$(cat "$tmp/out")"); then
-    fail "the $name shortcut prints runnable rex do work_new_go --args" \
-      "stdout: $(cat "$tmp/out")"
-    return
-  fi
-  assert_json "the $name shortcut is handed over as typed" "$json" "$filter"
-  assert_json "the $name shortcut is a switch" "$json" '.create == false'
+# The three meanings a picked name can have, one name each: a branch worktrunk
+# already has a worktree for, a local branch with no worktree, and a name
+# nothing knows yet. They are written here rather than added to the shared
+# fixtures, because the cases above count the rows of those. main is a second
+# worktree branch, so a list holding only one name cannot pass by accident.
+cat >"$tmp/mode-wt.json" <<'EOF'
+{
+  "schema": 2,
+  "items": [
+    {"branch": "main", "worktree": {"path": "/p/demo/main", "main": true}},
+    {"branch": "feat/on-worktree",
+     "worktree": {"path": "/p/demo/feat-on-worktree", "main": false}}
+  ]
 }
-pick_shortcut 'default branch' '^' '.branch == "^"'
-pick_shortcut 'previous worktree' '-' '.branch == "-"'
-pick_shortcut 'current worktree' '@' '.branch == "@"'
-pick_shortcut 'pull request' 'pr:123' '.branch == "pr:123"'
+EOF
+printf 'feat/bare-branch\n' >"$tmp/mode-refs"
 
-# A pr: that is not a number is not a shortcut, and no branch name either.
+# A pick with the branch already answered, over those three lists and the empty
+# ready list above. A dry run, so nothing is handed back and no stand-in rex is
+# needed to make it -- and the base bookmarks are the ones above, so a create has
+# a base to carry.
+pick_mode() {
+  local mode_branch=$1
+  shift
+  ran=$((ran + 1))
+  rm -f "$tmp/rex-args"
+  ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json "$tmp/empty-beads.json" \
+    --wt-json "$tmp/mode-wt.json" --refs "$tmp/mode-refs" \
+    --base-bookmarks "$tmp/base-bookmarks" \
+    --bead '' --branch "$mode_branch" --dry-run "$@" \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+# (b4) What a name means is one decision, taken once, from the two lists that
+# already answer it: worktrunk's worktree branches first, then the local
+# branches git knows. A name in the first list is a worktree to switch to, one
+# only the second holds is a branch waiting for a workspace -- an attach, which
+# makes the worktree without creating the branch -- and a name in neither is a
+# branch to make. The answer is the payload's `worktree`, and the base travels
+# with a create alone: a switch and an attach are given a branch that already
+# exists, and there is nothing for either of them to be created from.
+pick_mode feat/on-worktree
+if [ "$status" -ne 0 ]; then
+  fail "a worktree branch exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a worktree branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a worktree branch says switch" "$json" '.worktree == "switch"'
+  assert_json "a switch carries no base: it was made long ago" "$json" \
+    'has("base") | not'
+  assert_json "a switch carries no create key any more" "$json" \
+    'has("create") | not'
+fi
+
+pick_mode feat/bare-branch
+if [ "$status" -ne 0 ]; then
+  fail "a bare local branch exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a bare local branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a local branch with no worktree says attach" "$json" \
+    '.worktree == "attach"'
+  assert_json "an attach carries no base: the branch is not being made" \
+    "$json" 'has("base") | not'
+fi
+
+pick_mode feat/brand-new
+if [ "$status" -ne 0 ]; then
+  fail "a name in neither list exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a name in neither list prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a name nothing knows says create" "$json" \
+    '.worktree == "create"'
+  assert_json "a create carries the base it starts from" "$json" \
+    '.base == "main@origin"'
+fi
+
+# The worktrunk shortcuts are gone. `pr:7` and `mr:12` named a pull or merge
+# request's branch when worktrunk resolved them, and this flow does not ask it
+# to: neither is on either list, and neither is a branch name git will accept,
+# so the name is refused here -- with the reason, while the picker is still on
+# screen -- rather than resolving in a tab to a name nothing can carry back.
 ran=$((ran + 1))
-run_pick test/fixtures/ready.json --bead '' --branch 'pr:abc' --dry-run
+pick_mode 'pr:7'
 if [ "$status" -ne 2 ]; then
-  fail "a pr: without a number exits 2" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qF 'new-work.sh: not a valid branch name: pr:abc' "$tmp/err"; then
-  fail "a pr: without a number says so" "stderr: $(cat "$tmp/err")"
+  fail "a pr: name exits 2" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF 'new-work.sh: not a valid branch name: pr:7' "$tmp/err"; then
+  fail "a pr: name says it is not a branch name" "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+  fail "a pr: name starts nothing" \
+    "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
+fi
+
+ran=$((ran + 1))
+pick_mode 'mr:12'
+if [ "$status" -ne 2 ]; then
+  fail "an mr: name exits 2" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF 'new-work.sh: not a valid branch name: mr:12' "$tmp/err"; then
+  fail "an mr: name says it is not a branch name" "stderr: $(cat "$tmp/err")"
 fi
 
 # (b5) `git check-ref-format --branch` *expands* a name like @{-1} and prints
@@ -362,7 +441,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "typed branch payload" "$json" '.branch == "feat/typed-name"'
-  assert_json "typed branch payload" "$json" '.create == true'
+  assert_json "typed branch payload" "$json" '.worktree == "create"'
   assert_json "typed branch payload" "$json" '.bead == "" and .title == ""'
 fi
 ran=$((ran + 1))
@@ -396,7 +475,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "exact candidate payload" "$json" '.branch == "feat/abc123"'
-  assert_json "exact candidate payload" "$json" '.create == false'
+  assert_json "exact candidate payload" "$json" '.worktree == "switch"'
 fi
 
 # (d2) The branch question is typed, not picked: the name derived from the bead
@@ -414,8 +493,8 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "enter at the suggestion: the suggestion is the branch" \
     "$json" '.branch == "feat/58h"'
-  assert_json "enter at the suggestion: create is true" "$json" \
-    '.create == true'
+  assert_json "enter at the suggestion: a create" "$json" \
+    '.worktree == "create"'
   assert_json "enter at the suggestion: the bead rides along" "$json" \
     '.bead == "pmm-iris-58h" and (.title | length) > 0'
 fi
@@ -433,7 +512,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "typed branch: exactly what was typed" "$json" \
     '.branch == "my-branch"'
-  assert_json "typed branch: create is true" "$json" '.create == true'
+  assert_json "typed branch: a create" "$json" '.worktree == "create"'
 fi
 
 # (d3b) A pasted answer arrives with whitespace around it, and whitespace is part
@@ -447,7 +526,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
   assert_json "a padded branch answer is trimmed" "$json" \
-    '.branch == "feat/spaced" and .create == true'
+    '.branch == "feat/spaced" and .worktree == "create"'
 fi
 
 run_pick_answer '   ' test/fixtures/ready.json --bead pmm-iris-58h --dry-run
@@ -468,7 +547,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "typed candidate: the typed name" "$json" \
     '.branch == "feat/abc123"'
-  assert_json "typed candidate: create is false" "$json" '.create == false'
+  assert_json "typed candidate: a switch" "$json" '.worktree == "switch"'
 fi
 
 # (d5) The bead question is still a picker and still skipped without a
@@ -633,8 +712,8 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "a typed branch needs no fzf: the branch" "$json" \
     '.branch == "feat/no-fzf"'
-  assert_json "a typed branch needs no fzf: create is true" "$json" \
-    '.create == true'
+  assert_json "a typed branch needs no fzf: a create" "$json" \
+    '.worktree == "create"'
 fi
 
 # (g2) A machine or a repo that cannot make a jj workspace is refused before the
@@ -759,7 +838,7 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "a dry run needs neither jj nor gws: the branch" "$json" \
-    '.branch == "feat/no-jj" and .create == true'
+    '.branch == "feat/no-jj" and .worktree == "create"'
 fi
 
 # --no-base is the other way the cycle is never read, and it needs no bookmark
@@ -1102,8 +1181,8 @@ else
   assert_json "--blank picks no bead and no title" "$json" \
     '.bead == "" and .title == ""'
   assert_json "--blank's keys are the flag and nothing else" "$json" \
-    'keys == ["base", "bead", "blank", "branch", "create",
-              "main", "project", "root", "title"]'
+    'keys == ["base", "bead", "blank", "branch", "main",
+              "project", "root", "title", "worktree"]'
 fi
 
 # The three answers to the bead question are three answers to one question, so
@@ -1131,8 +1210,8 @@ else
   assert_json "a typed prompt replaces the bead" "$json" \
     '.bead == "" and .title == ""'
   assert_json "a typed prompt is the only new key" "$json" \
-    'keys == ["base", "bead", "branch", "create", "main",
-              "project", "prompt", "root", "title"]'
+    'keys == ["base", "bead", "branch", "main", "project",
+              "prompt", "root", "title", "worktree"]'
 fi
 
 # A prompt with quotes and runs of spaces survives as one value: it travels to
@@ -1182,8 +1261,8 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "the agent list leads with its default" "$json" '.agent == "pi"'
   assert_json "the agent question asks nobody off a terminal" "$json" \
-    'keys == ["agent", "base", "bead", "branch", "create",
-              "main", "project", "root", "title"]'
+    'keys == ["agent", "base", "bead", "branch", "main",
+              "project", "root", "title", "worktree"]'
 fi
 
 run_pick test/fixtures/ready.json --agents pi --agent claude \
@@ -1677,7 +1756,7 @@ else
   assert_json "a piped prompt with no branch: the text is the prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == ""'
   assert_json "a piped prompt with no branch: stdin is the branch" "$json" \
-    '.branch == "feat/typed" and .create == true'
+    '.branch == "feat/typed" and .worktree == "create"'
 fi
 
 run_pick_answer '' test/fixtures/ready.json \
@@ -1835,7 +1914,7 @@ else
   assert_json "typed text with no branch: the text is the prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == "" and .title == ""'
   assert_json "typed text with no branch: the answer is the branch" "$json" \
-    '.branch == "feat/typed" and .create == true'
+    '.branch == "feat/typed" and .worktree == "create"'
 fi
 ran=$((ran + 1))
 if ! grep -qF -- 'branch: type a name' "$tmp/gum-ran" 2>/dev/null; then
@@ -1860,7 +1939,7 @@ else
   assert_json "the prompt row: its text is the prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == ""'
   assert_json "the prompt row: its branch answer travels" "$json" \
-    '.branch == "feat/row" and .create == true'
+    '.branch == "feat/row" and .worktree == "create"'
 fi
 ran=$((ran + 1))
 if ! grep -qF -- '--header prompt for the agent' "$tmp/gum-ran" \
@@ -1941,7 +2020,7 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
   assert_json "ctrl-b's answer is the branch a typed prompt creates" "$json" \
-    '.branch == "feat/typed" and .create == true'
+    '.branch == "feat/typed" and .worktree == "create"'
   assert_json "ctrl-b's answer keeps the typed prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == ""'
 fi
@@ -2020,7 +2099,7 @@ else
   assert_json "a blank answer: the row under the cursor is not a bead" "$json" \
     '.bead == "" and .title == ""'
   assert_json "a blank answer: the header's branch is the branch" "$json" \
-    '.branch == "feat/58h" and .create == true'
+    '.branch == "feat/58h" and .worktree == "create"'
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/gum-ran" ]; then
@@ -2152,8 +2231,8 @@ else
   assert_json "a remembered agent is the payload's agent" "$json" \
     '.agent == "claude"'
   assert_json "a remembered agent adds no key to the payload" "$json" \
-    'keys == ["agent", "base", "bead", "branch", "create",
-              "main", "project", "root", "title"]'
+    'keys == ["agent", "base", "bead", "branch", "main",
+              "project", "root", "title", "worktree"]'
 fi
 PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-known \
   run_pick test/fixtures/ready.json \
