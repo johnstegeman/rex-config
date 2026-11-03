@@ -833,17 +833,18 @@ refused() {
   fi
 }
 
-# A wrapper that was never ginit'd -- no .jj/repo beside main -- while main
-# itself is there, so the refusal is about the workspace and not about a
-# directory that does not exist. No fixtures at all here: a run given all four
-# never opens --main, and this one has to.
+# A wrapper that was never ginit'd -- no .jj/repo beside main, and none in it
+# either -- while main itself is there, so the refusal is about the workspace and
+# not about a directory that does not exist. No fixtures at all here: a run given
+# all four never opens --main, and this one has to.
 mkdir -p "$tmp/plain/main"
 refused "a repo that was never ginit'd exits 1" "not ginit'd" \
   ./new-work.sh pick --main "$tmp/plain/main" --root /p/demo --project demo \
   --bead '' --branch feat/x --dry-run
 ran=$((ran + 1))
-if ! grep -qF "$(dirname "$tmp/plain/main") has no .jj/repo" "$tmp/err"; then
-  fail "the never-ginit'd refusal names the wrapper" "stderr: $(cat "$tmp/err")"
+if ! grep -qF "neither it nor $(dirname "$tmp/plain/main") has a .jj/repo" "$tmp/err"; then
+  fail "the never-ginit'd refusal names both places it looked" \
+    "stderr: $(cat "$tmp/err")"
 elif ! grep -qF 'run ginit first' "$tmp/err"; then
   fail "the never-ginit'd refusal names ginit" "stderr: $(cat "$tmp/err")"
 fi
@@ -861,6 +862,20 @@ refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
   --bead pmm-iris-a4l --branch feat/no-jj
+
+# The other shape a ginit'd repo has: a normal clone converted where it stands,
+# so the main worktree *is* the repo root and .jj/repo sits inside it rather than
+# in the directory above. gws' own ancestor walk accepts both, so the preflight
+# has to as well -- what this run is refused for is the jj its PATH lacks, which
+# is the check after that one, and a run stopped for ginit never gets that far.
+mkdir -p "$tmp/in-place/.jj/repo"
+refused "a repo ginit'd in place is not refused for it" \
+  'jj not found on PATH — press any key' \
+  PATH="$tmp/no-jj-bin" ./new-work.sh pick \
+  --main "$tmp/in-place" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --bead pmm-iris-a4l --branch feat/in-place
 
 # The same jj, needed on the screen even where --no-base says there is no
 # revision at all: the float resolves the whole cycle anyway, so ctrl-r can

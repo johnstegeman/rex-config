@@ -125,8 +125,11 @@ M.options = {
   -- The base a new branch starts from when nobody answered for this tab. Unset
   -- -- nil rather than a value, so it reads as a default -- is auto-detect: the
   -- picker resolves the remote's own default branch and the cycle that opens on
-  -- it. A string is that cycle's first entry, and false is "let worktrunk
-  -- choose" -- no --base word at all.
+  -- it. A string is that cycle's first entry, and false is "no revision at all"
+  -- -- the field opens on nothing, no revision is passed, and the new workspace
+  -- sits on main's working copy. Either way it is the create answer's base and no
+  -- word of its own: the revision travels as one positional parameter, and only a
+  -- create is given one (see new_tab_argv).
   base = nil,
   bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
@@ -169,7 +172,7 @@ end
 # the agent, or a first word that is none of the three modes. One sentence, said
 # from the two places that can learn it, so a caller that fixes one mistake is
 # never answered in different words by the next.
-set -l contract 'rex-config: the tab needs create, branch and base'
+set -l contract 'rex-config: the tab needs a mode, a branch and a base'
 
 # The three words come before the agent, and they are read before they are used:
 # the count here, and the mode word in the dispatch below. Reading them anyway
@@ -244,16 +247,19 @@ end
 # looked up as plain names because that is what they are: gws exists only as a
 # fish function, and the user's `wt` is how worktrunk's shell integration gets
 # in.
-set -l path
+# wt_path and not path: fish keeps $path as a mirror of PATH, so a local with that
+# name would shadow it -- harmless on the fish this was written against, a trap in
+# a later one.
+set -l wt_path
 if test "$mode" = switch
   set -l listing (wt switch $branch --no-cd --format=json)
   # The substitution's status is the switch's own, captured before anything else
   # runs: a worktrunk that failed has already said why, on this pane's stderr.
   set -l switched $status
   if test $switched -eq 0
-    set path (printf '%s\n' $listing | command jq -r '.path // empty')
+    set wt_path (printf '%s\n' $listing | command jq -r '.path // empty')
   end
-  if test -z "$path"
+  if test -z "$wt_path"
     # Two steps can leave no path: a switch that failed, whose own message is
     # already on this pane, or a switch that worked and a reply whose path cannot
     # be read (jq missing, or no path in it). Naming the step that went wrong is
@@ -281,14 +287,14 @@ else if test "$mode" = create -o "$mode" = attach
   set -l created $status
   if test $created -eq 0
     # the one line gws wrote, and not whatever else may have landed there
-    set path (command head -n 1 $pf)
+    set wt_path (command head -n 1 $pf)
   end
   command rm -f $pf
   if test $created -ne 0
     printf 'rex-config: gws %s failed (exit %s); not starting %s\n' "$branch" "$created" "$what" >&2
     leave_shell
   end
-  if test -z "$path"
+  if test -z "$wt_path"
     printf 'rex-config: could not read the worktree path of %s from the gws path file; not starting %s\n' "$branch" "$what" >&2
     leave_shell
   end
@@ -307,10 +313,10 @@ end
 # current-directory spelling is what keeps it a path. An absolute path, which is
 # what gws and worktrunk report, is left alone -- and `builtin`, because a plain
 # `cd` is the user's jumper (see above).
-set -l dir (string replace -r '^-' './-' -- $path)
+set -l dir (string replace -r '^-' './-' -- $wt_path)
 builtin cd $dir
 or begin
-  printf 'rex-config: could not enter %s; not starting %s\n' "$path" "$what" >&2
+  printf 'rex-config: could not enter %s; not starting %s\n' "$wt_path" "$what" >&2
   leave_shell
 end
 

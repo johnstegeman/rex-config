@@ -47,6 +47,11 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    cursor does not recompute it, so a bead picked lower down hands back the name
    that bead derives instead (below).
 
+   The base is the create answer's, resolved for every pick because the mode is
+   not knowable while the screen is up: it shows, and `ctrl-r` cycles it, even
+   when the branch turns out to have a worktree already — and then it is not
+   sent, because a switch and an attach start nothing from a revision.
+
    | Key | What it does |
    |---|---|
    | `ctrl-a` | the next agent, then `none`, then round again |
@@ -156,18 +161,22 @@ git spelling of the same thing; the `@remote` suffix says where a revision comes
 from now, so there is no second field that could disagree with it.
 
 The screen opens on `<default-branch>@origin`, with the default branch found the
-way git finds it — and falls through when the bookmarks offer none of them:
+way git finds it. When this clone names no `origin/HEAD`, it falls through to a
+fixed name — and to the working copy when the bookmarks do not have either:
 
 1. the branch `refs/remotes/origin/HEAD` points at, as `<that branch>@origin`;
-2. `main@origin`;
-3. `master@origin`;
+2. `main@origin`, when the bookmarks render it;
+3. `master@origin`, when the bookmarks render that one;
 4. `@`, the working copy, which is always there.
 
+The bookmarks are asked about those two fixed names and about nothing else, so
+the opening answer survives even where no bookmark renders it: a clone whose
+`origin/HEAD` is `develop` opens on `develop@origin` either way, and so does a
+base you name in configuration. The revision is made in the tab, where `jj`
+answers for it and a fetch has already had its chance.
+
 `ctrl-r` cycles a short list from there: that opening answer, then `@`, then
-`main` and `master`, offered only where the bookmarks say they exist. The opening
-answer is never dropped, even when nothing resolves it: a base you name in
-configuration is the answer the field starts on, and the tab then starts from it
-exactly as it is.
+`main` and `master`, offered only where the bookmarks say they exist.
 
 The base travels with a create and nothing else. A switch and an attach name a
 branch that already exists, so there is no revision to start one from.
@@ -227,10 +236,11 @@ Also needed:
 - **beads in the project.** Beads is a hard requirement: a repository with no
   beads database is refused rather than run without one, because the whole flow
   is bead-driven.
-- **a ginit'd repo.** The directory holding the main worktree has to have a
-  `.jj/repo` beside it; a repo without one is refused rather than given an
-  ordinary git worktree. [Converting a repo to jj
-  workspaces](#converting-a-repo-to-jj-workspaces) is how it gets one.
+- **a ginit'd repo.** There has to be a `.jj/repo` where `gws` will look for
+  one: inside the main worktree, or beside it in a colocated wrapper. A repo
+  with neither is refused rather than given an ordinary git worktree.
+  [Converting a repo to jj workspaces](#converting-a-repo-to-jj-workspaces) is
+  how it gets one.
 - **Rex Remote Control** (Rex → Settings → Rex Server) for the picker's
   hand-back, which switches the app to the project's session from the command
   line. From a key or the palette the plugin queues the switch to the client
@@ -315,6 +325,12 @@ opens on, so the option sets the starting answer rather than pinning it. It is
 consulted again only for a hand-run `rex do work_new_go` that says nothing about
 the base.
 
+A hand-run now says the mode as a word — `rex do work_new_go project=… branch=…
+worktree=create …` — because `create` is no longer a declared argument and this
+Rex build rejects a named pair it does not know: `create=true` written as a
+named pair is refused outright, while the same field inside an `--args` object
+reaches the action whole and still means create.
+
 ## The convention
 
 A **project** is a repository. Rex has one session per project, labelled with the
@@ -340,10 +356,10 @@ Before the screen opens:
 
 - Not a git repository, or no beads database: the picker never opens; the error
   names the directory.
-- The repo is not ginit'd — no `.jj/repo` in the directory holding the main
-  worktree: the picker refuses in one line and names `ginit`, and no bead is
-  claimed:
-  `pick: /…/main is not ginit'd — /… has no .jj/repo; run ginit first`.
+- The repo is not ginit'd — no `.jj/repo`, neither in the main worktree nor in
+  the directory above it: the picker refuses in one line and names `ginit`, and
+  no bead is claimed: `pick: /…/main is not ginit'd — neither it nor /… has a
+  .jj/repo; run ginit first`.
 - A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `wt`, `jq`,
   `jj`, or a fish with no `gws`: the float names the missing piece and waits for
   a keypress instead of vanishing (`jj not found on PATH — press any key`,
@@ -449,10 +465,20 @@ worktrees — with nothing uncommitted in any of them.
    --clear` and the `jj new "root()"` are what make that wrapper workspace
    inert once its worktree is gone, and the last line runs the post-start hooks
    by hand, because jj and not wt made this worktree.
-5. **Check it with the flow itself.** In `main`, press `ctrl+space>n` and pick a
-   branch. The tab should land in a jj workspace with the branch attached and
-   the hooks run — `jj workspace list` from `main` names the new one — and the
-   agent should be working in it.
+5. **Check it with the flow itself**, which is the two checks no script here can
+   make. In `main`:
+   - **a create.** Press `ctrl+space>n` and pick a branch, letting it be a
+     create: the tab lands in a jj workspace with the branch attached and the
+     hooks run — `jj workspace list` from `main` names the new one — and the
+     agent starts in it. `^C` kills the agent and the pane stays a shell in that
+     workspace.
+   - **a switch to what that made.** Pick the same branch a second time and the
+     tab must *switch* to the worktree that is already there rather than make
+     anything: it is worktrunk's switch, and this is the exercise that proves it
+     accepts a workspace jj created (on a scratch wrapper it answers
+     `{"action":"existing","branch":"feat/zz","path":"…/feat-zz"}`, exit 0, to
+     `wt -C <main> switch feat/zz --no-cd --format=json`). Through the flow the
+     tab lands in that directory and `jj workspace list` names no second one.
 
 ## Layout
 

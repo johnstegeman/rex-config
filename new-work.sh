@@ -358,9 +358,9 @@ wt_branches() {
 # A worktrunk that cannot read the repository is a failed read, not an empty
 # one: it says so, naming the directory, and returns 1. What happens next is the
 # caller's, and the message says only what happened, because the two callers
-# differ -- `candidates` still lists git's branches (a partial list is still a
-# suggestion, and its comment below says so), while `branch_mode` cannot tell a
-# worktree branch from one only git knows without this half, so a pick stops
+# differ -- `candidates` still prints git's branches beside them, since a partial
+# branch list is still the list a dry run asked for, while `branch_mode` cannot
+# tell a worktree branch from one only git knows without this half, so a pick stops
 # rather than guess. Guessing would send a branch that has a worktree to
 # `gws --attach`, which refuses on the directory that is already there.
 wt_branch_rows() {
@@ -452,12 +452,12 @@ branch_mode() {
 
 # `new-work.sh candidates --main DIR [--wt-json FILE] [--refs FILE]`
 #
-# Every branch name that already exists, one per line, so the picker can
-# offer "switch to this one" alongside "create that one". --wt-json and
-# --refs swap the two sources for saved output, which is how the tests and
-# dry runs work. The worktree rows are also what tells a name that has a
-# worktree (a switch) from one that only git knows (an attach), so the order
-# here is load-bearing beyond readability.
+# Every branch name that already exists, one per line: the two lists a mode is
+# decided from, printed. The picker does not offer from it -- a name is typed at
+# ctrl-b and branch_mode reads the same two sources to say what it means -- so
+# this is the seam a dry run and the tests read the lists through, and the order
+# is the load-bearing part of it: worktree branches first, because a name in
+# that half is a switch and one only git knows is an attach.
 cmd_candidates() {
   local main='' wt_json='' refs=''
 
@@ -1520,14 +1520,17 @@ cmd_pick() {
   if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ] ||
     { [ -z "$bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
-    # Being there is not enough: the new workspace is made by gws inside the
-    # wrapper around main, which is the directory that must hold .jj/repo as a
-    # directory. (main's own .jj/repo is a file in a colocated wrapper -- that
-    # is how gws tells the two apart.) A repo that was never ginit'd has no
-    # fallback here, by design: a plain git worktree would quietly recreate the
-    # problem jj is there to solve, so this refuses and names the thing to run.
-    [ -d "$(dirname "$main")/.jj/repo" ] ||
-      die "pick: $main is not ginit'd — $(dirname "$main") has no .jj/repo; run ginit first"
+    # Being there is not enough: the new workspace is made by gws, and gws walks
+    # up from main looking for a directory repo, so the .jj/repo this needs is
+    # the one that walk finds. Two shapes answer it: a colocated wrapper, where
+    # the repo is beside main (main's own .jj/repo is a *file* there -- that is
+    # how gws tells the two apart), and a clone ginit'd where it stands, where
+    # the main worktree is the repo root and the repo is inside it. A repo that
+    # was never ginit'd has no fallback here, by design: a plain git worktree
+    # would quietly recreate the problem jj is there to solve, so this refuses
+    # and names the thing to run.
+    [ -d "$(dirname "$main")/.jj/repo" ] || [ -d "$main/.jj/repo" ] ||
+      die "pick: $main is not ginit'd — neither it nor $(dirname "$main") has a .jj/repo; run ginit first"
   fi
 
   # The screen's own requirements, before any work, and only where the screen

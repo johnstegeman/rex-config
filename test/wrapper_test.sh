@@ -542,7 +542,7 @@ if [ -e "$tmp/gws-words" ] || [ -e "$tmp/wt-words" ]; then
     "gws: $(cat "$tmp/gws-words" 2>/dev/null) wt: $(cat "$tmp/wt-words" 2>/dev/null)"
 fi
 ran=$((ran + 1))
-if ! grep -qxF 'rex-config: the tab needs create, branch and base' "$tmp/err"; then
+if ! grep -qxF 'rex-config: the tab needs a mode, a branch and a base' "$tmp/err"; then
   fail "an unknown mode names the contract" "stderr: $(cat "$tmp/err")"
 fi
 
@@ -660,7 +660,7 @@ if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $start" "$tmp/out"; then
 fi
 
 ran=$((ran + 1))
-if ! grep -qxF 'rex-config: the tab needs create, branch and base' "$tmp/err"; then
+if ! grep -qxF 'rex-config: the tab needs a mode, a branch and a base' "$tmp/err"; then
   fail "too few parameters name all three words" "stderr: $(cat "$tmp/err")"
 fi
 
