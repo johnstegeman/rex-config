@@ -399,8 +399,8 @@ local_branch_rows() {
 #
 # A worktrunk that could not be read costs this list its worktree rows and
 # nothing else: the warning above has already been said, and the branches git
-# knows are still worth offering as suggestions. That is the whole difference
-# from branch_mode, which has to refuse rather than answer from half the list.
+# knows are still worth printing. That is the whole difference from branch_mode,
+# which has to refuse rather than answer from half the list.
 candidate_rows() {
   local main=$1 wt_json=$2 refs=$3
 
@@ -453,11 +453,12 @@ branch_mode() {
 # `new-work.sh candidates --main DIR [--wt-json FILE] [--refs FILE]`
 #
 # Every branch name that already exists, one per line: the two lists a mode is
-# decided from, printed. The picker does not offer from it -- a name is typed at
-# ctrl-b and branch_mode reads the same two sources to say what it means -- so
-# this is the seam a dry run and the tests read the lists through, and the order
-# is the load-bearing part of it: worktree branches first, because a name in
-# that half is a switch and one only git knows is an attach.
+# decided from, printed. No code path in this script calls it -- the picker
+# offers no branch list, and a name is typed at ctrl-b and read by branch_mode
+# from these same two sources -- so its readers are the tests and a hand-run of
+# this subcommand. The order is the load-bearing part of it: worktree branches
+# first, because a name in that half is a switch and one only git knows is an
+# attach.
 cmd_candidates() {
   local main='' wt_json='' refs=''
 
@@ -1520,17 +1521,19 @@ cmd_pick() {
   if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ] ||
     { [ -z "$bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
-    # Being there is not enough: the new workspace is made by gws, and gws walks
-    # up from main looking for a directory repo, so the .jj/repo this needs is
-    # the one that walk finds. Two shapes answer it: a colocated wrapper, where
-    # the repo is beside main (main's own .jj/repo is a *file* there -- that is
-    # how gws tells the two apart), and a clone ginit'd where it stands, where
-    # the main worktree is the repo root and the repo is inside it. A repo that
-    # was never ginit'd has no fallback here, by design: a plain git worktree
-    # would quietly recreate the problem jj is there to solve, so this refuses
-    # and names the thing to run.
-    [ -d "$(dirname "$main")/.jj/repo" ] || [ -d "$main/.jj/repo" ] ||
-      die "pick: $main is not ginit'd — neither it nor $(dirname "$main") has a .jj/repo; run ginit first"
+    # Being there is not enough: the new workspace is made by gws, so what this
+    # needs is the shape gws can build in -- the wrapper ginit makes, with .jj/repo
+    # as a *directory* beside the main worktree (main's own .jj/repo is a file
+    # there, and that file is how gws tells the two apart). A clone ginit'd where
+    # it stands is deliberately not accepted even though a loose ancestor walk
+    # would find its repo: gws runs its add from <wrapper>/main to inherit that
+    # workspace's sparse patterns, so it refuses a wrapper with no main -- after
+    # the bead is claimed, which is the outcome this check exists to prevent. A
+    # repo that was never ginit'd has no fallback here either, by design: a plain
+    # git worktree would quietly recreate the problem jj is there to solve, so
+    # this refuses and names the thing to run.
+    [ -d "$(dirname "$main")/.jj/repo" ] ||
+      die "pick: $(dirname "$main") is not ginit'd — gws needs a wrapper with .jj/repo as a directory beside the main worktree; run ginit first"
   fi
 
   # The screen's own requirements, before any work, and only where the screen
@@ -1807,11 +1810,12 @@ cmd_pick() {
   # What the name means, decided here and once: switch to the worktree that
   # already has it, make a worktree for a branch only git knows (an attach), or
   # create the branch. The two lists branch_mode reads are the ones candidates
-  # prints, so the answer is the same list the picker offers -- there is no
-  # second look at the repository, and no worktrunk shortcut: ^, -, @, pr:N and
-  # mr:N named things worktrunk resolved for us, and nothing here asks it to any
-  # more. A name it would have resolved is just a name now, and an impossible one
-  # is refused on the line below.
+  # prints, and a picked name is read exactly as a dry run reads it: the mode is
+  # decided from those two lists alone, with no second look at the repository,
+  # and no worktrunk shortcut: ^, -, @, pr:N and mr:N named things worktrunk
+  # resolved for us, and nothing here asks it to any more. A name it would have
+  # resolved is just a name now, and an impossible one is refused on the line
+  # below.
   local mode
   if ! mode=$(branch_mode "$branch" "$main" "$wt_json" "$refs"); then
     die "pick: could not list the branches of $main"

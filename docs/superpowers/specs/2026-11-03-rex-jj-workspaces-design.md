@@ -297,11 +297,20 @@ mirror of the remote-tracking refs, not an answer anyone wants to start from).
 and under the same rule — they only run where the screen will really open, and a
 saved fixture stands in for the tool it replaces:
 
-> the directory holding `--main` must contain `.jj/repo` as a **directory**,
-> `jj` must be on the login shell's PATH (the base cycle runs it), and
-> `gws` must be a fish function (`fish -c 'functions -q gws'`), because the tab
-> cannot create anything without it and a bead claimed for nothing is worse than
-> a refusal.
+> the directory holding `--main` must contain `.jj/repo` as a **directory** — the
+> wrapper `ginit` makes, with `main` beside it — `jj` must be on the login
+> shell's PATH (the base cycle runs it), and `gws` must be a fish function
+> (`fish -c 'functions -q gws'`), because the tab cannot create anything without
+> it and a bead claimed for nothing is worse than a refusal.
+
+The first check is the wrapper and only the wrapper. A clone ginit'd where it
+stands — `.jj/repo` inside the main worktree rather than beside it — fails it
+deliberately, even though `gws`'s own ancestor walk would find that repo: `gws`
+runs `jj workspace add` from `<wrapper>/main` to inherit its sparse patterns,
+so it refuses a wrapper with no `main`, and it does so *after* the bead is
+claimed. That is exactly the outcome the preflight exists to prevent, so the
+shape is refused here, where nothing has been asked yet, and the line says
+what is missing: the wrapper, with `.jj/repo` beside its `main` worktree.
 
 Without the first, `pick` prints one line saying this repo is not ginit'd yet and
 names `ginit`; without either of the other two it names the missing piece the way
@@ -377,7 +386,8 @@ Everything below runs from `bash test/run.sh`, no pty:
 - `test/pick_test.sh` — the payload carries a revision string or `false` and
   never `base_remote`; `worktree` says `switch`, `attach` or `create` for a name
   with a worktree, a bare branch, and a name that is neither; a wrapper directory
-  with no `.jj/repo` is refused with the ginit line and opens no screen; a
+  with no `.jj/repo` is refused with the ginit line and opens no screen, and so
+  is a `.jj/repo` inside the worktree itself with no wrapper beside it; a
   missing `jj`, or a machine whose fish has no `gws`, is refused the same way and
   names the missing piece; a saved-bookmarks run still works off a terminal.
 - **By hand, once, in the float**: a real `gws` create into a real ginit'd repo,

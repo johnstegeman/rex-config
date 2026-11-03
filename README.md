@@ -47,10 +47,12 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    cursor does not recompute it, so a bead picked lower down hands back the name
    that bead derives instead (below).
 
-   The base is the create answer's, resolved for every pick because the mode is
-   not knowable while the screen is up: it shows, and `ctrl-r` cycles it, even
-   when the branch turns out to have a worktree already — and then it is not
-   sent, because a switch and an attach start nothing from a revision.
+   The base is the create answer's, and while the screen is up the mode is not
+   knowable, so it is resolved for every pick that opens one: it shows, and
+   `ctrl-r` cycles it, even when the branch turns out to have a worktree
+   already — and then it is not sent, because a switch and an attach start
+   nothing from a revision. A pick that opens no screen — a scripted one, or
+   `--dry-run` — resolves the cycle only for a create.
 
    | Key | What it does |
    |---|---|
@@ -236,11 +238,13 @@ Also needed:
 - **beads in the project.** Beads is a hard requirement: a repository with no
   beads database is refused rather than run without one, because the whole flow
   is bead-driven.
-- **a ginit'd repo.** There has to be a `.jj/repo` where `gws` will look for
-  one: inside the main worktree, or beside it in a colocated wrapper. A repo
-  with neither is refused rather than given an ordinary git worktree.
-  [Converting a repo to jj workspaces](#converting-a-repo-to-jj-workspaces) is
-  how it gets one.
+- **a ginit'd repo.** `gws` needs the layout `ginit` makes: a wrapper with
+  `.jj/repo` as a directory **beside** its `main` worktree, because `gws` runs
+  `jj workspace add` from `main` so the new workspace inherits its sparse
+  patterns. A repo without one — including a clone `jj git init`ed where it
+  stands, whose `.jj/repo` is inside the worktree rather than beside a `main` —
+  is refused rather than given an ordinary git worktree. [Converting a repo to
+  jj workspaces](#converting-a-repo-to-jj-workspaces) is how it gets one.
 - **Rex Remote Control** (Rex → Settings → Rex Server) for the picker's
   hand-back, which switches the app to the project's session from the command
   line. From a key or the palette the plugin queues the switch to the client
@@ -356,10 +360,10 @@ Before the screen opens:
 
 - Not a git repository, or no beads database: the picker never opens; the error
   names the directory.
-- The repo is not ginit'd — no `.jj/repo`, neither in the main worktree nor in
-  the directory above it: the picker refuses in one line and names `ginit`, and
-  no bead is claimed: `pick: /…/main is not ginit'd — neither it nor /… has a
-  .jj/repo; run ginit first`.
+- The repo is not ginit'd — no `.jj/repo` as a directory in the directory above
+  the main worktree: the picker refuses in one line and names `ginit`, and no
+  bead is claimed: `pick: /… is not ginit'd — gws needs a wrapper with .jj/repo
+  as a directory beside the main worktree; run ginit first`.
 - A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `wt`, `jq`,
   `jj`, or a fish with no `gws`: the float names the missing piece and waits for
   a keypress instead of vanishing (`jj not found on PATH — press any key`,
@@ -465,13 +469,13 @@ worktrees — with nothing uncommitted in any of them.
    --clear` and the `jj new "root()"` are what make that wrapper workspace
    inert once its worktree is gone, and the last line runs the post-start hooks
    by hand, because jj and not wt made this worktree.
-5. **Check it with the flow itself**, which is the two checks no script here can
-   make. In `main`:
-   - **a create.** Press `ctrl+space>n` and pick a branch, letting it be a
-     create: the tab lands in a jj workspace with the branch attached and the
-     hooks run — `jj workspace list` from `main` names the new one — and the
-     agent starts in it. `^C` kills the agent and the pane stays a shell in that
-     workspace.
+5. **Check it with the flow itself**, which are the two checks no script here
+   can make. In `main`:
+   - **a create.** Press `ctrl+space>n` and pick a branch name that does not
+     exist yet, so the pick is a create: the tab lands in a jj workspace with
+     the branch attached and the hooks run — `jj workspace list` from `main`
+     names the new one — and the agent starts in it. `^C` kills the agent and
+     the pane stays a shell in that workspace.
    - **a switch to what that made.** Pick the same branch a second time and the
      tab must *switch* to the worktree that is already there rather than make
      anything: it is worktrunk's switch, and this is the exercise that proves it
@@ -479,6 +483,10 @@ worktrees — with nothing uncommitted in any of them.
      `{"action":"existing","branch":"feat/zz","path":"…/feat-zz"}`, exit 0, to
      `wt -C <main> switch feat/zz --no-cd --format=json`). Through the flow the
      tab lands in that directory and `jj workspace list` names no second one.
+     Close the tab the create left open first — exit the shell it left, or close
+     the window: with a tab already open on the branch the pick finds it and
+     shows it again, so the wrapper never runs and `wt switch` is never made.
+     The check has passed only if a switch really happened.
 
 ## Layout
 
