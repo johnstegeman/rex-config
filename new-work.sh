@@ -1493,14 +1493,18 @@ cmd_pick() {
   need git
   # jj is only what reads the base cycle, so it is needed only where that cycle
   # is really read: --base-bookmarks stands in for the bookmark list, and
-  # --no-base answers the base without asking it. Every other lookup a pick
-  # makes is git's or a fixture's.
-  [ -n "$bookmarks" ] || [ "$no_base" -eq 1 ] || need jj
+  # --no-base answers the base without asking it -- except on the screen, which
+  # resolves the whole cycle anyway so ctrl-r can cycle back to a revision from
+  # it. Every other lookup a pick makes is git's or a fixture's.
+  [ -n "$bookmarks" ] || { [ "$no_base" -eq 1 ] && ! on_screen; } || need jj
   # gws is the one thing that knows how to make a jj colocated workspace, and it
   # is a fish function rather than a program. Nothing on a --dry-run creates a
   # workspace, so the check belongs where a tab will really be made -- and the
   # pair comes last of the tools, so a run missing several names the first one it
-  # needed.
+  # needed. A branch that turns out to have a worktree already is switched rather
+  # than created and calls gws not at all, so this can refuse a run that would
+  # have been fine: refusing before the screen is worth more than that accuracy,
+  # because the other order is a bead in progress and a pane with nothing in it.
   [ "$dry_run" -eq 1 ] || need_fish_function gws
 
   local ready rows

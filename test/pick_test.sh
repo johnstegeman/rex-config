@@ -176,6 +176,32 @@ assert_json() {
   fi
 }
 
+# The host has to have these two, and neither can be stood in for: jj is a
+# program the picker runs, and fish is what answers whether gws is a function.
+# A host missing one cannot build the restricted PATHs below, so it says so
+# once, here, rather than through a case failing on a PATH nobody could build.
+for tool in fish jj; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'FAIL this host cannot build these fixtures: %s is not on PATH\n' \
+      "$tool"
+    exit 1
+  fi
+done
+
+# restricted_path <dir> <tool>...: a PATH holding just those tools, as symlinks
+# into DIR. It is how a case takes one tool away from a run without taking away
+# the ones around it -- a tool the host itself lacks is skipped, the run being
+# the thing under test rather than the machine.
+restricted_path() {
+  local dir=$1 tool found
+  shift
+  mkdir -p "$dir"
+  for tool in "$@"; do
+    found=$(command -v "$tool") || continue
+    ln -sf "$found" "$dir/$tool"
+  done
+}
+
 # A candidate set: the worktrunk fixture's branches (main, chore/p4pip,
 # feat/abc123) plus one that only a local branch has.
 cat >"$tmp/refs" <<'EOF'
@@ -551,11 +577,7 @@ fi
 # git is load-bearing on the create path -- check-ref-format decides whether a
 # name can be made, for-each-ref is the branch list -- so a missing one is named
 # rather than every name coming back "not a valid branch name".
-mkdir -p "$tmp/no-git-bin"
-for tool in bash cat cut grep sed awk tr jq; do
-  found=$(command -v "$tool") || continue
-  ln -sf "$found" "$tmp/no-git-bin/$tool"
-done
+restricted_path "$tmp/no-git-bin" bash cat cut grep sed awk tr jq
 ran=$((ran + 1))
 PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
@@ -576,11 +598,7 @@ fi
 # two tools only the screen calls. jj and fish are on this PATH because gws is
 # the only thing that makes the workspace and this machine has it (a stand-in,
 # as the fish function path at the top of the file says).
-mkdir -p "$tmp/no-fzf-bin"
-for tool in bash cat cut grep sed awk tr git bd wt jq jj fish; do
-  found=$(command -v "$tool") || continue
-  ln -sf "$found" "$tmp/no-fzf-bin/$tool"
-done
+restricted_path "$tmp/no-fzf-bin" bash cat cut grep sed awk tr git bd wt jq jj fish
 ran=$((ran + 1))
 PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
@@ -621,15 +639,16 @@ fi
 
 # (g2) A machine or a repo that cannot make a jj workspace is refused before the
 # screen opens and before anything is claimed: a bead picked for a pane that can
-# only fail is worse than a refusal. Three things can be missing, and each is
+# only fail is worse than a refusal. Four things can be missing, and each is
 # named -- the wrapper's .jj/repo (this repo was never ginit'd), jj on PATH (the
-# base cycle runs it), and gws as a fish function (the one thing that knows the
-# order a workspace and a worktree are made in). Nothing has been asked, handed
-# back or even started when one of them is: stdout, the stand-in fzf and the
-# stand-in rex are all left untouched.
+# base cycle runs it), gws as a fish function (the one thing that knows the
+# order a workspace and a worktree are made in), and fish itself (which is what
+# answers for gws at all). Nothing has been asked, handed back or even started
+# when one of them is: stdout, the stand-in fzf and the stand-in rex are all
+# left untouched.
 #
 # refused <name> <fragment stderr must hold> <command...>, the environment as
-# leading WORDS: what differs between the four is only what each one lacks.
+# leading WORDS: what differs between the cases is only what each one lacks.
 refused() {
   local name=$1 want=$2
   shift 2
@@ -672,17 +691,26 @@ fi
 # also why --main has to exist -- and, being a wrapper gws could create in, to
 # hold .jj/repo itself, which the preflight finds with dirname.
 mkdir -p "$tmp/ginit/main" "$tmp/ginit/.jj/repo"
-mkdir -p "$tmp/no-jj-bin"
-for tool in bash cat cut grep sed awk tr dirname git bd wt jq fish; do
-  found=$(command -v "$tool") || continue
-  ln -sf "$found" "$tmp/no-jj-bin/$tool"
-done
+restricted_path "$tmp/no-jj-bin" \
+  bash cat cut grep sed awk tr dirname mktemp rm git bd wt jq fish
 refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
   PATH="$tmp/no-jj-bin" ./new-work.sh pick \
   --main "$tmp/ginit/main" --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
   --bead pmm-iris-a4l --branch feat/no-jj
+
+# The same jj, needed on the screen even where --no-base says there is no
+# revision at all: the float resolves the whole cycle anyway, so ctrl-r can
+# cycle back to one, and that read is a jj call. PICK_SCREEN=1 is what says
+# this run has the float's terminal, and --bead answers the bead question so
+# that no tool only the screen needs is asked for on the way to jj.
+refused "a screen with no jj exits 1" 'jj not found on PATH — press any key' \
+  PICK_SCREEN=1 PATH="$tmp/no-jj-bin" ./new-work.sh pick \
+  --main "$tmp/ginit/main" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --no-base --bead '' --branch feat/no-jj-screen --dry-run
 
 # gws is a fish function rather than a program, and an empty function path is a
 # machine that has none: the pane would open and then create nothing. No
@@ -699,11 +727,7 @@ refused "a missing gws exits 1" 'gws is not a fish function' \
 
 # A machine with no fish at all cannot even be asked, and is named the way every
 # other missing tool is -- by need, whose message this one inherits.
-mkdir -p "$tmp/no-fish-bin"
-for tool in bash cat cut grep sed awk tr git bd wt jq jj; do
-  found=$(command -v "$tool") || continue
-  ln -sf "$found" "$tmp/no-fish-bin/$tool"
-done
+restricted_path "$tmp/no-fish-bin" bash cat cut grep sed awk tr git bd wt jq jj
 refused "a missing fish exits 1" 'fish not found on PATH — press any key' \
   PATH="$tmp/no-fish-bin" ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
