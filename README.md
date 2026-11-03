@@ -6,13 +6,18 @@ A Rex plugin for starting new work from a bead with one keystroke.
 writing the prompt yourself, and a header that shows the project, the agent, the
 branch and the base the branch is created from. Accept what the header shows and
 Rex opens a tab for that branch in the project's own session, claims the bead,
-creates the worktree with [worktrunk](https://worktrunk.dev), and starts your
-agent inside it already working on the bead.
+makes the worktree, and starts your agent inside it already working on the bead.
+
+The worktree is a **jj colocated workspace**, made by `gws`: the git worktree and
+the jj workspace of the same directory repo, with a branch attached and the
+project's post-start hooks run. rex-config knows none of that — it hands `gws` a
+branch, and for a new one the revision to make it from, and reads the new
+workspace's path back out of a file.
 
 ```
 ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
                  the branch and the base in the header
-              →  a tab, a worktree, a claimed bead, and an agent on it
+              →  a tab, a jj workspace, a claimed bead, and an agent on it
 ```
 
 ## What it does
@@ -29,7 +34,7 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    pmm-iris-a4l  Flaky hook test started failing
    pmm-iris-58h  Add a --dry-run flag
 
-    pmm-iris · agent: pi · branch: bug/a4l · base: origin/main
+   pmm-iris · agent: pi · branch: bug/a4l · base: main@origin
    ctrl-a agent  ctrl-b branch  ctrl-r base  ctrl-n blank  enter start  esc no bead
    ```
 
@@ -68,11 +73,21 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    name from, so the screen asks for one after it closes, in a field that opens
    empty: the header's branch belongs to the bead the list leads with, which is
    not the bead you picked, so it is not offered. A name typed there is the
-   branch; an empty answer cancels the pick. Typing the name of an existing
-   branch or worktree switches to it instead of creating anything; worktrunk's own
-   shortcuts — `^` the default branch, `-` the previous worktree, `@` the current
-   one, `pr:<n>` / `mr:<n>` a pull or merge request's branch — switch too, with
-   no branch created, and the new tab is labelled with what you typed.
+   branch; an empty answer cancels the pick. What that name means is decided
+   from the two lists the screen has already read — the branches with a
+   worktree, and the branches git knows — and it is one of three things: a
+   branch with a worktree, **switch**, and worktrunk moves you there without
+   anything being created; a local branch with no worktree, **attach**, and
+   `gws` puts a jj workspace on the branch as it is, with no revision to start
+   it from; neither, **create**, and `gws` makes the branch and the workspace,
+   from the base. The new tab is labelled with what you typed.
+
+   A name is checked before any tab is made — only a create can be refused for
+   it — and `not a valid branch name` is said on the float, not in a tab.
+   That takes worktrunk's old shortcuts with it: `^`, `-` and `pr:<n>` /
+   `mr:<n>` are not branch names, and `@` is refused because it is the working
+   copy, a jj revision. A pull or merge request's head is still reachable the
+   manual way: fetch the branch, then pick its name, which makes it an attach.
 
    With no ready beads the list is the `✎` row alone and `no ready beads` is said
    on stderr. Nothing seeds the header's branch either, so a typed prompt is
@@ -90,16 +105,21 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
      no second claim, no second worktree;
    - otherwise claims the bead (`bd update <id> --claim`, run in the main
      worktree) and creates the tab, labelled with the branch, in the main
-     worktree, running a small shell wrapper:
+     worktree, running a small fish wrapper:
 
      ```
-     GIT_TERMINAL_PROMPT=0                                              # before anything else
-     git fetch --quiet <remote>                                         # creating from a remote base
-     wt switch --create <branch> --base <base> --no-cd --format=json    # or
-     wt switch <branch> --no-cd --format=json                           # existing
-     cd <the worktree that switch reported> && <agent> <prompt>
-     exec "$SHELL" -l                                                   # the shell the agent exits to
+     GIT_TERMINAL_PROMPT=0                               # before anything else
+     wt switch <branch> --no-cd --format=json            # switch: the path is .path
+     gws <branch> <base> --path-file <f>                 # create: the path is in <f>
+     gws --attach <branch> --path-file <f>               # attach: the path is in <f>
+     cd <the path that reply or that file named> && <agent> <prompt>
+     exec "$SHELL" -l                                    # the shell the agent exits to
      ```
+
+     Exactly one of the three middle lines runs: the mode is one word the
+     picker decided, and the tab neither works it out again nor asks the
+     repository a second time. Only a create is given a base; a switch and an
+     attach name a branch that already exists.
 
      Every value reaches that wrapper as a positional parameter, so no branch,
      prompt or agent name is ever parsed as shell text. A blank answer sends no
@@ -116,60 +136,78 @@ the project's. So the flow attaches to the project's session before it reads its
 tabs or creates the new one, and stays attached — nothing detaches afterwards,
 and attaching takes nothing away from the session you are looking at.
 
-worktrunk owns the worktree: it creates it and runs its hooks in the tab, so the
-tab ends up in the right directory without the plugin changing directory
-itself. The plugin never runs `git worktree add`.
+`gws` owns the create and [worktrunk](https://worktrunk.dev) owns the switch.
+`gws` runs `jj workspace add --colocate` from `main` — so the new workspace
+inherits the full sparse pattern — attaches a git branch at its head, and then
+runs the project's post-start hooks by hand, because jj and not wt made the
+worktree. It fetches the base revision first, in the tab. rex-config knows none
+of it: it never runs `jj`, `git worktree add` or a fetch itself, and it does not
+capture `gws`'s output — that output is the pane's, and the path comes back
+through the file instead.
 
 When the agent exits — quit, crash, or a brainstorming that finished — the tab
-drops into your login shell in that worktree: worktrunk's hook output and the
+drops into your login shell in that worktree: the hooks' output and the
 agent's last lines stay readable above the prompt, and the tests the agent just
 wrote can be run there. Exiting that shell closes the tab.
 
 ## The base
 
-By default a new branch starts from a named ref, not from whatever this clone
-last checked out. The screen opens its base field on the first of these that
-exists — the same order orca uses:
+A new branch starts from one **jj revision**, not from whatever this clone last
+checked out. Here that revision is `main@origin` — the remote's current state of
+the default branch, rather than this machine's copy of it. `origin/main` was the
+git spelling of the same thing; the `@remote` suffix says where a revision comes
+from now, so there is no second field that could disagree with it.
 
-1. the branch `refs/remotes/origin/HEAD` points at, as `origin/main`;
-2. `origin/main`;
-3. `origin/master`;
-4. `main`;
-5. `master`;
+The screen opens on `<default-branch>@origin`, with the default branch found the
+way git finds it — and falls through when the bookmarks offer none of them:
 
-and on `@` — HEAD, the plugin's old behaviour — when the clone has none of them.
+1. the branch `refs/remotes/origin/HEAD` points at, as `<that branch>@origin`;
+2. `main@origin`;
+3. `master@origin`;
+4. `@`, the working copy, which is always there.
+
 `ctrl-r` cycles a short list from there: that opening answer, then `@`, then
-`main` and `master` where this clone has them, deduplicated. The opening answer
-is never dropped, even when the ref does not resolve: a base you name in
+`main` and `master`, offered only where the bookmarks say they exist. The opening
+answer is never dropped, even when nothing resolves it: a base you name in
 configuration is the answer the field starts on, and the tab then starts from it
 exactly as it is.
 
-The tab is what fetches, and only when a branch is being created from a ref that
-lives on a remote: that ref's own remote is fetched first (`upstream`, not
-`origin`, if that is where it lives), with a 30-second cap when `timeout` or
-`gtimeout` is installed. `@`, a local branch and worktrunk's default carry no
-remote and cost no fetch, and it is the ref record — not a slash in the name —
-that says where a ref lives, so a local `feat/x` is never fetched. Nothing in the
-picker touches the network: a fetch behind the float could hang on a credential
-prompt nobody can see. `GIT_TERMINAL_PROMPT=0` makes the tab's fetch fail
-instead of asking.
+The base travels with a create and nothing else. A switch and an attach name a
+branch that already exists, so there is no revision to start one from.
 
-A failed fetch does not cost the work. One line on the pane says the branch
-starts from the base as it is, and the switch runs from that last-known position
-anyway.
+The tab is what fetches, and `gws` is what does it: given a revision, it runs
+`jj git fetch` before it makes the workspace, with a 30-second cap when `timeout`
+or `gtimeout` is installed and unbounded otherwise. Nothing in the picker touches
+the network — a fetch behind the float could hang on a credential prompt nobody
+can see — and `GIT_TERMINAL_PROMPT=0` is exported in the tab, so a prompt there
+fails the fetch instead of asking.
 
-Two answers are not refs. `base = false` opens the field on `wt default` — no
-`--base` word at all, and worktrunk chooses — and `@` is HEAD, which is always in
-the cycle.
+A failed fetch does not cost the work: one line on the pane — `gws: could not
+fetch; <branch> starts from <revision> as it is` — and the workspace is made from
+the revision as it resolves locally.
+
+One answer is not a revision at all: `base = false` opens the field on nothing
+(the header reads `base: none`), and `gws` is given no revision, so the new
+workspace sits on `main`'s working copy.
 
 ## Requirements
+
+Creating a workspace is `gws`'s job, and `gws` is not a program on a `PATH`: it
+is a fish function in `~/.config/fish/functions/gws.fish`, and it is the one
+thing that knows how to make a jj colocated workspace. The tab's wrapper is a
+fish script for that reason. Before the screen opens, the picker refuses a repo
+that is not yet [ginit'd](#converting-a-repo-to-jj-workspaces), a machine without
+`jj`, and a fish without `gws`: a claimed bead in a pane that could not create
+anything is worse than a refusal.
 
 On the login shell's `PATH` (Rex actions run with a minimal `PATH`, so these are
 looked up through your shell):
 
 | Tool | Why |
 |---|---|
-| `wt` | worktrunk, for switching, creating, and naming the worktree's path |
+| `wt` | [worktrunk](https://worktrunk.dev), for switching to a worktree that already exists, and for the hooks a jj-made workspace needs |
+| `jj` | the base cycle, and the workspace itself |
+| `fish` | `gws` is a fish function, and the tab's wrapper is fish |
 | `jq` | the picker's JSON hand-back, the tab's worktree path, and bead filtering |
 | `fzf` | the one screen: the ready list, the preview, the typed prompt and the keys (tested against 0.74.5) |
 | `gum` | every field the screen opens: the `✎` row's, `ctrl-b`'s and the bead-less branch field (tested against 2.0.2) |
@@ -191,6 +229,10 @@ Also needed:
 - **beads in the project.** Beads is a hard requirement: a repository with no
   beads database is refused rather than run without one, because the whole flow
   is bead-driven.
+- **a ginit'd repo.** The directory holding the main worktree has to have a
+  `.jj/repo` beside it; a repo without one is refused rather than given an
+  ordinary git worktree. [Converting a repo to jj
+  workspaces](#converting-a-repo-to-jj-workspaces) is how it gets one.
 - **Rex Remote Control** (Rex → Settings → Rex Server) for the picker's
   hand-back, which switches the app to the project's session from the command
   line. From a key or the palette the plugin queues the switch to the client
@@ -234,8 +276,8 @@ require("rex-config").setup{
   no_bead_prompt = "/brainstorming",       -- used when the flow ran without a bead
   base = nil,                              -- the base cycle's first entry: nil =
                                            -- the clone's own default, resolved;
-                                           -- a string opens on that ref;
-                                           -- false opens on "wt default"
+                                           -- a string opens on that revision;
+                                           -- false opens on no revision at all
   bounds = { 0.15, 0.1, 0.7, 0.8 },        -- picker float, fractions of the window
   script = "/…/rex-config/new-work.sh",  -- new-work.sh beside init.lua (the default)
 }
@@ -268,20 +310,19 @@ written before the hand-back, so a launch Rex refuses still counts as the agent
 you chose. Nothing else is remembered — not the base, not the branch.
 
 `base` is the cycle's first entry and nothing more. A string opens the field on
-that ref, so `base = "@"` keeps the old local-HEAD answer within reach; `false`
-opens it on `wt default` and sends no `--base` word at all; leaving it unset
-follows the chain in [The base](#the-base). `ctrl-r` still cycles off whatever
-the field opens on, so the option sets the starting answer rather than pinning
-it. It is consulted again only for a hand-run `rex do work_new_go` that says
-nothing about the base.
+that revision, so `base = "@"` starts a create from the working copy; `false`
+opens it on no revision at all and `gws` is given none; leaving it unset follows
+the chain in [The base](#the-base). `ctrl-r` still cycles off whatever the field
+opens on, so the option sets the starting answer rather than pinning it. It is
+consulted again only for a hand-run `rex do work_new_go` that says nothing about
+the base.
 
 ## The convention
 
 A **project** is a repository. Rex has one session per project, labelled with the
 project's name (`pmm-iris`), and inside it one tab per worktree: the user's
 `main` tab in the main worktree, and one tab per branch in flight, labelled with
-the branch name exactly as typed (`bug/58h` — or `@`, `^`, `-`, `pr:123` when a
-worktrunk shortcut was typed).
+the branch name exactly as typed (`bug/58h`).
 
 - The session is found by its **label only**. A session called `pmm-iris-2` is
   not the project's, and nothing scans terminal directories or renames a session
@@ -291,13 +332,28 @@ worktrunk shortcut was typed).
   run there, which is where the database is reachable.
 - Switching the key twice for the same branch selects the tab that is already
   there. One tab, one worktree, one claim.
+- A created or attached workspace sits beside `main`, in the repo's wrapper
+  directory — the one holding `.git` — named from the branch with its slashes
+  flattened: `feat/pxp` → `feat-pxp`.
 
 ## Failure behaviour
 
+Before the screen opens:
+
 - Not a git repository, or no beads database: the picker never opens; the error
   names the directory.
-- A tool missing from the login shell's `PATH`: the picker float says which one
-  and waits for a keypress instead of vanishing.
+- The repo is not ginit'd — no `.jj/repo` in the directory holding the main
+  worktree: the picker refuses in one line and names `ginit`, and no bead is
+  claimed:
+  `pick: /…/main is not ginit'd — /… has no .jj/repo; run ginit first`.
+- A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `wt`, `jq`,
+  `jj`, or a fish with no `gws`: the float names the missing piece and waits for
+  a keypress instead of vanishing (`jj not found on PATH — press any key`,
+  `gws is not a fish function — add it to ~/.config/fish/functions — press any
+  key`).
+
+At the screen:
+
 - `esc` at the screen means "no bead" rather than "nothing at all": the flow goes
   on with the configured `no_bead_prompt`. Cancelling a field is not cancelling
   the pick either — `ctrl-c` at `ctrl-b` leaves the branch as it was and the
@@ -305,22 +361,99 @@ worktrunk shortcut was typed).
   cancels it: the `✎` row's prompt field, and the bead-less branch field that
   asks for the one answer still missing after a typed prompt. Cancelling those
   starts nothing.
+- A name that is not a valid ref, for a create: `not a valid branch name:
+  <name>` on the float, before any tab is made.
 - The bead cannot be claimed: the flow stops before a tab is made, naming what
   `bd` said, so an agent never starts on a bead that is not its own.
-- The fetch fails (offline, a remote that is gone, a credential prompt): one line
-  says the branch starts from the base as it is, and the work starts anyway. A
-  fetch is a freshening, not a precondition.
-- `wt switch` fails (bad ref, dirty base, a failing hook): its output stays in
-  the tab, the agent is not started — it never starts in the wrong directory —
-  and you are left in a login shell in the main worktree. The bead stays
-  claimed, since the tab is there too; `bd unclaim <id>` releases it.
-- `jq` is missing, or worktrunk reports no worktree path: the same, with a
-  one-line error naming the branch on the tab.
+
+In the tab:
+
+- The fetch fails (offline, a remote that is gone, a credential prompt): `gws`
+  says in one line that the branch starts from the base as it is, and the work
+  starts anyway. A fetch is a freshening, not a precondition.
+- `gws` fails — a revision jj cannot resolve, a directory that is already there,
+  no `main` workspace, a failing hook: its own output stays in the tab, then
+  `rex-config: gws <branch> failed (exit <status>); not starting <agent>`, and
+  you are left in a login shell in the main worktree. The bead stays claimed,
+  since the tab is there too; `bd unclaim <id>` releases it.
+- `gws` succeeds but the path file holds no path, or cannot be read:
+  `rex-config: could not read the worktree path of <branch> from the gws path
+  file; not starting <agent>`, and the same login shell.
+- `wt switch` fails (a bad ref, a dirty worktree, a failing hook):
+  `rex-config: wt switch <branch> failed (exit <status>); not starting <agent>`,
+  with its output above it, and the same login shell.
+- `jq` is missing, or worktrunk's reply has no path in it:
+  `rex-config: could not read the worktree path of <branch> from the switch
+  reply (jq missing, or no path in it); not starting <agent>`.
 - The tab was made but the app could not be switched to it: the error says the
   tab was created and names what failed. The tab is still there.
 - The tab could not be made at all: the error names what Rex said, and — since
   the bead was already claimed before the tab — how to hand the claim back
   (`bd unclaim <id>`).
+
+## Converting a repo to jj workspaces
+
+Creating work needs a repo that is ginit'd: a jj directory repo at the wrapper,
+`main` as a full-sparse workspace beside it, and `ginit`'s seed files in the
+tree. `ginit` builds that from nothing — an empty remote, and a directory it
+makes itself — so it cannot be re-run over a repo that already has a `.git` at
+its wrapper and worktrees beside it. What is needed instead is ginit's own step,
+by hand, in the order that works.
+
+Run all of this from the wrapper — the directory holding `.git`, `main` and the
+worktrees — with nothing uncommitted in any of them.
+
+1. **Commit the seed files first.** `main` needs what `ginit` would have written
+   there: the post-start `copy-ignored` hook and the post-remove
+   `jj workspace forget {{ branch }}` hook in `.config/wt.toml`, the
+   `.worktreeinclude`, and the ignore lines `.env` and `.worktrees/`. They have
+   to be committed to `main` **before** `main` is re-created, because the hooks
+   have to be in the tree the new workspace gets.
+2. **Remove the existing worktrees; do not adopt them.** `jj workspace add`
+   refuses a directory that has anything in it, and an ordinary git worktree
+   left behind in a converted repo is a hazard: a `jj` command run inside one
+   resolves the *wrapper* as the workspace and snapshots that whole directory
+   into the empty default one. The branch stays; only the working copy goes.
+
+   ```bash
+   git worktree list                     # what is there
+   git worktree remove --force feat-pxp  # one line per worktree
+   ```
+
+3. **Keep the beads database out of jj's object store.** `.beads/` sits at the
+   wrapper root, and the first `jj git init` snapshots whatever is there, so the
+   embedded Dolt database and `.beads.gate.lock` would land in `.git` as objects
+   before the inert workspace is abandoned. One line, **before** the `jj git
+   init` in step 4, keeps them out:
+
+   ```bash
+   printf '.beads/\n.beads.gate.lock\n' >> .git/info/exclude
+   ```
+
+4. **Re-create `main` in ginit's order.**
+
+   ```bash
+   jj git init --git-repo .git .
+   git worktree remove --force main
+   jj workspace add --colocate main
+   git -C main checkout main
+   jj bookmark track main@origin
+   jj sparse set --clear
+   jj new "root()" -m 'default workspace: intentionally empty (see ginit)'
+   wt -C main -y hook post-start
+   ```
+
+   The order is the point. `jj workspace add` copies the sparse patterns of the
+   workspace it runs from, so `main` has to be added before
+   `jj sparse set --clear` empties the default workspace — otherwise the new
+   `main` is as empty as the workspace at the wrapper. The `jj sparse set
+   --clear` and the `jj new "root()"` are what make that wrapper workspace
+   inert once its worktree is gone, and the last line runs the post-start hooks
+   by hand, because jj and not wt made this worktree.
+5. **Check it with the flow itself.** In `main`, press `ctrl+space>n` and pick a
+   branch. The tab should land in a jj workspace with the branch attached and
+   the hooks run — `jj workspace list` from `main` names the new one — and the
+   agent should be working in it.
 
 ## Layout
 
