@@ -140,10 +140,7 @@ and attaching takes nothing away from the session you are looking at.
 `gws` runs `jj workspace add --colocate` from `main` — so the new workspace
 inherits the full sparse pattern — attaches a git branch at its head, and then
 runs the project's post-start hooks by hand, because jj and not wt made the
-worktree. It fetches the base revision first, in the tab. rex-config knows none
-of it: it never runs `jj`, `git worktree add` or a fetch itself, and it does not
-capture `gws`'s output — that output is the pane's, and the path comes back
-through the file instead.
+worktree.
 
 When the agent exits — quit, crash, or a brainstorming that finished — the tab
 drops into your login shell in that worktree: the hooks' output and the
@@ -178,9 +175,10 @@ branch that already exists, so there is no revision to start one from.
 The tab is what fetches, and `gws` is what does it: given a revision, it runs
 `jj git fetch` before it makes the workspace, with a 30-second cap when `timeout`
 or `gtimeout` is installed and unbounded otherwise. Nothing in the picker touches
-the network — a fetch behind the float could hang on a credential prompt nobody
-can see — and `GIT_TERMINAL_PROMPT=0` is exported in the tab, so a prompt there
-fails the fetch instead of asking.
+the network: a fetch behind the float could hang on a prompt nobody can see.
+`GIT_TERMINAL_PROMPT=0` is exported in the tab for the other program that
+reaches a remote there — the `git` a project's post-start hooks run — so a hook
+fails rather than waiting on a prompt nobody can answer.
 
 A failed fetch does not cost the work: one line on the pane — `gws: could not
 fetch; <branch> starts from <revision> as it is` — and the workspace is made from
@@ -192,7 +190,7 @@ workspace sits on `main`'s working copy.
 
 ## Requirements
 
-Creating a workspace is `gws`'s job, and `gws` is not a program on a `PATH`: it
+Creating a workspace is `gws`'s job, and `gws` is not a program on your `PATH`: it
 is a fish function in `~/.config/fish/functions/gws.fish`, and it is the one
 thing that knows how to make a jj colocated workspace. The tab's wrapper is a
 fish script for that reason. Before the screen opens, the picker refuses a repo
@@ -361,8 +359,8 @@ At the screen:
   cancels it: the `✎` row's prompt field, and the bead-less branch field that
   asks for the one answer still missing after a typed prompt. Cancelling those
   starts nothing.
-- A name that is not a valid ref, for a create: `not a valid branch name:
-  <name>` on the float, before any tab is made.
+- A name that is not a valid ref, for a create, is refused before any tab is
+  made: `new-work.sh: not a valid branch name: <name>` on the float.
 - The bead cannot be claimed: the flow stops before a tab is made, naming what
   `bd` said, so an agent never starts on a bead that is not its own.
 
@@ -372,7 +370,7 @@ In the tab:
   says in one line that the branch starts from the base as it is, and the work
   starts anyway. A fetch is a freshening, not a precondition.
 - `gws` fails — a revision jj cannot resolve, a directory that is already there,
-  no `main` workspace, a failing hook: its own output stays in the tab, then
+  no `main` workspace: its own output stays in the tab, then
   `rex-config: gws <branch> failed (exit <status>); not starting <agent>`, and
   you are left in a login shell in the main worktree. The bead stays claimed,
   since the tab is there too; `bd unclaim <id>` releases it.
@@ -406,9 +404,10 @@ worktrees — with nothing uncommitted in any of them.
 1. **Commit the seed files first.** `main` needs what `ginit` would have written
    there: the post-start `copy-ignored` hook and the post-remove
    `jj workspace forget {{ branch }}` hook in `.config/wt.toml`, the
-   `.worktreeinclude`, and the ignore lines `.env` and `.worktrees/`. They have
-   to be committed to `main` **before** `main` is re-created, because the hooks
-   have to be in the tree the new workspace gets.
+   `.worktreeinclude`, and the ignore lines `.env` and `.worktrees/`. `ginit`
+   writes both files in its second step, so copy them from there. They have to be
+   committed to `main` **before** `main` is re-created, because the hooks have to
+   be in the tree the new workspace gets.
 2. **Remove the existing worktrees; do not adopt them.** `jj workspace add`
    refuses a directory that has anything in it, and an ordinary git worktree
    left behind in a converted repo is a hazard: a `jj` command run inside one
@@ -437,7 +436,7 @@ worktrees — with nothing uncommitted in any of them.
    git worktree remove --force main
    jj workspace add --colocate main
    git -C main checkout main
-   jj bookmark track main@origin
+   jj bookmark track main@origin || true
    jj sparse set --clear
    jj new "root()" -m 'default workspace: intentionally empty (see ginit)'
    wt -C main -y hook post-start
