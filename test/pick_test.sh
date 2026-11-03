@@ -4,8 +4,8 @@
 # pick is the two-stage picker behind ctrl+space>n: a bead, then a branch, then
 # one JSON object handed back to Rex. The bead question is fzf, which cannot be
 # driven without a terminal, so it is bypassed with --bead or served by saved
-# tool output (--bd-json/--wt-json/--refs/--base-refs). The branch question is
-# typed, so its answers arrive on stdin like a person's would.
+# tool output (--bd-json/--wt-json/--refs/--base-bookmarks). The branch
+# question is typed, so its answers arrive on stdin like a person's would.
 #
 # Three things are outside what a pipe can reach, so a pty and a hand are what
 # verify them: the prompt text `branch [name]> ` as it appears on a terminal, the
@@ -35,6 +35,15 @@ fail() {
 # never decide what the next case opens on. A case that wants a remembered name
 # writes a directory of its own and names it in front of run_pick.
 export XDG_STATE_HOME=$tmp/state
+
+# gws is the fish function that knows how to make one jj colocated workspace,
+# and it lives in the developer's ~/.config/fish/functions, which is not here.
+# The picker asks fish whether the name is a function, so fish's search path is
+# pointed at a directory of its own with a stand-in in it: a case that wants
+# the refusal points it at an empty one instead.
+mkdir -p "$tmp/fish-functions"
+printf 'function gws\nend\n' >"$tmp/fish-functions/gws.fish"
+export fish_function_path=$tmp/fish-functions
 
 # Stand-ins for the tools that would otherwise talk to the outside world. rex
 # records its arguments, so "the hand-back never ran" is proven by a missing
@@ -100,7 +109,7 @@ run_pick() {
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json "$fixture" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-    --base-refs "$tmp/base-refs" "$@" \
+    --base-bookmarks "$tmp/base-bookmarks" "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
 }
@@ -128,7 +137,7 @@ run_pick_answer() {
       --main /p/demo/main --root /p/demo --project demo \
       --bd-json "$fixture" \
       --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-      --base-refs "$tmp/base-refs" "$@" \
+      --base-bookmarks "$tmp/base-bookmarks" "$@" \
       >"$tmp/out" 2>"$tmp/err"
   status=$?
 }
@@ -167,6 +176,32 @@ assert_json() {
   fi
 }
 
+# The host has to have these two, and neither can be stood in for: jj is a
+# program the picker runs, and fish is what answers whether gws is a function.
+# A host missing one cannot build the restricted PATHs below, so it says so
+# once, here, rather than through a case failing on a PATH nobody could build.
+for tool in fish jj; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'FAIL this host cannot build these fixtures: %s is not on PATH\n' \
+      "$tool"
+    exit 1
+  fi
+done
+
+# restricted_path <dir> <tool>...: a PATH holding just those tools, as symlinks
+# into DIR. It is how a case takes one tool away from a run without taking away
+# the ones around it -- a tool the host itself lacks is skipped, the run being
+# the thing under test rather than the machine.
+restricted_path() {
+  local dir=$1 tool found
+  shift
+  mkdir -p "$dir"
+  for tool in "$@"; do
+    found=$(command -v "$tool") || continue
+    ln -sf "$found" "$dir/$tool"
+  done
+}
+
 # A candidate set: the worktrunk fixture's branches (main, chore/p4pip,
 # feat/abc123) plus one that only a local branch has.
 cat >"$tmp/refs" <<'EOF'
@@ -175,19 +210,18 @@ feat/abc123
 main
 EOF
 
-# The refs the base is resolved from, exactly what
+# The bookmarks the base is resolved from, exactly what
 #
-#   git for-each-ref --format='%(refname)%00%(symref)' refs/remotes refs/heads
+#   jj bookmark list --all-remotes -T 'name ++ "@" ++ remote ++ "\n"'
 #
-# prints for a clone of origin/main with both of the local branches: a refname,
-# a NUL, then that ref's symref target -- empty for everything but origin/HEAD.
-printf 'refs/remotes/origin/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' \
-  >"$tmp/base-refs"
+# prints for a clone of origin/main whose jj also carries the bare local form
+# and its own mirror of the remote-tracking refs: one "<name>@<remote>" per line,
+# and the two forms the cycle must never offer beside them.
+printf 'main@\nmain@git\nmain@origin\n' >"$tmp/base-bookmarks"
 
-# The same for a clone whose one remote is upstream: the remote a base lives on
-# is what its ref record says, not the slash in its name.
-printf 'refs/remotes/upstream/main\0\nrefs/heads/main\0\nrefs/heads/master\0\n' \
-  >"$tmp/base-refs-upstream"
+# The same for a clone whose one remote is upstream: the remote a base comes
+# from is the suffix in the revision, not a second field.
+printf 'main@upstream\n' >"$tmp/base-bookmarks-upstream"
 
 # A ready list with nothing on it: the branch question on its own.
 printf '[]\n' >"$tmp/empty-beads.json"
@@ -209,8 +243,10 @@ if [ -e "$tmp/rex-args" ]; then
   fail "empty branch never calls rex" "rex saw: $(sed -n '1,4p' "$tmp/rex-args")"
 fi
 
-# (b) A branch that is exactly on the candidate list switches to the worktree
-# that already has it; the bead and its title ride along.
+# (b) A branch that is on the list only as a local ref -- git knows it and
+# worktrunk has no worktree for it -- is an attach: the bead and its title
+# ride along, and no base does, because the branch is not being made from
+# anything.
 run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch bug/a4l --dry-run
 if [ "$status" -ne 0 ]; then
   fail "exact branch exits 0" "exit $status: $(cat "$tmp/err")"
@@ -225,15 +261,15 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "exact branch: branch" "$json" '.branch == "bug/a4l"'
-  assert_json "exact branch: create is false" "$json" '.create == false'
+  assert_json "exact branch: an attach" "$json" '.worktree == "attach"'
   assert_json "exact branch: bead" "$json" '.bead == "pmm-iris-a4l"'
   assert_json "exact branch: title" "$json" \
     '.title == "Treat index/catalog pages as non-extractable"'
   assert_json "exact branch: project, root, main" "$json" \
     '.project == "demo" and .root == "/p/demo" and .main == "/p/demo/main"'
-  assert_json "exact branch: exactly the nine keys" "$json" \
-    'keys == ["base", "base_remote", "bead", "branch", "create", "main",
-              "project", "root", "title"]'
+  assert_json "exact branch: exactly the seven keys, no base and no create" \
+    "$json" 'keys == ["bead", "branch", "main", "project", "root",
+              "title", "worktree"]'
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/rex-args" ]; then
@@ -241,15 +277,16 @@ if [ -e "$tmp/rex-args" ]; then
 fi
 
 # (b2) A name that merely begins like a candidate is not that candidate: an
-# exact match is a switch, a fuzzy one is a branch to create. `bug/a4` is a
-# prefix of `bug/a4l`, so a substring match would call it existing.
+# exact match is one of the two lists, a fuzzy one is a branch to create.
+# `bug/a4` is a prefix of `bug/a4l`, so a substring match would call it
+# existing.
 run_pick test/fixtures/ready.json --bead '' --branch bug/a4 --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "fuzzy prefix prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "fuzzy prefix: branch" "$json" '.branch == "bug/a4"'
-  assert_json "fuzzy prefix: create is true" "$json" '.create == true'
+  assert_json "fuzzy prefix: a create" "$json" '.worktree == "create"'
 fi
 
 # (b3) A new branch name has to be a ref worktrunk can create; the script says
@@ -268,39 +305,198 @@ if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
     "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
 fi
 
-# (b4) The worktrunk shortcuts are answers, not names: ^ is the default branch,
-# - the previous worktree, @ the current one, pr:N a pull request's branch. None
-# of them is a ref to create and git refuses most of them, so they are handed to
-# worktrunk as the switch they are.
-pick_shortcut() {
-  local name=$1 branch=$2 filter=$3
-  ran=$((ran + 1))
-  run_pick test/fixtures/ready.json --bead '' --branch "$branch" --dry-run
-  if [ "$status" -ne 0 ]; then
-    fail "the $name shortcut is accepted" "exit $status: $(cat "$tmp/err")"
-    return
-  fi
-  if ! json=$(payload_of "$(cat "$tmp/out")"); then
-    fail "the $name shortcut prints runnable rex do work_new_go --args" \
-      "stdout: $(cat "$tmp/out")"
-    return
-  fi
-  assert_json "the $name shortcut is handed over as typed" "$json" "$filter"
-  assert_json "the $name shortcut is a switch" "$json" '.create == false'
+# The three meanings a picked name can have, one name each: a branch worktrunk
+# already has a worktree for, a local branch with no worktree, and a name
+# nothing knows yet. They are written here rather than added to the shared
+# fixtures, because the cases above count the rows of those. main is a second
+# worktree branch, so a list holding only one name cannot pass by accident.
+cat >"$tmp/mode-wt.json" <<'EOF'
+{
+  "schema": 2,
+  "items": [
+    {"branch": "main", "worktree": {"path": "/p/demo/main", "main": true}},
+    {"branch": "feat/on-worktree",
+     "worktree": {"path": "/p/demo/feat-on-worktree", "main": false}}
+  ]
 }
-pick_shortcut 'default branch' '^' '.branch == "^"'
-pick_shortcut 'previous worktree' '-' '.branch == "-"'
-pick_shortcut 'current worktree' '@' '.branch == "@"'
-pick_shortcut 'pull request' 'pr:123' '.branch == "pr:123"'
+EOF
+printf 'feat/bare-branch\n' >"$tmp/mode-refs"
 
-# A pr: that is not a number is not a shortcut, and no branch name either.
-ran=$((ran + 1))
-run_pick test/fixtures/ready.json --bead '' --branch 'pr:abc' --dry-run
-if [ "$status" -ne 2 ]; then
-  fail "a pr: without a number exits 2" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qF 'new-work.sh: not a valid branch name: pr:abc' "$tmp/err"; then
-  fail "a pr: without a number says so" "stderr: $(cat "$tmp/err")"
+# A pick with the branch already answered, over those three lists and the empty
+# ready list above. A dry run, so nothing is handed back and no stand-in rex is
+# needed to make it -- and the base bookmarks are the ones above, so a create has
+# a base to carry.
+pick_mode() {
+  local mode_branch=$1
+  shift
+  ran=$((ran + 1))
+  rm -f "$tmp/rex-args"
+  ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json "$tmp/empty-beads.json" \
+    --wt-json "$tmp/mode-wt.json" --refs "$tmp/mode-refs" \
+    --base-bookmarks "$tmp/base-bookmarks" \
+    --bead '' --branch "$mode_branch" --dry-run "$@" \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+# (b4) What a name means is one decision, taken once, from the two lists that
+# already answer it: worktrunk's worktree branches first, then the local
+# branches git knows. A name in the first list is a worktree to switch to, one
+# only the second holds is a branch waiting for a workspace -- an attach, which
+# makes the worktree without creating the branch -- and a name in neither is a
+# branch to make. The answer is the payload's `worktree`, and the base travels
+# with a create alone: a switch and an attach are given a branch that already
+# exists, and there is nothing for either of them to be created from.
+pick_mode feat/on-worktree
+if [ "$status" -ne 0 ]; then
+  fail "a worktree branch exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a worktree branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a worktree branch says switch" "$json" '.worktree == "switch"'
+  assert_json "a switch carries no base: it was made long ago" "$json" \
+    'has("base") | not'
+  assert_json "a switch carries no create key any more" "$json" \
+    'has("create") | not'
 fi
+
+pick_mode feat/bare-branch
+if [ "$status" -ne 0 ]; then
+  fail "a bare local branch exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a bare local branch prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a local branch with no worktree says attach" "$json" \
+    '.worktree == "attach"'
+  assert_json "an attach carries no base: the branch is not being made" \
+    "$json" 'has("base") | not'
+fi
+
+pick_mode feat/brand-new
+if [ "$status" -ne 0 ]; then
+  fail "a name in neither list exits 0" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a name in neither list prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a name nothing knows says create" "$json" \
+    '.worktree == "create"'
+  assert_json "a create carries the base it starts from" "$json" \
+    '.base == "main@origin"'
+fi
+
+# (b4a) The base cycle is read for a create alone. A switch and an attach name a
+# branch that already exists, and their payload carries no revision, so nothing is
+# asked of jj for them -- a bookmark list that cannot even be opened is not their
+# failure. The same list does stop a create, which is what proves these two cases
+# are about the mode rather than about a failure that stopped happening.
+pick_without_bookmarks() {
+  local mode_branch=$1
+  ran=$((ran + 1))
+  ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json "$tmp/empty-beads.json" \
+    --wt-json "$tmp/mode-wt.json" --refs "$tmp/mode-refs" \
+    --base-bookmarks "$tmp/no-such-bookmarks" \
+    --bead '' --branch "$mode_branch" --dry-run \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+pick_without_bookmarks feat/on-worktree
+if [ "$status" -ne 0 ]; then
+  fail "a switch needs no bookmarks" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a switch needs no bookmarks: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a switch is handed back without the base cycle" "$json" \
+    '.worktree == "switch"'
+fi
+ran=$((ran + 1))
+if grep -q 'bookmarks' "$tmp/err"; then
+  fail "a switch never reads the bookmarks" "stderr: $(cat "$tmp/err")"
+fi
+
+pick_without_bookmarks feat/bare-branch
+if [ "$status" -ne 0 ]; then
+  fail "an attach needs no bookmarks" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "an attach needs no bookmarks: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "an attach is handed back without the base cycle" "$json" \
+    '.worktree == "attach"'
+fi
+
+pick_without_bookmarks feat/brand-new
+if [ "$status" -ne 1 ]; then
+  fail "a create still reads the bookmarks" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF "new-work.sh: pick: could not read the bookmarks of $tmp/no-such-bookmarks" \
+  "$tmp/err"; then
+  fail "a create says which bookmarks it could not read" "stderr: $(cat "$tmp/err")"
+fi
+
+# (b4b) A live `wt list` that fails is a read that failed, not a repository with
+# no worktrees. The two are different answers to different questions: a name the
+# list would have held is a worktree to switch to, and taking it for a branch
+# only git knows would send the tab to `gws --attach`, which refuses on the
+# directory that is already there. So the pick stops, naming what it could not
+# read -- where `candidates` still prints git's branches, because a partial list
+# of suggestions is still worth having (test/branch_test.sh pins that half).
+mkdir -p "$tmp/nowt/main" "$tmp/nowt/.jj/repo" "$tmp/bad-wt"
+cat >"$tmp/bad-wt/wt" <<'EOF'
+#!/bin/sh
+printf 'wt: not a worktrunk repository\n' >&2
+exit 1
+EOF
+chmod +x "$tmp/bad-wt/wt"
+
+ran=$((ran + 1))
+PATH="$tmp/bad-wt:$PATH" ./new-work.sh pick \
+  --main "$tmp/nowt/main" --root /p/demo --project demo \
+  --bd-json "$tmp/empty-beads.json" --refs "$tmp/mode-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead '' --branch feat/on-worktree --dry-run \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+if [ "$status" -ne 1 ]; then
+  fail "a wt that cannot be read stops a pick" "exit $status: $(cat "$tmp/err")"
+elif ! grep -qxF "new-work.sh: pick: could not list the branches of $tmp/nowt/main" \
+  "$tmp/err"; then
+  fail "a wt that cannot be read is named" "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -s "$tmp/out" ]; then
+  fail "a wt that cannot be read hands nothing back" "stdout: $(cat "$tmp/out")"
+fi
+
+# The worktrunk shortcuts are gone, and four more names are refused with them.
+# `pr:7` and `mr:12` named a pull or merge request's branch when worktrunk
+# resolved them, and this flow does not ask it to; `^` and `-` were worktrunk's
+# default branch and its previous worktree; `@` is jj's own name for the working
+# copy, which git will happily accept as a branch name and this flow will not,
+# because the revision language it now speaks would read a bookmark called `@` as
+# the working copy. None of them is on either list, so each is refused here, with
+# the reason, while the picker is still on screen -- rather than resolving in a
+# tab to a name nothing can carry back.
+for refused in '^' '-' '@' 'pr:7' 'mr:12'; do
+  ran=$((ran + 1))
+  pick_mode "$refused"
+  if [ "$status" -ne 2 ]; then
+    fail "the name $refused exits 2" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -qxF "new-work.sh: not a valid branch name: $refused" "$tmp/err"; then
+    fail "the name $refused says it is not a branch name" \
+      "stderr: $(cat "$tmp/err")"
+  fi
+  ran=$((ran + 1))
+  if [ -s "$tmp/out" ] || [ -e "$tmp/rex-args" ]; then
+    fail "the name $refused starts nothing" \
+      "stdout: $(cat "$tmp/out") rex: $(sed -n '1,4p' "$tmp/rex-args" 2>/dev/null)"
+  fi
+done
 
 # (b5) `git check-ref-format --branch` *expands* a name like @{-1} and prints
 # what it resolved to, so the check on its own would let the literal through and
@@ -328,7 +524,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "typed branch payload" "$json" '.branch == "feat/typed-name"'
-  assert_json "typed branch payload" "$json" '.create == true'
+  assert_json "typed branch payload" "$json" '.worktree == "create"'
   assert_json "typed branch payload" "$json" '.bead == "" and .title == ""'
 fi
 ran=$((ran + 1))
@@ -362,7 +558,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out")"
 else
   assert_json "exact candidate payload" "$json" '.branch == "feat/abc123"'
-  assert_json "exact candidate payload" "$json" '.create == false'
+  assert_json "exact candidate payload" "$json" '.worktree == "switch"'
 fi
 
 # (d2) The branch question is typed, not picked: the name derived from the bead
@@ -380,8 +576,8 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "enter at the suggestion: the suggestion is the branch" \
     "$json" '.branch == "feat/58h"'
-  assert_json "enter at the suggestion: create is true" "$json" \
-    '.create == true'
+  assert_json "enter at the suggestion: a create" "$json" \
+    '.worktree == "create"'
   assert_json "enter at the suggestion: the bead rides along" "$json" \
     '.bead == "pmm-iris-58h" and (.title | length) > 0'
 fi
@@ -399,7 +595,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "typed branch: exactly what was typed" "$json" \
     '.branch == "my-branch"'
-  assert_json "typed branch: create is true" "$json" '.create == true'
+  assert_json "typed branch: a create" "$json" '.worktree == "create"'
 fi
 
 # (d3b) A pasted answer arrives with whitespace around it, and whitespace is part
@@ -413,7 +609,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
   assert_json "a padded branch answer is trimmed" "$json" \
-    '.branch == "feat/spaced" and .create == true'
+    '.branch == "feat/spaced" and .worktree == "create"'
 fi
 
 run_pick_answer '   ' test/fixtures/ready.json --bead pmm-iris-58h --dry-run
@@ -434,7 +630,7 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "typed candidate: the typed name" "$json" \
     '.branch == "feat/abc123"'
-  assert_json "typed candidate: create is false" "$json" '.create == false'
+  assert_json "typed candidate: a switch" "$json" '.worktree == "switch"'
 fi
 
 # (d5) The bead question is still a picker and still skipped without a
@@ -531,7 +727,7 @@ PATH=/nonexistent REX_ARGS_FILE=$tmp/rex-args "${BASH:-bash}" ./new-work.sh pick
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 1 ]; then
@@ -543,17 +739,13 @@ fi
 # git is load-bearing on the create path -- check-ref-format decides whether a
 # name can be made, for-each-ref is the branch list -- so a missing one is named
 # rather than every name coming back "not a valid branch name".
-mkdir -p "$tmp/no-git-bin"
-for tool in bash cat cut grep sed awk tr jq; do
-  found=$(command -v "$tool") || continue
-  ln -sf "$found" "$tmp/no-git-bin/$tool"
-done
+restricted_path "$tmp/no-git-bin" bash cat cut grep sed awk tr jq
 ran=$((ran + 1))
 PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch feat/needs-git --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
@@ -563,19 +755,18 @@ elif ! grep -q 'git not found on PATH' "$tmp/err"; then
   fail "a missing git is named" "stderr: $(cat "$tmp/err")"
 fi
 
-# Every tool the run needs except fzf: with no terminal nothing is asked, so the
-# run must reach the empty-branch exit instead of complaining about fzf.
-mkdir -p "$tmp/no-fzf-bin"
-for tool in bash cat cut grep sed awk tr git bd wt jq; do
-  found=$(command -v "$tool") || continue
-  ln -sf "$found" "$tmp/no-fzf-bin/$tool"
-done
+# Every tool the run needs except fzf and gum: with no terminal nothing is asked,
+# so the run must reach the empty-branch exit instead of complaining about the
+# two tools only the screen calls. jj and fish are on this PATH because gws is
+# the only thing that makes the workspace and this machine has it (a stand-in,
+# as the fish function path at the top of the file says).
+restricted_path "$tmp/no-fzf-bin" bash cat cut grep sed awk tr git bd wt jq jj fish
 ran=$((ran + 1))
 PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 3 ]; then
@@ -593,7 +784,7 @@ printf 'feat/no-fzf\n' |
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json test/fixtures/ready.json \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-    --base-refs "$tmp/base-refs" \
+    --base-bookmarks "$tmp/base-bookmarks" \
     --bead pmm-iris-a4l --dry-run >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -604,8 +795,173 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "a typed branch needs no fzf: the branch" "$json" \
     '.branch == "feat/no-fzf"'
-  assert_json "a typed branch needs no fzf: create is true" "$json" \
-    '.create == true'
+  assert_json "a typed branch needs no fzf: a create" "$json" \
+    '.worktree == "create"'
+fi
+
+# (g2) A machine or a repo that cannot make a jj workspace is refused before the
+# screen opens and before anything is claimed: a bead picked for a pane that can
+# only fail is worse than a refusal. Four things can be missing, and each is
+# named -- the wrapper's .jj/repo (this repo was never ginit'd), jj on PATH (the
+# base cycle runs it), gws as a fish function (the one thing that knows the
+# order a workspace and a worktree are made in), and fish itself (which is what
+# answers for gws at all). Nothing has been asked, handed back or even started
+# when one of them is: stdout, the stand-in fzf and the stand-in rex are all
+# left untouched.
+#
+# refused <name> <fragment stderr must hold> <command...>, the environment as
+# leading WORDS: what differs between the cases is only what each one lacks.
+refused() {
+  local name=$1 want=$2
+  shift 2
+  ran=$((ran + 1))
+  rm -rf "$tmp/rex-args" "$tmp/fzf-ran"
+  env FZF_MARKER="$tmp/fzf-ran" REX_ARGS_FILE="$tmp/rex-args" "$@" \
+    >"$tmp/out" 2>"$tmp/err" </dev/null
+  local got=$?
+  if [ "$got" -ne 1 ]; then
+    fail "$name" "exit $got: $(cat "$tmp/err")"
+  elif ! grep -qF "$want" "$tmp/err"; then
+    fail "$name is named" "stderr: $(cat "$tmp/err")"
+  elif [ -s "$tmp/out" ]; then
+    fail "$name leaves no prompt and no payload" \
+      "stdout: $(cat "$tmp/out")"
+  elif [ -e "$tmp/rex-args" ]; then
+    fail "$name hands nothing back" "$(cat "$tmp/rex-args")"
+  elif [ -e "$tmp/fzf-ran" ]; then
+    fail "$name opens no screen" 'fzf was started'
+  fi
+}
+
+# A repo that was never ginit'd -- no .jj/repo beside main -- while main itself is
+# there, so the refusal is about the workspace and not about a directory that
+# does not exist. No fixtures at all here: a run given all four never opens
+# --main, and this one has to.
+mkdir -p "$tmp/plain/main"
+refused "a repo that was never ginit'd exits 1" "not ginit'd" \
+  ./new-work.sh pick --main "$tmp/plain/main" --root /p/demo --project demo \
+  --bead '' --branch feat/x --dry-run
+ran=$((ran + 1))
+if ! grep -qF "$(dirname "$tmp/plain/main") is not ginit'd" "$tmp/err"; then
+  fail "the never-ginit'd refusal names the wrapper it looked in" \
+    "stderr: $(cat "$tmp/err")"
+elif ! grep -qF 'run ginit first' "$tmp/err"; then
+  fail "the never-ginit'd refusal names ginit" "stderr: $(cat "$tmp/err")"
+fi
+
+# jj reads the base cycle, so it is named only where that cycle is really read:
+# no --base-bookmarks fixture stands in for the bookmark list here, which is
+# also why --main has to exist -- and, being a wrapper gws could create in, to
+# hold .jj/repo itself, which the preflight finds with dirname.
+mkdir -p "$tmp/ginit/main" "$tmp/ginit/.jj/repo"
+restricted_path "$tmp/no-jj-bin" \
+  bash cat cut grep sed awk tr dirname mktemp rm git bd wt jq fish
+refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
+  PATH="$tmp/no-jj-bin" ./new-work.sh pick \
+  --main "$tmp/ginit/main" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --bead pmm-iris-a4l --branch feat/no-jj
+
+# The shape that is deliberately NOT supported, pinned here so it is not
+# re-admitted by accident: a normal clone ginit'd where it stands, so .jj/repo
+# sits inside the worktree itself rather than in a wrapper beside a main
+# workspace. gws' ancestor walk would find that repo, but gws then runs its add
+# from <wrapper>/main to inherit that workspace's sparse patterns and refuses
+# without one -- after the bead is claimed, which is the outcome this preflight
+# exists to prevent. So the refusal happens here, before anything is asked.
+mkdir -p "$tmp/in-place/.jj/repo"
+refused "a repo ginit'd in place is refused for it" "not ginit'd" \
+  ./new-work.sh pick --main "$tmp/in-place" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --bead pmm-iris-a4l --branch feat/in-place
+ran=$((ran + 1))
+if ! grep -qF 'gws needs a wrapper with .jj/repo as a directory' "$tmp/err"; then
+  fail "the in-place refusal says which shape gws needs" \
+    "stderr: $(cat "$tmp/err")"
+fi
+
+# The same jj, needed on the screen even where --no-base says there is no
+# revision at all: the float resolves the whole cycle anyway, so ctrl-r can
+# cycle back to one, and that read is a jj call. PICK_SCREEN=1 is what says
+# this run has the float's terminal, and --bead answers the bead question so
+# that no tool only the screen needs is asked for on the way to jj.
+refused "a screen with no jj exits 1" 'jj not found on PATH — press any key' \
+  PICK_SCREEN=1 PATH="$tmp/no-jj-bin" ./new-work.sh pick \
+  --main "$tmp/ginit/main" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --no-base --bead '' --branch feat/no-jj-screen --dry-run
+
+# gws is a fish function rather than a program, and an empty function path is a
+# machine that has none: the pane would open and then create nothing. No
+# --dry-run here, because that is exactly the run that makes no workspace and so
+# is not stopped for the tool.
+mkdir -p "$tmp/no-fish-functions"
+refused "a missing gws exits 1" 'gws is not a fish function' \
+  fish_function_path="$tmp/no-fish-functions" ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-gws
+
+# A machine with no fish at all cannot even be asked, and is named the way every
+# other missing tool is -- by need, whose message this one inherits.
+restricted_path "$tmp/no-fish-bin" bash cat cut grep sed awk tr git bd wt jq jj
+refused "a missing fish exits 1" 'fish not found on PATH — press any key' \
+  PATH="$tmp/no-fish-bin" ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-fish
+
+# (g3) The same two checks, seen from the other side: a preflight never stops a
+# run for a tool that run would not call. A --dry-run hands its answers back
+# and creates no workspace, so gws is never asked for; and a bookmark fixture
+# stands in for the one thing jj is read for, so jj is never asked for either.
+# The payload is the proof: a run on a machine with neither still prints the
+# line that carries its branch.
+ran=$((ran + 1))
+fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-jj-bin" \
+  REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-jj --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a dry run needs neither jj nor gws" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a dry run needs neither jj nor gws: no payload" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a dry run needs neither jj nor gws: the branch" "$json" \
+    '.branch == "feat/no-jj" and .worktree == "create"'
+fi
+
+# --no-base is the other way the cycle is never read, and it needs no bookmark
+# fixture to say so: the run asks jj for nothing and is not stopped for it.
+ran=$((ran + 1))
+fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-jj-bin" \
+  REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main /p/demo/main --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --no-base --bead '' --branch feat/no-jj-no-base --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "--no-base needs no jj" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "--no-base needs no jj: no payload" "stdout: $(cat "$tmp/out")"
+else
+  assert_json "--no-base needs no jj: no revision at all" "$json" \
+    '.base == false'
 fi
 
 # (h) pick without the project it is working on. stdin is /dev/null so a run
@@ -640,10 +996,10 @@ elif grep -q 'cd:' "$tmp/err"; then
     "bash's own cd error is still in: $(cat "$tmp/err")"
 fi
 
-# (h3) The same directory, this time with --no-base and no --base-refs: nothing
-# is read for the base, so the guard above never opens --main and a directory
-# that is not there costs nothing. The arm every run_pick case hides, because
-# every one of them names a --base-refs.
+# (h3) The same directory, this time with --no-base and no --base-bookmarks:
+# nothing is read for the base, so the guard above never opens --main and a
+# directory that is not there costs nothing. The arm every run_pick case hides,
+# because every one of them names a --base-bookmarks.
 ran=$((ran + 1))
 ./new-work.sh pick --main "$tmp/nowhere" --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
@@ -657,7 +1013,7 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "a --no-base pick prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out")"
 else
-  assert_json "a --no-base pick: the worktrunk default, and no remote" "$json" \
+  assert_json "a --no-base pick: no revision at all" "$json" \
     '.base == false and (has("base_remote") | not)'
 fi
 
@@ -780,7 +1136,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args \
   ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch bug/a4l \
   >"$tmp/out" 2>"$tmp/err" </dev/null
 status=$?
@@ -811,7 +1167,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args REX_FAIL='no server' \
   ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch bug/a4l \
   >"$tmp/out" 2>"$tmp/err" < <(sleep 10)
 status=$?
@@ -928,8 +1284,8 @@ else
   assert_json "--blank picks no bead and no title" "$json" \
     '.bead == "" and .title == ""'
   assert_json "--blank's keys are the flag and nothing else" "$json" \
-    'keys == ["base", "base_remote", "bead", "blank", "branch", "create",
-              "main", "project", "root", "title"]'
+    'keys == ["base", "bead", "blank", "branch", "main",
+              "project", "root", "title", "worktree"]'
 fi
 
 # The three answers to the bead question are three answers to one question, so
@@ -957,8 +1313,8 @@ else
   assert_json "a typed prompt replaces the bead" "$json" \
     '.bead == "" and .title == ""'
   assert_json "a typed prompt is the only new key" "$json" \
-    'keys == ["base", "base_remote", "bead", "branch", "create", "main",
-              "project", "prompt", "root", "title"]'
+    'keys == ["base", "bead", "branch", "main", "project",
+              "prompt", "root", "title", "worktree"]'
 fi
 
 # A prompt with quotes and runs of spaces survives as one value: it travels to
@@ -1008,8 +1364,8 @@ if ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "the agent list leads with its default" "$json" '.agent == "pi"'
   assert_json "the agent question asks nobody off a terminal" "$json" \
-    'keys == ["agent", "base", "base_remote", "bead", "branch", "create",
-              "main", "project", "root", "title"]'
+    'keys == ["agent", "base", "bead", "branch", "main",
+              "project", "root", "title", "worktree"]'
 fi
 
 run_pick test/fixtures/ready.json --agents pi --agent claude \
@@ -1052,7 +1408,7 @@ PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/base-refs" \
+  --base-bookmarks "$tmp/base-bookmarks" \
   --agents pi --branch feat/no-gum --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
@@ -1090,55 +1446,69 @@ elif [ -e "$tmp/called" ]; then
     "called: $(sort -u "$tmp/called" 2>/dev/null)"
 fi
 
-# (r) The base. The picker resolves the ref new branches are created from and
-# hands it over with the remote it lives on, so the tab can fetch that one; the
-# tab owns the fetch, so the picker says nothing about the base on stderr.
-run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch feat/x --dry-run
+# (r) The base. The picker resolves the jj revision new workspaces are started
+# from and hands it over as one string -- the remote it came from is the @remote
+# in that name -- and the tab owns the fetch, so the picker says nothing about
+# the base on stderr.
+run_pick test/fixtures/ready.json --bead pmm-iris-a4l --branch feat/x \
+  --origin-head origin/main --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "the base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "the branch question opens on origin/main" "$json" \
-    '.base == "origin/main"'
-  assert_json "the base names the remote it lives on" "$json" \
-    '.base_remote == "origin"'
+  assert_json "the branch question opens on main@origin" "$json" \
+    '.base == "main@origin"'
+  assert_json "the base is one revision and no second carrier" "$json" \
+    '(has("base_remote") | not)'
 fi
 
-# --base is the answer whatever this clone would have opened on, and it is not
-# a ref this clone has: the picker does not get to refuse it. A ref with no
-# record of its own is on no remote, so the tab fetches nothing for it.
-run_pick test/fixtures/ready.json --branch feat/x --base refresh --dry-run
+# With no origin/HEAD named, the cycle's fixed answer is the one that travels --
+# the default branch as the remote has it, not this machine's copy.
+run_pick test/fixtures/ready.json --branch feat/x --dry-run
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "the fallback base prints runnable rex do work_new_go --args" \
+    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+else
+  assert_json "a clone with no origin/HEAD opens on main@origin" "$json" \
+    '.base == "main@origin"'
+fi
+
+# --base is the answer whatever this clone would have opened on, and it is not a
+# revision this clone has: the picker does not get to refuse it, because the
+# workspace is made later, in the tab, where jj answers for it.
+run_pick test/fixtures/ready.json --branch feat/x --base refresh@origin \
+  --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "--base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "--base is the base, verbatim" "$json" '.base == "refresh"'
-  assert_json "a base on no remote carries no remote" "$json" \
+  assert_json "--base is the base, verbatim" "$json" '.base == "refresh@origin"'
+  assert_json "a leaf revision carries no second carrier" "$json" \
     '(has("base_remote") | not)'
 fi
 
-# --no-base is the worktrunk default: a boolean false, not the string an --arg
-# would have made of it, and no remote to fetch.
+# --no-base is "no revision at all": a boolean false, not the string an --arg
+# would have made of it.
 run_pick test/fixtures/ready.json --branch feat/x --no-base --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "--no-base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
   assert_json "--no-base is false, not a word" "$json" '.base == false'
-  assert_json "--no-base fetches nothing" "$json" \
+  assert_json "--no-base sends no second carrier" "$json" \
     '(has("base_remote") | not)'
 fi
 
-# The remote comes from the ref record, so a base on a remote that is not
-# origin says so, and the tab fetches that one rather than origin.
-run_pick test/fixtures/ready.json --branch feat/x --base upstream/main \
-  --base-refs "$tmp/base-refs-upstream" --dry-run
+# A base on a remote that is not origin says so in the revision itself, which is
+# what tells the tab which remote to fetch.
+run_pick test/fixtures/ready.json --branch feat/x --base main@upstream \
+  --base-bookmarks "$tmp/base-bookmarks-upstream" --dry-run
 if ! json=$(payload_of "$(cat "$tmp/out")"); then
   fail "an upstream base prints runnable rex do work_new_go --args" \
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
-  assert_json "an upstream base says upstream" "$json" \
-    '.base == "upstream/main" and .base_remote == "upstream"'
+  assert_json "an upstream base says upstream in its own name" "$json" \
+    '.base == "main@upstream" and (has("base_remote") | not)'
 fi
 
 # A base and no base are two answers to one question, so both at once is a
@@ -1149,33 +1519,20 @@ if [ "$status" -ne 2 ]; then
   fail "a base and no base together exit 2" "exit $status: $(cat "$tmp/err")"
 fi
 
-# --base given as the refname it really is travels as the short name: that is
-# what the cycle speaks, and it is the form the remote was found under -- the
-# payload carries the base the tab can use rather than the words it was given.
-run_pick test/fixtures/ready.json --branch feat/x \
-  --base refs/remotes/origin/main --dry-run
-if ! json=$(payload_of "$(cat "$tmp/out")"); then
-  fail "a full refname base prints runnable rex do work_new_go --args" \
-    "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
-else
-  assert_json "a full refname base is the short name, on its remote" "$json" \
-    '.base == "origin/main" and .base_remote == "origin"'
-fi
-
-# A --base-refs that cannot be read is one line under this verb's own name,
+# A --base-bookmarks that cannot be read is one line under this verb's own name,
 # and no shell line number beside it.
 ran=$((ran + 1))
 ./new-work.sh pick --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  --base-refs "$tmp/no-such-refs" --bead '' --branch feat/x --dry-run \
+  --base-bookmarks "$tmp/no-such-bookmarks" --bead '' --branch feat/x --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 1 ]; then
-  fail "an unreadable --base-refs exits 1" "exit $status: $(cat "$tmp/err")"
+  fail "an unreadable --base-bookmarks exits 1" "exit $status: $(cat "$tmp/err")"
 elif [ "$(cat "$tmp/err")" != \
-  "new-work.sh: pick: could not read the refs of $tmp/no-such-refs" ]; then
-  fail "an unreadable --base-refs is named under pick" "stderr: $(cat "$tmp/err")"
+  "new-work.sh: pick: could not read the bookmarks of $tmp/no-such-bookmarks" ]; then
+  fail "an unreadable --base-bookmarks is named under pick" "stderr: $(cat "$tmp/err")"
 fi
 
 # The note is gone. Where a new branch starts from is now a word in the payload
@@ -1246,44 +1603,44 @@ check_header() { # NAME WANT
 
 # The header the screen opens on: the project, then the three answers, then the
 # line of keys. An empty agent is "none" -- the cycle's no-agent row -- and an
-# empty base ref is the worktrunk-default sentinel, named rather than blanked.
+# empty base is the "no revision at all" sentinel, named rather than blanked.
 composer_state "$tmp/cs1" pi 'bug/58h' 1
-printf 'origin/main\torigin\n@\t\nmain\t\n' >"$tmp/cs1/bases"
+printf 'main@origin\n@\nmain\n' >"$tmp/cs1/bases"
 run_composer header --state "$tmp/cs1" --project rex-config
 check_header "the header's two lines" \
-  "$(heading rex-config pi 'bug/58h' origin/main)"
+  "$(heading rex-config pi 'bug/58h' main@origin)"
 
 composer_state "$tmp/cs2" '' 'feat/x' 1
-printf '\t\n@\t\nmain\t\n' >"$tmp/cs2/bases"
+printf '\n@\nmain\n' >"$tmp/cs2/bases"
 run_composer header --state "$tmp/cs2" --project rex-config
-check_header "an empty agent is none and an empty base is the wt default" \
-  "$(heading rex-config none 'feat/x' 'wt default')"
+check_header "an empty agent is none and an empty base is none" \
+  "$(heading rex-config none 'feat/x' 'none')"
 
 # The branch the screen opens on is the name a bare Enter would create, seeded
 # from the bead the cursor lands on (load:pos(2)), so the field describes the tab
 # the pick would make before anything is pressed. This is that state, the way the
 # picker writes it: the first bead's derived name.
 composer_state "$tmp/cs1b" pi 'feat/58h' 1
-printf 'origin/main\torigin\n@\t\n' >"$tmp/cs1b/bases"
+printf 'main@origin\n@\n' >"$tmp/cs1b/bases"
 run_composer header --state "$tmp/cs1b" --project rex-config
 check_header "a branch seeded from the first bead is the header's branch" \
-  "$(heading rex-config pi 'feat/58h' origin/main)"
+  "$(heading rex-config pi 'feat/58h' main@origin)"
 
 # With nothing to name -- no bead to derive a branch from, and no ctrl-b -- the
 # field says so in words: an empty one would print as a doubled space and read
 # as a bug.
 composer_state "$tmp/cs1c" pi '' 1
-printf 'origin/main\torigin\n@\t\n' >"$tmp/cs1c/bases"
+printf 'main@origin\n@\n' >"$tmp/cs1c/bases"
 run_composer header --state "$tmp/cs1c" --project rex-config
 check_header "a branch nothing has named yet says so" \
-  "$(heading rex-config pi '(none yet)' origin/main)"
+  "$(heading rex-config pi '(none yet)' main@origin)"
 
 # ctrl-a: the next name on the agent list, then none, then round again -- and
 # only the header is repainted. The rows are beads, so nothing about them
 # depends on the agent and a key that reloaded them would clear the list and
 # drop the cursor back to the top for a one-word change.
 composer_state "$tmp/cs3" pi 'feat/one' 1
-printf 'origin/main\torigin\n@\t\n' >"$tmp/cs3/bases"
+printf 'main@origin\n@\n' >"$tmp/cs3/bases"
 rows_before=$(cat "$tmp/cs3/rows")
 cycle_agent() { # NAME WANT_LABEL WANT_AGENT
   local name=$1 label=$2 file=$3
@@ -1294,7 +1651,7 @@ cycle_agent() { # NAME WANT_LABEL WANT_AGENT
     return
   fi
   if [ "$(cat "$tmp/out")" != \
-    "$(heading rex-config "$label" feat/one origin/main)" ]; then
+    "$(heading rex-config "$label" feat/one main@origin)" ]; then
     fail "$name repaints the header" "stdout: $(cat "$tmp/out")"
   fi
   if [ "$(cat "$tmp/cs3/agent")" != "$file" ]; then
@@ -1310,10 +1667,10 @@ cycle_agent 'the name after the last is none' none ''
 cycle_agent 'the cycle wraps to the first name' pi pi
 
 # ctrl-r: the next base in the cycle, then round again. The cycle was resolved
-# once, before the screen opened -- one for-each-ref per run, not one per
-# keystroke -- so a --main that is not even there proves no ref was read.
+# once, before the screen opened -- one bookmark list per run, not one per
+# keystroke -- so a --main that is not even there proves nothing was read.
 composer_state "$tmp/cs4" pi 'feat/one' 1
-printf 'origin/main\torigin\n@\t\nmain\t\n' >"$tmp/cs4/bases"
+printf 'main@origin\n@\nmain\n' >"$tmp/cs4/bases"
 cycle_base() { # NAME WANT_INDEX WANT_LABEL
   local name=$1 index=$2 label=$3
   run_composer cycle-base --state "$tmp/cs4" --project rex-config \
@@ -1332,13 +1689,13 @@ cycle_base() { # NAME WANT_INDEX WANT_LABEL
 }
 cycle_base 'the next base is @' 2 '@'
 cycle_base 'the base after that is main' 3 'main'
-cycle_base 'the cycle wraps to the opening answer' 1 'origin/main'
+cycle_base 'the cycle wraps to the opening answer' 1 'main@origin'
 
 # The cycle is counted by entries, not by newlines: a bases file whose last line
 # has none -- one written by hand -- must not lose its last base, which would
 # shorten the cycle and wrap one entry early.
 composer_state "$tmp/cs8" pi 'feat/one' 1
-printf 'origin/main\torigin\n@\t' >"$tmp/cs8/bases"
+printf 'main@origin\n@' >"$tmp/cs8/bases"
 cycle_base_no_newline() { # NAME WANT_INDEX WANT_LABEL
   local name=$1 index=$2 label=$3
   run_composer cycle-base --state "$tmp/cs8" --project rex-config \
@@ -1356,7 +1713,7 @@ cycle_base_no_newline() { # NAME WANT_INDEX WANT_LABEL
 }
 cycle_base_no_newline 'a bases file with no final newline cycles to its last entry' \
   2 '@'
-cycle_base_no_newline 'a bases file with no final newline wraps after it' 1 'origin/main'
+cycle_base_no_newline 'a bases file with no final newline wraps after it' 1 'main@origin'
 
 # ctrl-b: the branch, typed. gum asks it in the float and stdin carries it in a
 # pipe, so this is the real path either way. The answer is trimmed, the edit is
@@ -1461,24 +1818,24 @@ usage_case 'branch-field refuses an unknown option' \
   'composer branch-field: unknown option --nope' branch-field \
   --state "$tmp/cs1" --nope
 
-# ctrl-r reads its cycle from --base-refs when the state holds none, as `bases`
-# does: the two arguments are alternatives -- one of them names the refs -- and
-# neither is a --main the other merely decorates.
+# ctrl-r reads its cycle from --base-bookmarks when the state holds none, as
+# `bases` does: the two arguments are alternatives -- one of them names the
+# bookmarks -- and neither is a --main the other merely decorates.
 composer_state "$tmp/cs9" pi 'feat/one' 1
 : >"$tmp/cs9/bases"
 run_composer cycle-base --state "$tmp/cs9" --project rex-config \
-  --base-refs "$tmp/base-refs"
+  --base-bookmarks "$tmp/base-bookmarks"
 if [ "$status" -ne 0 ]; then
-  fail "cycle-base takes --base-refs on its own" "exit $status: $(cat "$tmp/err")"
+  fail "cycle-base takes --base-bookmarks on its own" "exit $status: $(cat "$tmp/err")"
 elif [ "$(cat "$tmp/out")" != \
   "$(heading rex-config pi feat/one '@')" ]; then
-  fail "cycle-base resolves its cycle from --base-refs" "stdout: $(cat "$tmp/out")"
+  fail "cycle-base resolves its cycle from --base-bookmarks" "stdout: $(cat "$tmp/out")"
 elif [ "$(cat "$tmp/cs9/base_index")" != 2 ]; then
   fail "cycle-base moves to the second entry" \
     "base_index: $(cat "$tmp/cs9/base_index")"
 fi
-usage_case 'cycle-base needs one of --main and --base-refs' \
-  'composer cycle-base: need --main DIR (or --base-refs FILE)' cycle-base \
+usage_case 'cycle-base needs one of --main and --base-bookmarks' \
+  'composer cycle-base: need --main DIR (or --base-bookmarks FILE)' cycle-base \
   --state "$tmp/cs9" --project rex-config
 
 
@@ -1502,7 +1859,7 @@ else
   assert_json "a piped prompt with no branch: the text is the prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == ""'
   assert_json "a piped prompt with no branch: stdin is the branch" "$json" \
-    '.branch == "feat/typed" and .create == true'
+    '.branch == "feat/typed" and .worktree == "create"'
 fi
 
 run_pick_answer '' test/fixtures/ready.json \
@@ -1612,7 +1969,7 @@ run_screen() {
     --main /p/demo/main --root /p/demo --project demo \
     --bd-json "${SCREEN_BEADS:-test/fixtures/ready.json}" \
     --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-    --base-refs "$tmp/base-refs" --dry-run "$@" \
+    --base-bookmarks "$tmp/base-bookmarks" --dry-run "$@" \
     >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
 }
@@ -1660,7 +2017,7 @@ else
   assert_json "typed text with no branch: the text is the prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == "" and .title == ""'
   assert_json "typed text with no branch: the answer is the branch" "$json" \
-    '.branch == "feat/typed" and .create == true'
+    '.branch == "feat/typed" and .worktree == "create"'
 fi
 ran=$((ran + 1))
 if ! grep -qF -- 'branch: type a name' "$tmp/gum-ran" 2>/dev/null; then
@@ -1685,7 +2042,7 @@ else
   assert_json "the prompt row: its text is the prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == ""'
   assert_json "the prompt row: its branch answer travels" "$json" \
-    '.branch == "feat/row" and .create == true'
+    '.branch == "feat/row" and .worktree == "create"'
 fi
 ran=$((ran + 1))
 if ! grep -qF -- '--header prompt for the agent' "$tmp/gum-ran" \
@@ -1766,7 +2123,7 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
     "stdout: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 else
   assert_json "ctrl-b's answer is the branch a typed prompt creates" "$json" \
-    '.branch == "feat/typed" and .create == true'
+    '.branch == "feat/typed" and .worktree == "create"'
   assert_json "ctrl-b's answer keeps the typed prompt" "$json" \
     '.prompt == "why is the guard flaky?" and .bead == ""'
 fi
@@ -1845,7 +2202,7 @@ else
   assert_json "a blank answer: the row under the cursor is not a bead" "$json" \
     '.bead == "" and .title == ""'
   assert_json "a blank answer: the header's branch is the branch" "$json" \
-    '.branch == "feat/58h" and .create == true'
+    '.branch == "feat/58h" and .worktree == "create"'
 fi
 ran=$((ran + 1))
 if [ -e "$tmp/gum-ran" ]; then
@@ -1977,8 +2334,8 @@ else
   assert_json "a remembered agent is the payload's agent" "$json" \
     '.agent == "claude"'
   assert_json "a remembered agent adds no key to the payload" "$json" \
-    'keys == ["agent", "base", "base_remote", "bead", "branch", "create",
-              "main", "project", "root", "title"]'
+    'keys == ["agent", "base", "bead", "branch", "main",
+              "project", "root", "title", "worktree"]'
 fi
 PICK_PATH="$tmp/bin:$PATH" XDG_STATE_HOME=$tmp/st-known \
   run_pick test/fixtures/ready.json \

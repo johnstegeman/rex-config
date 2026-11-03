@@ -3,8 +3,9 @@
 #
 # branch-default turns a bead's issue_type and id into the branch name the
 # picker offers; candidates collects the branch names that already exist so the
-# picker can offer them too. bases resolves the ref a new branch starts from and
-# the short cycle of bases around it. All three run without fzf.
+# picker can offer them too. bases resolves the jj revision a new workspace is
+# started from and the short cycle of revisions around it. All three run
+# without fzf.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -180,10 +181,27 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
     "output differs from the expected branch list"
 fi
 
+# A --wt-json that cannot be opened is the caller's mistake, not a repository
+# this machine cannot read, so it is not forgiven the way a failed `wt list` is:
+# the run stops at the failed read and prints no rows at all -- git's half
+# included, because half a list is a guess dressed as an answer.
+ran=$((ran + 1))
+./new-work.sh candidates --main "$tmp/repo" --wt-json "$tmp/no-such-wt.json" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -eq 0 ]; then
+  fail "candidates with an unopenable --wt-json exits non-zero" \
+    "exit $status"
+elif [ -s "$tmp/out" ]; then
+  fail "candidates with an unopenable --wt-json prints no rows" \
+    "output: $(cat "$tmp/out")"
+fi
+
 # A worktrunk that cannot read the repository: its worktree rows are lost, but
 # git's branches still come through -- and the partial list says so, naming the
-# directory, because a branch missing from it is one the picker would offer to
-# create rather than switch to.
+# directory. Only this subcommand answers from half the list: a pick given a
+# name missing here is refused rather than guessed at, since the guess would be
+# a create (or an attach) for a branch that already has a worktree.
 mkdir -p "$tmp/bad-wt"
 cat >"$tmp/bad-wt/wt" <<'EOF'
 #!/bin/sh
@@ -203,20 +221,20 @@ elif ! grep -qF "could not read the worktrees of $tmp/repo" "$tmp/err"; then
   fail "a failed wt list is said out loud" "stderr: $(cat "$tmp/err")"
 fi
 
-# The refs of a pretend repository, as bases reads them: exactly what
+# The bookmarks of a pretend repository, as bases reads them: exactly what
 #
-#   git for-each-ref --format='%(refname)%00%(symref)' refs/remotes refs/heads
+#   jj bookmark list --all-remotes -T 'name ++ "@" ++ remote ++ "\n"'
 #
-# prints, one record per line -- the refname, a NUL, then that ref's symref
-# target, empty for everything but origin/HEAD. Arguments come in pairs, the
-# refname then the symref.
-base_refs_file() {
+# prints, one "<name>@<remote>" per line -- and a bare "<name>@" for a bookmark
+# no remote has. One argument per row, so a case reads as the bookmarks it
+# stands for.
+bookmarks_file() { # FILE ROW...
   local file=$1
   shift
   : >"$file"
   while [ $# -gt 0 ]; do
-    printf '%s\0%s\n' "$1" "$2" >>"$file"
-    shift 2
+    printf '%s\n' "$1" >>"$file"
+    shift
   done
 }
 
@@ -224,7 +242,8 @@ base_refs_file() {
 #
 # The whole of stdout is compared, so a row gained or lost fails the case. A
 # command substitution drops the closing newline, so each expectation ends with
-# the last row's two fields, and %q prints the tabs it holds as \t.
+# the last row -- and begins with the first, which an empty line when the
+# opening answer is "no revision at all".
 run_bases() {
   local name=$1 want=$2 got status
   shift 2
@@ -240,119 +259,116 @@ run_bases() {
   fi
 }
 
-# The shape most cases start from: a clone of origin/main with both of the local
-# branches the cycle's tail offers.
-base_refs_file "$tmp/refs.base" \
-  refs/remotes/origin/main '' refs/heads/main '' refs/heads/master ''
+# The shape most cases start from: the committed fixture, whose jj knows the
+# remote-tracking bookmark main, its own mirror of it, the bare local form every
+# bookmark also has, and a topic on origin -- but no master, so master is not a
+# revision this clone can offer. The mirror and the bare form are never rows.
+run_bases 'the default branch on origin opens the cycle' \
+  $'main@origin\n@\nmain' \
+  --base-bookmarks test/fixtures/bookmarks.txt --origin-head origin/main
 
-# origin/HEAD is the clone's own idea of the branch it tracks, so it is asked
-# before any fixed name.
-base_refs_file "$tmp/refs.head" \
-  refs/remotes/origin/HEAD refs/remotes/origin/trunk \
-  refs/remotes/origin/trunk '' refs/heads/main '' refs/heads/master ''
+# A clone that also has master offers all four: the two bare local revisions are
+# exactly what the cycle is for.
+bookmarks_file "$tmp/bookmarks.both" \
+  main@ main@origin master@ master@origin
+run_bases 'both local branches are offered after @' \
+  $'main@origin\n@\nmain\nmaster' \
+  --base-bookmarks "$tmp/bookmarks.both" --origin-head origin/main
+
+# origin/HEAD is the branch this clone says it tracks, so it is asked before any
+# fixed name -- and the answer is that branch on origin, in jj's vocabulary: the
+# branch name and the remote it lives on, as one revision. This clone has no main
+# and no master, so the opening answer and @ are the whole cycle.
+bookmarks_file "$tmp/bookmarks.develop" develop@ develop@origin
 run_bases 'origin/HEAD decides the opening answer' \
-  $'origin/trunk\torigin\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.head"
+  $'develop@origin\n@' \
+  --base-bookmarks "$tmp/bookmarks.develop" --origin-head origin/develop
 
-# A symref written straight at a local branch is no base this clone tracks, so
-# it is a miss like any other and the fixed chain speaks: a full refname would
-# otherwise reach `wt switch --base` as a literal word.
-base_refs_file "$tmp/refs.head-local" \
-  refs/remotes/origin/HEAD refs/heads/main \
-  refs/remotes/origin/main '' refs/heads/main '' refs/heads/master ''
-run_bases 'an origin/HEAD pointing out of refs/remotes falls back to the chain' \
-  $'origin/main\torigin\n@\t\nmain\t\nmaster\t' \
-  --base-refs "$tmp/refs.head-local"
+# With no origin/HEAD named -- a clone that has none, or a run standing in for
+# one -- the fixed names speak, in the order they always have.
+bookmarks_file "$tmp/bookmarks.main" main@ main@origin
+run_bases 'main@origin opens the cycle when there is no origin/HEAD' \
+  $'main@origin\n@\nmain' --base-bookmarks "$tmp/bookmarks.main"
 
-# The target the symref names can be gone from the dump -- a branch deleted
-# upstream -- and then no record says which remote it lives on. The name still
-# says it, and the tab still has something to fetch.
-base_refs_file "$tmp/refs.head-gone" \
-  refs/remotes/origin/HEAD refs/remotes/origin/trunk refs/heads/main ''
-run_bases 'a dangling origin/HEAD still knows its remote' \
-  $'origin/trunk\torigin\n@\t\nmain\t' --base-refs "$tmp/refs.head-gone"
+bookmarks_file "$tmp/bookmarks.master" master@ master@origin
+run_bases 'master@origin opens it when there is no main on origin' \
+  $'master@origin\n@\nmaster' --base-bookmarks "$tmp/bookmarks.master"
 
-# Without origin/HEAD the order is origin/main, origin/master, main, master.
-base_refs_file "$tmp/refs.origin-main" \
-  refs/remotes/origin/master '' refs/remotes/origin/main '' \
-  refs/heads/main '' refs/heads/master ''
-run_bases 'origin/main comes before origin/master' \
-  $'origin/main\torigin\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.origin-main"
+# A bookmark a remote has implies the local one jj tracks, so a list with only
+# the remote rendering still offers the bare name.
+bookmarks_file "$tmp/bookmarks.remote-only" main@origin
+run_bases 'a remote bookmark implies the local one' \
+  $'main@origin\n@\nmain' --base-bookmarks "$tmp/bookmarks.remote-only"
 
-base_refs_file "$tmp/refs.origin-master" \
-  refs/remotes/origin/master '' refs/heads/main '' refs/heads/master ''
-run_bases 'origin/master is the opening answer when there is no origin/main' \
-  $'origin/master\torigin\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.origin-master"
+# Nothing on origin at all -- a bookmark only this machine has -- leaves @ to
+# open, because the working copy is always a revision to start from; main is
+# still offered, because this clone really has it.
+bookmarks_file "$tmp/bookmarks.local-only" main@
+run_bases 'a bookmark no remote has opens the cycle on @, and is still offered' \
+  $'@\nmain' --base-bookmarks "$tmp/bookmarks.local-only"
 
-# A clone with no remotes at all: the last two fixed names are the local main
-# and master, and the cycle does not repeat the one it opened on.
-base_refs_file "$tmp/refs.local-main" refs/heads/main '' refs/heads/master ''
-run_bases 'a local main opens the cycle when the clone has no remotes' \
-  $'main\t\n@\t\nmaster\t' --base-refs "$tmp/refs.local-main"
+# A record with no @ at all is not one of jj's renderings but a fixture typo --
+# `main` where `main@` was meant. Read as a local bookmark it would offer a row
+# this clone may not have, so it is skipped: the row below is there because
+# master@origin is a real record, and the bare main is not.
+bookmarks_file "$tmp/bookmarks.no-at" master@origin main
+run_bases 'a record with no @ is ignored, not read as a local bookmark' \
+  $'master@origin\n@\nmaster' --base-bookmarks "$tmp/bookmarks.no-at"
 
-base_refs_file "$tmp/refs.local-master" refs/heads/master ''
-run_bases 'a local master opens it when there is no main at all' \
-  $'master\t\n@\t' --base-refs "$tmp/refs.local-master"
+# A cycle with no main and no master in it at all: the opening answer and @, and
+# nothing else. A bare name is a promise jj can resolve it, so it is only made
+# where the bookmark list says the branch is there.
+bookmarks_file "$tmp/bookmarks.topic-only" topic@origin
+run_bases 'a clone with no main and no master offers only @ beside the answer' \
+  $'topic@origin\n@' \
+  --base-bookmarks "$tmp/bookmarks.topic-only" --origin-head origin/topic
 
-# The candidates are compared as whole refnames, so a branch that merely looks
-# like main -- or sits under it -- leaves nothing resolvable and @ opens.
-base_refs_file "$tmp/refs.maint" refs/heads/maint ''
-run_bases 'a local maint is not the main entry' \
-  $'@\t' --base-refs "$tmp/refs.maint"
+: >"$tmp/bookmarks.none"
+run_bases 'no bookmarks at all is @ and nothing else' \
+  $'@' --base-bookmarks "$tmp/bookmarks.none"
 
-base_refs_file "$tmp/refs.topic" refs/heads/main/topic ''
-run_bases 'refs/heads/main/topic is not main' \
-  $'@\t' --base-refs "$tmp/refs.topic"
+# jj's own mirror of the remote-tracking refs is not a bookmark anyone starts a
+# workspace from, and it is no evidence that one exists: a list holding only the
+# mirror offers @.
+bookmarks_file "$tmp/bookmarks.git-only" main@git
+run_bases 'a @git mirror is neither a row nor evidence of one' \
+  $'@' --base-bookmarks "$tmp/bookmarks.git-only"
 
-base_refs_file "$tmp/refs.none"
-run_bases 'no refs at all opens on @, and @ is the whole cycle' \
-  $'@\t' --base-refs "$tmp/refs.none"
+ran=$((ran + 1))
+if ./new-work.sh bases --base-bookmarks test/fixtures/bookmarks.txt \
+  --origin-head origin/main 2>"$tmp/err" | grep -q '@git'; then
+  fail '@git appears in no output' \
+    "stdout: $(./new-work.sh bases --base-bookmarks test/fixtures/bookmarks.txt \
+      --origin-head origin/main 2>/dev/null)"
+fi
 
-# A configured base is the opening answer whatever it names, and the remote it
-# carries comes from the ref record -- upstream/main is on upstream, not origin.
-base_refs_file "$tmp/refs.upstream" \
-  refs/remotes/upstream/main '' refs/heads/main '' refs/heads/master ''
-run_bases '--base is the opening answer, on its own remote' \
-  $'upstream/main\tupstream\n@\t\nmain\t\nmaster\t' \
-  --base-refs "$tmp/refs.upstream" --base upstream/main
-
-# A slash is not what makes a ref remote-tracking: feat/x is a local branch and
-# carries no remote, so the tab does not try to fetch it.
-base_refs_file "$tmp/refs.feat" refs/heads/feat/x '' refs/heads/main '' refs/heads/master ''
-run_bases 'a local branch keeps an empty remote, slash or no slash' \
-  $'feat/x\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.feat" --base feat/x
-
-# --base can also be the refname it really is. Every row here speaks the short
-# name, and a base left whole matches no ref record: it would read as local and
-# the tab would skip the fetch it needs.
-run_bases 'a full refname --base resolves to its short name and remote' \
-  $'origin/main\torigin\n@\t\nmain\t\nmaster\t' \
-  --base-refs "$tmp/refs.base" --base refs/remotes/origin/main
-run_bases 'a refs/heads --base resolves to the local branch' \
-  $'main\t\n@\t\nmaster\t' --base-refs "$tmp/refs.base" --base refs/heads/main
-
-# ... and a local name stays local even when a remote has a branch of the same
-# name: what makes a base remote-tracking is its ref record, not a name a remote
-# happens to share, so nothing is fetched.
-base_refs_file "$tmp/refs.feat-shared" \
-  refs/remotes/origin/feat/x '' refs/heads/feat/x '' refs/heads/main ''
-run_bases 'a local --base a remote also has stays local' \
-  $'feat/x\t\n@\t\nmain\t' --base-refs "$tmp/refs.feat-shared" --base feat/x
-
-# A base this clone has not fetched, or has just deleted, is still the answer:
-# the picker does not get to refuse it, and main and master are still offered.
+# A configured base is the opening answer whatever it names: the picker does not
+# get to refuse a revision it cannot resolve, because the workspace is made
+# later, in the tab, where jj will answer for it.
+run_bases '--base is the opening answer, verbatim' \
+  $'main@origin\n@\nmain' \
+  --base-bookmarks test/fixtures/bookmarks.txt --base main@origin
 run_bases 'an --base that resolves to nothing is still the answer' \
-  $'refresh\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.base" --base refresh
+  $'refresh\n@\nmain' \
+  --base-bookmarks test/fixtures/bookmarks.txt --base refresh
 
-# --no-base is the wt default sentinel: an empty ref field, then the same
-# cycle, because ctrl-r still moves off it.
-run_bases '--no-base opens on an empty ref' \
-  $'\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.base" --no-base
+# The configured default is @, and the cycle offers @ once: an opening answer is
+# a row like any other, not a second copy of one.
+run_bases '--base @ is the opening answer and appears once' \
+  $'@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.both" --base '@'
 
-# --base-refs is the whole source, so --main is never opened -- and a directory
-# that is not there therefore costs nothing. The mirror of the candidates case.
-run_bases '--base-refs is read instead of --main' \
-  $'origin/main\torigin\n@\t\nmain\t\nmaster\t' \
-  --main "$tmp/nowhere" --base-refs "$tmp/refs.base"
+# --no-base is "no revision at all": an empty first line, then the same cycle,
+# because ctrl-r still moves off it.
+run_bases '--no-base opens on an empty line' \
+  $'\n@\nmain\nmaster' --base-bookmarks "$tmp/bookmarks.both" --no-base
+
+# --base-bookmarks is the whole source, so --main is never opened -- and a
+# directory that is not there therefore costs nothing. The mirror of the
+# candidates case.
+run_bases '--base-bookmarks is read instead of --main' \
+  $'main@origin\n@\nmain' \
+  --main "$tmp/nowhere" --base-bookmarks test/fixtures/bookmarks.txt \
+  --origin-head origin/main
 
 # The refusals. An unreadable fixture is a read that failed, and it says so once
 # and under the verb that ran: the shell's own `line NNN: ... No such file or
@@ -389,30 +405,80 @@ bases_refuses() {
   fi
 }
 
-bases_dies 'an unreadable --base-refs' \
-  "bases: could not read the refs of $tmp/no-such-refs" \
-  --base-refs "$tmp/no-such-refs"
+bases_dies 'an unreadable --base-bookmarks' \
+  "bases: could not read the bookmarks of $tmp/no-such-bookmarks" \
+  --base-bookmarks "$tmp/no-such-bookmarks"
 bases_dies 'a --main that is not there' \
   "bases: no such directory: $tmp/nowhere" --main "$tmp/nowhere"
-bases_refuses 'neither --main nor --base-refs' \
-  'bases: need --main DIR (or --base-refs FILE)'
+bases_refuses 'neither --main nor --base-bookmarks' \
+  'bases: need --main DIR (or --base-bookmarks FILE)'
 bases_refuses '--base with --no-base' \
   'bases: --base and --no-base answer the same question' \
-  --base-refs "$tmp/refs.base" --base refresh --no-base
+  --base-bookmarks test/fixtures/bookmarks.txt --base refresh --no-base
 
-# Reading the refs out of a real repository: --main with no fixture. Its one
-# branch is trunk, which is none of the names the chain knows.
+# Both reads out of a real place: --main with no fixture at all. jj is stood in
+# for -- the suite does not require it, and its rendering is the one thing this
+# script takes on trust -- while origin/HEAD is a real symref in a real
+# repository. That it points at trunk, and not at the main its bookmarks hold,
+# is what proves git was asked rather than guessed from the bookmark list.
+mkdir -p "$tmp/jj-bin"
+cat >"$tmp/jj-bin/jj" <<'EOF'
+#!/bin/sh
+printf 'main@\nmain@git\nmain@origin\nmaster@\nmaster@origin\n'
+EOF
+chmod +x "$tmp/jj-bin/jj"
 ran=$((ran + 1))
-git init -q "$tmp/base-repo" && git -C "$tmp/base-repo" -c user.email=t@example.com \
-  -c user.name=t commit -q --allow-empty -m init &&
-  git -C "$tmp/base-repo" branch -m trunk
-printf '@\t\n' >"$tmp/base.expected"
-./new-work.sh bases --main "$tmp/base-repo" >"$tmp/out" 2>"$tmp/err"
+git init -q "$tmp/base-repo" && git -C "$tmp/base-repo" \
+  -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init &&
+  git -C "$tmp/base-repo" update-ref refs/remotes/origin/trunk HEAD &&
+  git -C "$tmp/base-repo" symbolic-ref refs/remotes/origin/HEAD \
+    refs/remotes/origin/trunk
+printf 'trunk@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
+  >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
   fail 'bases from a repository' "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'bases from a repository' 'output differs from the expected cycle'
+fi
+
+# The same read in a repository that names no origin/HEAD at all -- a clone whose
+# remote was renamed, or one that never had a symref. git exits non-zero, and
+# that is an empty answer rather than a failure: the cycle falls through to the
+# bookmarks, the run still succeeds, and nothing is said about a lookup that is
+# allowed to miss.
+ran=$((ran + 1))
+git init -q "$tmp/base-repo-headless" && git -C "$tmp/base-repo-headless" \
+  -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo-headless" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'no origin/HEAD falls through to the bookmarks' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'no origin/HEAD is not a failure' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'no origin/HEAD falls through to the bookmarks' \
+    'output differs from the expected cycle'
+fi
+
+# --base-bookmarks stands in for the repository as a whole, so a run that has
+# both reads the fixture for the bookmarks and never asks git for origin/HEAD:
+# this repository's symref points at trunk, and the fixture's main@origin is what
+# opens the cycle.
+ran=$((ran + 1))
+printf 'main@origin\n@\nmain\n' >"$tmp/base.expected"
+PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
+  --base-bookmarks test/fixtures/bookmarks.txt >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a bookmark fixture beside a real --main' "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a bookmark fixture beside a real --main' \
+    'the fixture does not win the opening row'
 fi
 
 if [ "$fails" -ne 0 ]; then
