@@ -427,6 +427,25 @@ do
     { "a program Rex could not name" })
 end
 
+-- A block Rex hands over in a shape this cannot read is the same refusal as a
+-- block whose process reply cannot be read: an index on it would raise, and an
+-- entry skipped would let a teardown through with somebody's program in it. A
+-- layer is where the blocks usually are, so an unreadable layer is the case.
+do
+  -- The readable block is a shell, so only the unreadable one is named: a tab of
+  -- shells is what the close may close.
+  tab_stub({ ["block:one"] = { foreground = { name = "fish" } } })
+  local layered = { window_id = "window:tab",
+    layers = { { blocks = { { block_id = "block:one" } } }, 42 } }
+  eq("a layer that cannot be read is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, layered),
+    { "a program Rex could not name" })
+  local blocks = { window_id = "window:tab", blocks = { { block_id = "block:one" }, "x" } }
+  eq("a block that is not a table is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, blocks),
+    { "a program Rex could not name" })
+end
+
 -- The tab cannot be found either way, and both are refusals with a reason
 -- rather than an empty answer that would read as "no tab, nothing to stop".
 do
@@ -667,6 +686,44 @@ do
   contains("the missing outcome is said out loud", said, "worktrunk said nothing")
   contains("the missing outcome falls back to the workspace's name", said,
     "wt remove -D 'feat/6c4'")
+end
+
+-- An empty reply is neither shape worktrunk documents. The removal happened and
+-- the answer about it did not, so there is no branch to report and none to name
+-- a command for: the kept-branch line would claim worktrunk kept something it
+-- never mentioned, so this has a line of its own (Review Focus: an empty array).
+do
+  local empty = '[]'
+  local stub = go_stub({ [REMOVE] = reply(empty) }, { [empty] = {} })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("an empty reply fails", ok, false)
+  contains("an empty reply says no removal was named", said, "named no removal")
+  contains("an empty reply names the listing to read", said, "wt list --format=json")
+  eq("an empty reply verifies nothing", #stub.exec_calls, 1)
+end
+
+-- A bare object is the single-entry shape read the same way as the array: it is
+-- what the reply has been seen to be, and reading it as no removal would fail a
+-- removal that finished.
+do
+  local bare = '{"branch_outcome":"deleted"}'
+  local stub = go_stub({ [REMOVE] = reply(bare) }, { [bare] = { branch_outcome = "deleted" } })
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a bare object with a deleted branch is a complete teardown", ok, true)
+  eq("a bare object returns nothing", result, nil)
+  eq("a bare object still verifies both stores", stub.events,
+    { REMOVE, WORKSPACES, WORKTREES })
+end
+
+-- `not_attempted` is complete only with no branch: with one named, worktrunk was
+-- asked to delete a branch and did not, which is the kept branch it is.
+do
+  go_stub({ [REMOVE] = reply(REMOVED) }, { [REMOVED] = {
+    { branch = "feat/x", branch_outcome = "not_attempted" } } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("not_attempted with a branch fails", ok, false)
+  contains("not_attempted with a branch names the branch", said, "wt remove -D 'feat/x'")
+  contains("not_attempted with a branch says what worktrunk did", said, "not_attempted")
 end
 
 -- The seeded hook ends in || true, so the jj row is verified rather than

@@ -508,9 +508,11 @@ forgets the workspace, so skipping it would skip the point of the flow.
 `--foreground` is passed for what it does do, which is make the removal itself
 block, so its exit code and its `branch_outcome` are final by the time they are
 read. What it does not do is wait for `post-remove`, because worktrunk runs its
-post-* hooks in the background — so `jj workspace list` is read, waited on and
-read again for about two seconds, and only a row still there at the end of that
-is a leftover.
+post-* hooks in the background — so the workspace listing is read, waited on and
+read again, up to ten reads over about two seconds, and only a row still there
+at the end of that is a leftover. The listing is read from the op log
+(`jj --ignore-working-copy workspace list`), not from the working copy, so the
+hook holding the working-copy lock cannot block the read.
 
 A refusal is a screen rather than a failure: one block naming everything in the
 way, in the order the audit asked, then `nothing was removed; press any key`,
@@ -531,14 +533,18 @@ paragraph of its own.
   in the order the tab listed them. Rex does not kill it and the removal never
   reaps: stop it, and press the key again.
 - **`main` carrying commits of its own.** `main was not moved: it has commits
-  <base> does not; run jj new <base> in <main>` — that move would go backwards.
+  <base> does not; the bookmark is yours to push or abandon` — that move would go
+  backwards, and no command clears it: the commits are on `main`'s own bookmark,
+  so pushing them or abandoning them is your decision, not the flow's.
   (A `jj` that refuses the bookmark write itself has its own line, naming
   `jj bookmark set main -r <base>`.)
 - **`main` whose working copy is not provably empty.** `main's working copy was
   not moved: it is not empty; run jj new <base> in <main>`.
 
-Two things can also be reported after a removal has happened, on the float that
-stays up:
+A removal that has happened can still be followed by a report, on the float that
+stays up. These two are the flow's own cases; an unreadable `jj` listing, an
+unreadable worktrunk listing, and a path `wt list` still shows are reported here
+too, and the list is not meant to be exhaustive:
 
 - **A branch worktrunk kept.** `the branch feat/6c4 was kept (retained_unmerged):
   run wt remove -D 'feat/6c4'`. The command names the branch rather than the

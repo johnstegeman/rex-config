@@ -113,6 +113,8 @@ eq("main_worktree non-table items", M.main_worktree({ items = "x" }), nil)
 eq("a program's directory is stripped", M.program_basename("/usr/bin/fish"), "fish")
 eq("a login shell's dash is stripped", M.program_basename("-zsh"), "zsh")
 eq("a bare name is left alone", M.program_basename("fish"), "fish")
+eq("a trailing slash still names the program", M.program_basename("/usr/bin/fish/"), "fish")
+eq("slashes alone name nothing", M.program_basename("///"), "")
 eq("nothing names nothing", M.program_basename(nil), "")
 
 eq("a login shell names a shell", M.is_shell("-fish"), true)
@@ -141,6 +143,13 @@ do
     #M.window_blocks({ blocks = { { block_id = "b9" } } }), 1)
   eq("a window with no blocks has none", #M.window_blocks({ window_id = "w0" }), 0)
   eq("a window that is not a table has none", #M.window_blocks(nil), 0)
+  -- A layer whose blocks cannot be read is counted as an unreadable entry
+  -- rather than dropped: it may hold a program, and tab_processes names what it
+  -- cannot read instead of raising on the index.
+  eq("a layer that cannot be read is counted",
+    #M.window_blocks({ layers = { 42 } }), 1)
+  eq("a layer that cannot be read finds no block",
+    M.window_of_block({ { layers = { 42 } } }, "b1"), nil)
   eq("a block finds its window",
     M.window_of_block({ { window_id = "w0" }, window }, "b2"), window)
   eq("an unknown block finds nothing", M.window_of_block({ window }, "zz"), nil)

@@ -351,6 +351,34 @@ ran=$((ran + 1))
 ! grep -q 'argv=diff' "$tmp/jj-args" ||
   fail "no comparison runs after a failed fetch" "$(cat "$tmp/jj-args")"
 
+# A --main that cannot be entered fails the fetch's own `cd`, so jj never runs and
+# there is no jj output to put after the colon: the block would end in nothing at
+# all. It names the place instead. --wt-json is the seam that gets a run this far,
+# because without it the worktrunk read needs --main first.
+ran=$((ran + 1))
+rm -f "$tmp/jj-args"
+PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
+  ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/no-such-main" --root /p/demo \
+  --project demo --session s1 --window w1 \
+  --workspaces test/fixtures/workspaces.txt \
+  --wt-json test/fixtures/done-wt-list.json \
+  --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
+  --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
+  --bd-json test/fixtures/ready.json \
+  --base-bookmarks test/fixtures/bookmarks.txt \
+  --origin-head origin/main \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+want_status "a main the fetch cannot enter is a refusal" 4
+want_out "the fetch block names the place when jj says nothing" "can't tear down feat/6c4
+
+  the fetch failed, so nothing was compared: could not run jj in $tmp/no-such-main
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+[ ! -s "$tmp/jj-args" ] ||
+  fail "a fetch that could not be started never runs jj" "$(cat "$tmp/jj-args")"
+
 # --- The programs still running, and the bead the workspace belongs to ---
 
 # A program still running in the tab is a reason not to tear it down, and the
@@ -368,6 +396,14 @@ nothing was removed; press any key"
 # ahead. Refused as the bad argument it is, like every other empty value here.
 run_done --running ''
 want_status "an empty --running is a usage error" 2
+
+# Whitespace alone is that same defect in a different shape: the value is not
+# empty, so a bare emptiness guard would take it, and the block would read
+# "still running in this tab: " -- a reason that names nothing.
+run_done --running ' '
+want_status "a space is not a program" 2
+run_done --running ' 	'
+want_status "spaces and a tab are not a program" 2
 
 # The bead is information, not a reason: on a clean run it prints nothing at
 # all, because a run that removes the workspace has no screen.
@@ -507,14 +543,16 @@ want_out "a clean run with a clean main prints nothing" ""
 
 # main has commits the base does not: setting its bookmark onto the base would
 # be a move backwards, so neither move is made -- moving only the working copy
-# would leave a main whose checkout is not its branch -- and the block names
-# the command that would clear it.
+# would leave a main whose checkout is not its branch -- and the block says what
+# is left to decide rather than naming a command, because no command clears it:
+# the commits are on main's own bookmark, so pushing or abandoning them is the
+# person's answer.
 printf 'contained no\nat-empty yes\n' >"$tmp/main-ahead"
 DONE_MAIN_DIR=$tmp/real-main DONE_MAIN=$tmp/main-ahead run_done
 want_status "an ahead main is a blocker" 4
 want_out "the ahead-main block" "can't tear down feat/6c4
 
-  main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
+  main was not moved: it has commits main@origin does not; the bookmark is yours to push or abandon
 
 nothing was removed; press any key"
 ran=$((ran + 1))
@@ -550,7 +588,7 @@ want_status "both main blockers are a refusal" 4
 want_out "the main lines sit after the running line" "can't tear down feat/6c4
 
   still running in this tab: pi
-  main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
+  main was not moved: it has commits main@origin does not; the bookmark is yours to push or abandon
   main's working copy was not moved: it is not empty; run jj new main@origin in $tmp/real-main
 
   bead rex-config-6c4 is still in_progress
@@ -663,7 +701,7 @@ unset JJ_AHEAD
 want_status "an ahead answer from jj is a blocker" 4
 want_out "the ahead block read from jj" "can't tear down feat/6c4
 
-  main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
+  main was not moved: it has commits main@origin does not; the bookmark is yours to push or abandon
 
 nothing was removed; press any key"
 ran=$((ran + 1))
@@ -685,6 +723,13 @@ want_status "a clean dry run exits 0" 0
 want_out "the dry run prints the one hand-back" "$want_line"
 ran=$((ran + 1))
 [ ! -s "$tmp/rex-args" ] || fail "a dry run closes nothing" "$(cat "$tmp/rex-args")"
+# What a dry run leaves out is the hand-back, not the audit: the two moves main
+# gets are made exactly as a real run makes them, which is what the usage text
+# says and what this pins.
+ran=$((ran + 1))
+[ "$(cat "$tmp/jj-args")" = "cwd=$tmp/real-main argv=bookmark set main -r main@origin
+cwd=$tmp/real-main argv=new main@origin" ] ||
+  fail "a dry run still refreshes main" "$(cat "$tmp/jj-args")"
 
 # The same run for real: the hand-back first, then the close, and no third
 # rex call. The close runs in --main, the one directory that is still there
@@ -719,6 +764,29 @@ want_err_has "a failed hand-back is named" "could not finish the hand-back"
 ran=$((ran + 1))
 [ "$(wc -l <"$tmp/rex-args")" -eq 1 ] ||
   fail "a failed hand-back closes nothing" "$(cat "$tmp/rex-args")"
+
+# The close is the last step and the only one that has to enter main, and it
+# comes after the hand-back -- which is what removes a worktree, so main can be
+# gone by then. The failure has to be a line of this script's rather than bash
+# naming a line of it, and the tab stays open: a close that could not run is not
+# a close. The stand-in rex takes main away on the hand-back, which is how a run
+# that was fine a moment ago reaches the close without a directory.
+mkdir -p "$tmp/vanish-bin" "$tmp/pass-away"
+cat >"$tmp/vanish-bin/rex" <<'EOF'
+#!/bin/sh
+printf 'cwd=%s argv=%s\n' "$PWD" "$*" >>"$REX_ARGS_FILE"
+[ -z "${REX_VANISH:-}" ] || rmdir "$REX_VANISH" 2>/dev/null
+EOF
+chmod +x "$tmp/vanish-bin/rex"
+export REX_VANISH=$tmp/pass-away
+DONE_PATH="$tmp/vanish-bin:$tmp/bin:$PATH" DONE_MAIN_DIR=$tmp/pass-away run_done
+unset REX_VANISH
+want_status "a main that is gone at the close exits 1" 1
+want_err_has "a close that cannot enter main names the place" \
+  "could not enter $tmp/pass-away to close the tab"
+ran=$((ran + 1))
+[ "$(wc -l <"$tmp/rex-args")" -eq 1 ] ||
+  fail "a close that could not run closes nothing" "$(cat "$tmp/rex-args")"
 
 
 if [ "$fails" -ne 0 ]; then

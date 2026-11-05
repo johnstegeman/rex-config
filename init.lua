@@ -643,8 +643,13 @@ end
 local SHELLS = { fish = true, zsh = true, bash = true, sh = true, nu = true }
 
 -- A program's name without its directory or the leading dash of a login shell.
+-- A trailing slash is the same program written as a directory -- an interpreter
+-- can report its script that way -- so the slashes go before the last segment is
+-- taken: without that, "/bin/fish/" has no segment and a shell would be named
+-- "a program Rex could not name" instead of a shell.
 function M.program_basename(name)
-  local base = tostring(name or ""):match("([^/]+)$") or ""
+  local path = (tostring(name or ""):gsub("/+$", ""))
+  local base = path:match("([^/]+)$") or ""
   return (base:gsub("^%-", ""))
 end
 
@@ -689,8 +694,17 @@ function M.window_blocks(window)
     blocks[#blocks + 1] = block
   end
   for _, layer in ipairs(type(window.layers) == "table" and window.layers or {}) do
-    for _, block in ipairs(type(layer.blocks) == "table" and layer.blocks or {}) do
-      blocks[#blocks + 1] = block
+    -- A layer that is not a table is one whose blocks cannot be read out of it,
+    -- and it is counted as an unreadable entry rather than dropped: it may hold
+    -- somebody's program, and an entry dropped here would let a teardown through
+    -- -- the same reason a window handed over without layers is read rather than
+    -- counted empty. tab_processes names an entry it cannot read.
+    if type(layer) ~= "table" then
+      blocks[#blocks + 1] = layer
+    else
+      for _, block in ipairs(type(layer.blocks) == "table" and layer.blocks or {}) do
+        blocks[#blocks + 1] = block
+      end
     end
   end
   return blocks
@@ -984,13 +998,18 @@ end
 function M.tab_processes(ctx, window)
   local names = {}
   for _, block in ipairs(M.window_blocks(window)) do
-    local called, process = pcall(rex.block.call, "com.superlogical.terminal", "process", {
-      session_id = ctx.session_id,
-      block_id = block.block_id,
-    })
     local name = ""
-    if called and type(process) == "table" then
-      name = M.process_program(process)
+    -- A block that is not a table is one Rex let through in a shape this cannot
+    -- read: there is no block_id to ask about, so it is the unreadable case below
+    -- rather than a call with nothing in it.
+    if type(block) == "table" then
+      local called, process = pcall(rex.block.call, "com.superlogical.terminal", "process", {
+        session_id = ctx.session_id,
+        block_id = block.block_id,
+      })
+      if called and type(process) == "table" then
+        name = M.process_program(process)
+      end
     end
     if name == "" then
       name = "a program Rex could not name"
@@ -1277,7 +1296,23 @@ function M.work_done_go(ctx, args)
   -- reported as a failure after the worktree was already gone. A bare object is
   -- tolerated as well, so a single-entry shape reads the same.
   local decoded = rex.json.decode(removed.stdout or "")
-  local entry = type(decoded) == "table" and (decoded[1] or decoded) or nil
+  -- An entry is an array's first, or a bare object's own self. An empty reply is
+  -- neither -- worktrunk exited 0 and then named no removal at all -- so there is
+  -- no branch to report and none to name a command for, and the kept-branch line
+  -- below would claim it kept something it never mentioned. A report that cannot
+  -- be made says so in its own words.
+  local entry = nil
+  if type(decoded) == "table" then
+    if decoded[1] ~= nil then
+      entry = decoded[1]
+    elseif next(decoded) ~= nil then
+      entry = decoded
+    end
+  end
+  if entry == nil then
+    error("worktrunk named no removal in its reply: run wt list --format=json in " .. main
+      .. " to see what is left", 0)
+  end
   local outcome = type(entry) == "table" and entry.branch_outcome or nil
   local branch = type(entry) == "table" and entry.branch or nil
 

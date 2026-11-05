@@ -412,7 +412,7 @@ confirmation: with nothing at risk, the tab going away is the feedback.
    `wt list --format=json` must no longer show the path. This is the check the
    bead's comment asked for, because the seeded hook ends in `|| true` and a
    background hook can fail silently — and because it runs after the removal has
-   returned, the row is given a bounded moment (a few reads totalling about two
+   returned, the row is given a bounded moment (up to ten reads over about two
    seconds) before it counts as left behind, so a row a healthy hook clears a
    moment later is not a failure. A surviving jj row is reported with the one
    command that would clear it.

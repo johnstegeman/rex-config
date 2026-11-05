@@ -74,11 +74,13 @@ commands:
         --own-status     a saved `jj diff --summary` of the working copy
         --changes        a saved list of the change ids the branch holds
         --main-state     a saved answer on what main holds beyond its parent
-        --bd-json        a saved `bd ready --json`, holding the bead the branch is on
+        --bd-json        a saved `bd list --status in_progress --json`, holding
+                         the bead the branch is on
         --base-bookmarks a saved `jj bookmark list`, as bases reads it
         --origin-head    what origin/HEAD names, where the branch's base comes from
         --no-fetch       do not fetch before the audit
-        --dry-run        print the hand-back instead of running it
+        --dry-run        print the hand-back instead of running it; the audit
+                         still fetches and refreshes main
 
 done is the key behind rex's "I'm done" flow: one press tears down the
 worktree, the branch, the jj workspace and the tab the pane is in. It asks
@@ -2075,6 +2077,10 @@ done_fetch() {
     cmd="gtimeout 30 $cmd"
   fi
   if ! out=$(cd "$main" && GIT_TERMINAL_PROMPT=0 $cmd 2>&1); then
+    # jj's own first line when it ran, and the place when it did not: a `cd`
+    # that failed prints nothing, and a reason ending in a colon with nothing
+    # after it names no reason at all.
+    [ -n "$out" ] || out="could not run jj in $main"
     done_blocker "  the fetch failed, so nothing was compared: $(printf '%s' "$out" | sed -n 1p)"
     done_stop
   fi
@@ -2149,7 +2155,11 @@ done_main_move() {
       done_blocker "  main was not moved: jj refused to move its bookmark; run jj bookmark set main -r $base in $main"
     fi
   else
-    done_blocker "  main was not moved: it has commits $base does not; run jj new $base in $main"
+    # No command here, because there is none: the commits are on main's own
+    # bookmark, so the decision is whether to push them or abandon them, and
+    # either answer is the person's. The working-copy move below is a command
+    # that does clear its guard, and says so.
+    done_blocker "  main was not moved: it has commits $base does not; the bookmark is yours to push or abandon"
   fi
 
   # The working copy moves only onto a base its bookmark has reached: with main's
@@ -2277,11 +2287,11 @@ done_workspace() {
 # `new-work.sh done --cwd PATH --main DIR --root PATH --project NAME
 #                 --session ID --window ID [...]`
 #
-# The audit behind rex's "I'm done" key: the workspace the focused pane is in
-# is found, then -- as the steps that follow this one land -- everything that
-# would be lost by tearing it down is asked about, and either the block of
-# reasons is printed (exit 4, nothing removed) or the answer goes back to Rex to
-# do the removal.
+# The audit behind rex's "I'm done" key, end to end: the workspace the focused
+# pane is in is found, the fetch and the two store questions are asked, the
+# tab's programs and main's own refresh are added to them, and the answer is one
+# of two things -- the block of every reason it found, in the order they were
+# asked (exit 4, nothing removed), or the hand-back that lets Rex do the removal.
 cmd_done() {
   local cwd='' main='' root='' project='' session='' window=''
   local name='' root_path=''
@@ -2336,8 +2346,11 @@ cmd_done() {
         [ $# -ge 2 ] || usage_error 'done: --running needs a name'
         # An empty name would erase the reason instead of naming it: the
         # accumulation below would leave $running empty, and a tab with a
-        # program in it would look idle.
-        [ -n "$2" ] || usage_error 'done: --running needs a name'
+        # program in it would look idle. Whitespace alone is the same defect
+        # in a different shape -- the block would read "still running in this
+        # tab: " and name nothing -- so the spaces come out before the guard
+        # reads the value.
+        [ -n "${2//[[:space:]]/}" ] || usage_error 'done: --running needs a name'
         running=${running:+$running, }$2
         shift 2
         ;;
@@ -2548,7 +2561,7 @@ cmd_done() {
   # The tab goes last, and nothing may follow it: closing a window kills the
   # block that asked, which is this script. The cd comes first because the
   # workspace under this script's own cwd has been removed by now.
-  cd "$main"
+  cd "$main" || die "could not enter $main to close the tab"
   rex window close -s "$session" "$window"
 }
 
