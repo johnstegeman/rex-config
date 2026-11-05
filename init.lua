@@ -528,6 +528,14 @@ local function run_in_shell(command, cwd)
   return run({ login_shell(), "-lc", command }, cwd)
 end
 
+-- One shell word, whatever the text holds: a path with a space or an apostrophe
+-- is data for the shell, not argv of its own. A single-quoted word cannot carry
+-- an apostrophe, so the word is closed, the apostrophe escaped and the word
+-- reopened -- the same quoting new-work.sh's shell_quote does.
+function M.shell_quote(text)
+  return "'" .. tostring(text):gsub("'", "'\\''") .. "'"
+end
+
 -- The first line of a program's error output, for a one-line refusal.
 local function first_line(text)
   local line = tostring(text or ""):match("^([^\n]*)") or ""
@@ -1187,6 +1195,89 @@ function M.work_new_go(ctx, args)
     error("the " .. branch .. " tab was created, but Rex could not show it: " .. show_reason, 0)
   end
   return { window_id = created.window_id, created = true }
+end
+
+-- The jj workspaces as name and root pairs: the same read new-work.sh makes, and
+-- the only thing that can say whether the post-remove hook did its job.
+local WORKSPACE_LIST = [[jj workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- Action work_done_go: the audit's answer, carried out. It removes and it
+-- reports; it closes nothing. The block that would be closed is the one whose
+-- script called this action, and killing the caller mid-removal is exactly what
+-- the script's own last-act close exists to avoid. So a success returns nothing
+-- and the script closes the tab.
+function M.work_done_go(ctx, args)
+  args = args or {}
+
+  -- The hand-back is also a `rex do` entry point, where an --args object is not
+  -- filtered against the declaration, so a payload missing what everything below
+  -- runs on is refused before anything is removed.
+  for _, name in ipairs({ "workspace", "path", "main" }) do
+    local value = args[name]
+    if type(value) ~= "string" or value == "" then
+      error("work_done_go needs a workspace, a path and a main worktree, but no " .. name, 0)
+    end
+  end
+  local workspace, path, main = args.workspace, args.path, args.main
+
+  -- --foreground so the post-remove hook has finished before anything is
+  -- verified; -y because nobody is there to approve a prompt; --format=json so
+  -- the branch's fate is read rather than guessed. No -f, no -D, no --reap: if
+  -- worktrunk refuses on its own terms, that refusal is the report. It runs in
+  -- the main worktree, because the one being removed is the pane's own.
+  local removed, remove_reason = run_in_shell(
+    "wt remove " .. M.shell_quote(path) .. " --foreground -y --format=json", main)
+  if removed == nil then
+    error("could not run worktrunk: " .. tostring(remove_reason), 0)
+  end
+  if removed.code ~= 0 then
+    error("could not remove " .. path .. ": " .. first_line(removed.stderr), 0)
+  end
+
+  -- A teardown is complete or it is not. A branch worktrunk kept -- and a reply
+  -- that says nothing about one, which is the same uncertainty -- is reported
+  -- with the one command that would finish the job. -D is the person's to run:
+  -- if worktrunk and the audit disagree about merged, that is theirs to settle.
+  local decoded = rex.json.decode(removed.stdout or "")
+  local outcome = type(decoded) == "table" and decoded.branch_outcome or nil
+  if outcome ~= "deleted" then
+    error("the branch " .. workspace .. " was kept (" .. tostring(outcome or "worktrunk said nothing")
+      .. "): run wt remove " .. M.shell_quote(path) .. " -D", 0)
+  end
+
+  -- The seeded hook ends in || true, so the row is verified rather than trusted:
+  -- a background hook, or one whose jj was not found, leaves the workspace
+  -- registered and says nothing about it.
+  local listed, list_reason = run_in_shell(WORKSPACE_LIST, main)
+  if listed == nil or listed.code ~= 0 then
+    error("could not list jj workspaces: "
+      .. first_line(listed and listed.stderr or list_reason), 0)
+  end
+  for line in (listed.stdout or ""):gmatch("[^\n]+") do
+    if line:match("^([^\t]+)") == workspace then
+      error("the jj workspace " .. workspace
+        .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace), 0)
+    end
+  end
+
+  -- And the worktree itself. A listing that cannot be read is not a proof of
+  -- absence, so it is reported rather than read as an empty one.
+  local worktrees, worktree_reason = run_in_shell("wt list --format=json", main)
+  if worktrees == nil or worktrees.code ~= 0 then
+    error("could not list worktrees: "
+      .. first_line(worktrees and worktrees.stderr or worktree_reason), 0)
+  end
+  local listing, listing_reason = rex.json.decode(worktrees.stdout or "")
+  if type(listing) ~= "table" then
+    error("could not read the worktrunk listing: "
+      .. tostring(listing_reason or ("it decoded to a " .. type(listing) .. ", not an object")), 0)
+  end
+  for _, item in ipairs(type(listing.items) == "table" and listing.items or {}) do
+    local worktree = type(item) == "table" and item.worktree or nil
+    if type(worktree) == "table" and worktree.path == path then
+      error(path .. " is still a worktree: run wt list to see why", 0)
+    end
+  end
 end
 
 -- Options from the configuration file, then the four actions. run takes the

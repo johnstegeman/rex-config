@@ -508,8 +508,218 @@ do
     { "--running", "a program Rex could not name" })
 end
 
--- new_tab_argv() --------------------------------------------------------------
+-- work_done_go() ----------------------------------------------------------------
+--
+-- The audit's answer, carried out: one removal through the login shell in the main
+-- worktree, then the reads that decide whether it happened -- the branch worktrunk
+-- reported, the jj row the seeded hook may have left behind, and the worktree
+-- listing. Each case gives the removal its own reply and says what the documents
+-- decode to; a command the flow did not run has no reply at all, so a wrong argv
+-- fails here instead of answering plausibly.
 
+local REMOVE = "wt remove '/p/demo/feat-6c4' --foreground -y --format=json"
+local WORKSPACES = [[jj workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+local WORKTREES = "wt list --format=json"
+
+-- A completed removal, and the two listings a completed teardown leaves.
+local REMOVED = { code = 0, stdout = '{"branch_outcome":"deleted"}', stderr = "" }
+local WORKSPACES_CLEAR = {
+  code = 0, stdout = "default\t/p/demo\nmain\t/p/demo/main\n", stderr = "",
+}
+local WORKTREES_CLEAR = { code = 0,
+  stdout = '{"items":[{"branch":"main","worktree":{"path":"/p/demo/main","main":true}}]}',
+  stderr = "" }
+
+-- The audit's hand-back: the five keys, as the float sends them back.
+local function removal(overrides)
+  local args = { project = "demo", root = "/p/demo", main = "/p/demo/main",
+    workspace = "feat/6c4", path = "/p/demo/feat-6c4" }
+  for key, value in pairs(overrides or {}) do args[key] = value end
+  return args
+end
+
+-- The three reads answer with the clear fixtures unless the case says otherwise,
+-- and json.decode answers the documents by the text it is handed -- a reply whose
+-- text is not in the table decodes to nothing, so a case has to say what it
+-- reads rather than let an unread document pass as an empty one.
+local function go_stub(by_command, documents)
+  local stub = fresh_rex()
+  stub.exec_replies[REMOVE] = REMOVED
+  stub.exec_replies[WORKSPACES] = WORKSPACES_CLEAR
+  stub.exec_replies[WORKTREES] = WORKTREES_CLEAR
+  for command, reply in pairs(by_command or {}) do stub.exec_replies[command] = reply end
+  stub.json_replies = {
+    [REMOVED.stdout] = { branch_outcome = "deleted" },
+    [WORKTREES_CLEAR.stdout] = { items = { { branch = "main",
+      worktree = { path = "/p/demo/main", main = true } } } },
+  }
+  for text, value in pairs(documents or {}) do stub.json_replies[text] = value end
+  stub.json.decode = function(text)
+    local value = stub.json_replies[text]
+    if value == nil then
+      return nil, "rex.json.decode: text is not valid JSON"
+    end
+    return value
+  end
+  return stub
+end
+
+-- The clean path: one removal, then the two verifications, and nothing else.
+do
+  local stub = go_stub()
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a complete removal succeeds", ok, true)
+  eq("a complete removal returns nothing", result, nil)
+  eq("the removal runs first, then the two verifications", stub.events,
+    { REMOVE, WORKSPACES, WORKTREES })
+  eq("the removal runs in the main worktree", exec_for(stub, REMOVE).cwd, "/p/demo/main")
+  -- Both verifications run there too: the pane's own directory is the one the
+  -- removal just unlinked, so a process started in it may not even exec.
+  eq("the jj read runs in the main worktree", exec_for(stub, WORKSPACES).cwd, "/p/demo/main")
+  eq("the worktree read runs in the main worktree", exec_for(stub, WORKTREES).cwd, "/p/demo/main")
+  -- The block that would be closed is the one whose script called this action, so
+  -- this action makes no rex.call at all: there is nothing it could close.
+  eq("a complete removal closes nothing", #stub.calls, 0)
+end
+
+-- A branch worktrunk kept is a failure, reported with the one command that would
+-- finish the job: -D is the person's to run, never the flow's.
+do
+  local kept = '{"branch_outcome":"retained_unmerged"}'
+  local stub = go_stub({ [REMOVE] = { code = 0, stdout = kept, stderr = "" } },
+    { [kept] = { branch_outcome = "retained_unmerged" } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a kept branch fails", ok, false)
+  contains("the kept branch is named", said, "feat/6c4")
+  contains("the kept branch names the command that would finish it", said,
+    "wt remove '/p/demo/feat-6c4' -D")
+  eq("a kept branch verifies nothing", #stub.exec_calls, 1)
+end
+
+-- A reply with no branch_outcome at all is a failure, not a pass (Review Focus
+-- 3): worktrunk said nothing about the branch, and nothing is not deleted.
+do
+  local bare = '{"removed":true}'
+  go_stub({ [REMOVE] = { code = 0, stdout = bare, stderr = "" } },
+    { [bare] = { removed = true } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a reply without branch_outcome fails", ok, false)
+  contains("the missing outcome is said out loud", said, "worktrunk said nothing")
+  contains("the missing outcome still names -D", said,
+    "wt remove '/p/demo/feat-6c4' -D")
+end
+
+-- The seeded hook ends in || true, so the jj row is verified rather than
+-- trusted: a row it left behind is reported with the command that clears it.
+do
+  local stub = go_stub({
+    [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
+  })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a surviving jj row fails", ok, false)
+  contains("the surviving row names the command", said,
+    "jj workspace forget 'feat/6c4'")
+  eq("a surviving jj row stops before the worktrees are asked", #stub.exec_calls, 2)
+end
+
+-- And the worktree itself.
+do
+  local still = '{"items":[{"branch":"feat/6c4","worktree":{"path":"/p/demo/feat-6c4"}}]}'
+  go_stub({ [WORKTREES] = { code = 0, stdout = still, stderr = "" } },
+    { [still] = { items = { { branch = "feat/6c4",
+      worktree = { path = "/p/demo/feat-6c4" } } } } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a worktree still listed fails", ok, false)
+  contains("the surviving worktree is named", said, "/p/demo/feat-6c4")
+end
+
+-- Worktrunk refused outright: its own first line is the report, and the rest of
+-- its output is not.
+do
+  go_stub({ [REMOVE] = {
+    code = 1, stdout = "", stderr = "cannot remove: worktree is in use\nand another line\n",
+  } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a failed removal fails", ok, false)
+  contains("the failure carries worktrunk's line", said, "worktree is in use")
+  eq("only the first line is carried", tostring(said):find("another line", 1, true), nil)
+end
+
+-- A worktrunk that never ran is its own failure rather than an exit code: a login
+-- shell with nothing on PATH says so.
+do
+  local stub = go_stub()
+  stub.exec_replies[REMOVE] = nil
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a removal that could not run fails", ok, false)
+  contains("the failure says worktrunk could not be run", said, "could not run worktrunk")
+end
+
+-- A listing that cannot be read is a failure, not a proof of absence: a check
+-- that answered "nothing there" because it could not see the list would pass a
+-- removal that did not happen.
+do
+  go_stub({ [WORKSPACES] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a jj listing that failed fails the teardown", ok, false)
+  contains("the jj listing failure is named", said, "could not list jj workspaces")
+end
+
+do
+  local stub = go_stub()
+  stub.exec_replies[WORKTREES] = { code = 0, stdout = "not json", stderr = "" }
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("an unreadable worktrunk listing fails the teardown", ok, false)
+  contains("the unreadable listing is named", said, "could not read the worktrunk listing")
+end
+
+-- A path with a space and an apostrophe is one argument, not three (Review Focus
+-- 2): the word is single-quoted, and an apostrophe inside it is closed, escaped
+-- and reopened.
+do
+  eq("a quoted path keeps its apostrophe", M.shell_quote("/p/demo/it's here"),
+    "'/p/demo/it'\\''s here'")
+  eq("a plain path is one quoted word", M.shell_quote("/p/demo/feat-6c4"),
+    "'/p/demo/feat-6c4'")
+
+  local awkward = "wt remove '/p/demo/it'\\''s here' --foreground -y --format=json"
+  local stub = go_stub({ [awkward] = REMOVED })
+  local ok = pcall(M.work_done_go, {}, removal{ path = "/p/demo/it's here" })
+  eq("the removal quotes the path as one word", ok, true)
+  eq("the quoted path is what the login shell ran",
+    stub.exec_calls[1] and program(stub.exec_calls[1]), awkward)
+end
+
+-- The hand-back is also a `rex do` entry point, where an --args object is not
+-- filtered against the declaration, so a key it needs and does not have is
+-- refused before anything is removed.
+do
+  local stub = go_stub()
+  local ok, said = pcall(M.work_done_go, {}, removal{ path = "" })
+  eq("a hand-back with an empty path fails", ok, false)
+  contains("the failure says what the removal needs", said, "work_done_go needs")
+  contains("the failure names the key that is missing", said, "path")
+  eq("a hand-back with an empty path removes nothing", #stub.exec_calls, 0)
+end
+
+-- work_done_go()'s declaration ---------------------------------------------------
+
+-- The five keys are the float's whole contract, and a removal with one missing
+-- has nothing to remove -- so they are declared, and required.
+do
+  local go
+  for _, spec in ipairs(rex_stub.actions) do
+    if spec.name == "work_done_go" then go = spec end
+  end
+  eq("work_done_go is registered", type(go), "table")
+  eq("work_done_go declares the hand-back's five keys",
+    sorted_keys(go and go.args and go.args.properties),
+    { "main", "path", "project", "root", "workspace" })
+  eq("work_done_go requires every one of them", go and go.args.required,
+    { "project", "root", "main", "workspace", "path" })
+end
+
+-- new_tab_argv() --------------------------------------------------------------
 -- The tab does not run one program any more: it runs a fish wrapper that
 -- switches to, attaches or creates the worktree, starts the agent in it, and
 -- leaves a login shell behind when the agent exits. Everything the flow knows
