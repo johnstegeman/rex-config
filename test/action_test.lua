@@ -331,6 +331,119 @@ eq("find_tab takes the branch's tab among the others", M.find_tab({
 }, BRANCH), "w1")
 eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
 
+-- tab_window() and tab_processes() ------------------------------------------
+--
+-- The done flow closes a tab only when nothing in it is somebody's work. The
+-- tab is found from ctx's own block in the session's own view, and then every
+-- block in that window is asked what it is running: a shell is what a tab idles
+-- at, and anything else -- including a block whose process Rex cannot read -- is
+-- somebody's work. The window below carries its blocks in a layer, which is where
+-- Rex puts them.
+
+local TAB_VIEW = {
+  view = {
+    session_id = "session:iris",
+    windows = { {
+      window_id = "window:tab",
+      label = BRANCH,
+      layers = { { blocks = { { block_id = "block:one" }, { block_id = "block:two" } } } },
+    } },
+  },
+}
+
+-- A stub whose attach reply is TAB_VIEW and whose process reply is chosen per
+-- block id: a reply that is a function is called, so a test can make the call
+-- fail. The requests are kept, because asking the right session about the right
+-- block is half of the answer.
+local function tab_stub(by_block)
+  local stub = fresh_rex()
+  stub.call_replies["session.attach"] = TAB_VIEW
+  stub.asked = {}
+  stub.block = {
+    call = function(creator, method, request)
+      stub.asked[#stub.asked + 1] = { creator = creator, method = method, request = request }
+      local reply = by_block[request.block_id]
+      if type(reply) == "function" then return reply() end
+      return reply
+    end,
+  }
+  return stub
+end
+
+do
+  local stub = tab_stub({
+    ["block:one"] = { foreground = { name = "fish" } },
+    ["block:two"] = { foreground = { name = "node" } },
+  })
+  local ctx = { session_id = "session:iris", block_id = "block:two" }
+  local window, reason = M.tab_window(ctx)
+  eq("the tab is the window holding the block", window and window.window_id, "window:tab")
+  eq("a tab that is found has no reason to give", reason, nil)
+  eq("the block's session is the one attached",
+    request_of(stub, "session.attach").session_id, "session:iris")
+
+  -- The whole window is read, in the order Rex lists it: a node in the second
+  -- block still stops the close, and the shell beside it does not.
+  eq("a node in the tab is named", M.tab_processes(ctx, window), { "node" })
+  eq("every block in the tab is asked", #stub.asked, 2)
+  eq("each block is asked in ctx's session",
+    { stub.asked[1].request.session_id, stub.asked[2].request.session_id },
+    { "session:iris", "session:iris" })
+  eq("each block is asked about itself",
+    { stub.asked[1].request.block_id, stub.asked[2].request.block_id },
+    { "block:one", "block:two" })
+  eq("the terminal's process is the terminal's",
+    { stub.asked[1].creator, stub.asked[1].method },
+    { "com.superlogical.terminal", "process" })
+end
+
+-- A tab of shells is what a teardown may close.
+do
+  local stub = tab_stub({ ["block:one"] = { foreground = { name = "fish" } } })
+  local window = { window_id = "window:main", label = "main",
+    layers = { { blocks = { { block_id = "block:one" } } } } }
+  eq("a tab of shells runs nothing",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, window), {})
+  eq("a shell is still asked about", #stub.asked, 1)
+end
+
+-- A block whose process cannot be read is the one that matters most: the flow
+-- must refuse, so it is named as a program rather than counted as idle.
+do
+  tab_stub({ ["block:one"] = function() error("no process") end })
+  local window = { layers = { { blocks = { { block_id = "block:one" } } } } }
+  eq("a block Rex cannot read is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, window),
+    { "a program Rex could not name" })
+end
+
+-- A call that answers with nothing to name is the same refusal: a reply without
+-- a foreground or a child says nothing about what is running.
+do
+  tab_stub({ ["block:one"] = {} })
+  local window = { blocks = { { block_id = "block:one" } } }
+  eq("a block that names nothing is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, window),
+    { "a program Rex could not name" })
+end
+
+-- The tab cannot be found either way, and both are refusals with a reason
+-- rather than an empty answer that would read as "no tab, nothing to stop".
+do
+  local stub = fresh_rex()
+  stub.call_replies["session.attach"] = { client_id = "client:app" }
+  local window, reason = M.tab_window({ session_id = "session:iris", block_id = "block:one" })
+  eq("an attach without a view finds no tab", window, nil)
+  contains("the refusal says why the tab is unknown", reason, "no list of tabs")
+end
+
+do
+  tab_stub({})
+  local window, reason = M.tab_window({ session_id = "session:iris", block_id = "block:zz" })
+  eq("a block in no window finds no tab", window, nil)
+  contains("the refusal says the tab cannot be told", reason, "cannot tell which tab")
+end
+
 -- new_tab_argv() --------------------------------------------------------------
 
 -- The tab does not run one program any more: it runs a fish wrapper that

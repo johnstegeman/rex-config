@@ -628,6 +628,78 @@ function M.has_beads(main)
   return false, "bd failed in " .. main .. ": " .. said
 end
 
+-- What a tab is still running, so a teardown never closes on somebody's work: a
+-- shell is what a tab idles at, and every other name -- and every name Rex cannot
+-- produce -- is a program. The names are compared after program_basename, because
+-- a login shell shows itself as `-fish` and a reply may carry a whole path.
+local SHELLS = { fish = true, zsh = true, bash = true, sh = true, nu = true }
+
+-- A program's name without its directory or the leading dash of a login shell.
+function M.program_basename(name)
+  local base = tostring(name or ""):match("([^/]+)$") or ""
+  return (base:gsub("^%-", ""))
+end
+
+-- The program a process reply belongs to. An interpreter reports the script it
+-- runs beside its own name, and the script is the program; a login shell's argv0
+-- is the one name that still has the dash program_basename strips; and the
+-- system's own name is the last resort. Both slots are read because Rex answers
+-- with whichever process it could name -- the foreground first, the child when
+-- the foreground is gone -- and a reply with neither names nothing at all.
+function M.process_program(process)
+  if type(process) ~= "table" then
+    return ""
+  end
+  for _, slot in ipairs({ "foreground", "child" }) do
+    local running = process[slot]
+    if type(running) == "table" then
+      for _, key in ipairs({ "script", "argv0", "name" }) do
+        local name = running[key]
+        if type(name) == "string" and name ~= "" then
+          return M.program_basename(name)
+        end
+      end
+    end
+  end
+  return ""
+end
+
+-- Whether a name is one of the shells a tab idles at.
+function M.is_shell(name)
+  return SHELLS[M.program_basename(name)] == true
+end
+
+-- Every block in a window: each layer's, and a window that lists its own. Rex's
+-- window view puts blocks in layers, but a window handed over without them is
+-- read rather than counted empty -- an empty list would let a teardown proceed.
+function M.window_blocks(window)
+  local blocks = {}
+  if type(window) ~= "table" then
+    return blocks
+  end
+  for _, block in ipairs(type(window.blocks) == "table" and window.blocks or {}) do
+    blocks[#blocks + 1] = block
+  end
+  for _, layer in ipairs(type(window.layers) == "table" and window.layers or {}) do
+    for _, block in ipairs(type(layer.blocks) == "table" and layer.blocks or {}) do
+      blocks[#blocks + 1] = block
+    end
+  end
+  return blocks
+end
+
+-- The window holding a block, or nil when no window does.
+function M.window_of_block(windows, block_id)
+  for _, window in ipairs(type(windows) == "table" and windows or {}) do
+    for _, block in ipairs(M.window_blocks(window)) do
+      if type(block) == "table" and block.block_id == block_id then
+        return window
+      end
+    end
+  end
+  return nil
+end
+
 -- The working directory of the terminal behind ctx's block, or nil when Rex
 -- cannot say: the foreground process first, since that is where the user
 -- really is, then the shell the terminal started.
@@ -793,6 +865,45 @@ local function attach_session(session_id)
       .. ", so there is no list of tabs"
   end
   return windows
+end
+
+-- The tab ctx's own terminal sits in, from the session's own view: the window
+-- holding ctx's block. A tab that cannot be found is refused with a reason rather
+-- than answered with nothing, because "no tab" would read as "nothing to stop".
+function M.tab_window(ctx)
+  local windows, reason = attach_session(ctx.session_id)
+  if windows == nil then
+    return nil, reason
+  end
+  local window = M.window_of_block(windows, ctx.block_id)
+  if window == nil then
+    return nil, "cannot tell which tab this terminal is in"
+  end
+  return window
+end
+
+-- The programs a tab is running that are not shells, in block order. A block
+-- Rex cannot read counts as one: a wrong pass here kills somebody's agent, so
+-- the only safe reading of "cannot tell" is "still running".
+function M.tab_processes(ctx, window)
+  local names = {}
+  for _, block in ipairs(M.window_blocks(window)) do
+    local called, process = pcall(rex.block.call, "com.superlogical.terminal", "process", {
+      session_id = ctx.session_id,
+      block_id = block.block_id,
+    })
+    local name = ""
+    if called and type(process) == "table" then
+      name = M.process_program(process)
+    end
+    if name == "" then
+      name = "a program Rex could not name"
+    end
+    if not M.is_shell(name) then
+      names[#names + 1] = name
+    end
+  end
+  return names
 end
 
 -- The project's session, made when it is not there yet with one tab called
