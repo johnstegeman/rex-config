@@ -134,6 +134,7 @@ local function stub_rex()
       error("setup_test: rex." .. name .. " was called, but no test stubs it", 2)
     end
   end
+  stub.bind = unused("bind")
 
   -- The server's methods answer from call_replies, keyed by method, the way
   -- action_test.lua does it: a method no test stubs raises rather than
@@ -250,6 +251,17 @@ local function call_for(stub, name)
   for _, call in ipairs(stub.exec_calls) do
     if program(call) == name then return call end
   end
+end
+
+-- The request a recorded server method was called with, found by method rather
+-- than by position: an assertion that took the first call would only hold while
+-- nothing else happens to call rex.call first. Empty rather than nil for a
+-- method that was never called, so the assertion fails by name instead.
+local function request_of(stub, method)
+  for _, call in ipairs(stub.calls) do
+    if call.method == method then return call.request end
+  end
+  return {}
 end
 
 -- setup() -------------------------------------------------------------------
@@ -627,7 +639,8 @@ local ok_done, done_layer = pcall(M.work_done,
 eq("work_done opens the audit", ok_done, true)
 eq("work_done returns the layer id",
   type(done_layer) == "table" and done_layer.layer_id or done_layer, "layer:1")
-eq("the tab is read from the pane's own session", stub.calls[1].request.session_id, "session:1")
+eq("the tab is read from the pane's own session",
+  request_of(stub, "session.attach").session_id, "session:1")
 eq("one float is opened", #stub.layers, 1)
 local done_float = stub.layers[1]
 eq("the done float opens in the terminal's session", done_float.session_id, "session:1")
@@ -642,6 +655,29 @@ eq("the audit command", done_float.layout.block.options.command,
   { M.options.script, "done", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
     "--project", "pmm-iris", "--cwd", "/x/pmm-iris/feat-6c4",
     "--session", "session:1", "--window", "window:feat" })
+
+-- A second press replaces the audit instead of stacking another one, the way
+-- the picker does: two `done` runs in a tab would each be willing to remove the
+-- worktree, so the one already on screen goes first. The counts are relative to
+-- this stub, so the case holds wherever it sits.
+stub = done_stub({
+  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:2"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+})
+local ok_press, first_press = pcall(M.work_done,
+  { block_id = "block:1", session_id = "session:1", origin = "key" })
+local closed_after_first = #stub.closed_layers
+local ok_press_again, second_press = pcall(M.work_done,
+  { block_id = "block:1", session_id = "session:1", origin = "key" })
+eq("a first press succeeds", ok_press, true)
+eq("a second press succeeds", ok_press_again, true)
+eq("the second press opens its own float",
+  first_press.layer_id ~= second_press.layer_id, true)
+eq("the second press closes exactly one float", #stub.closed_layers - closed_after_first, 1)
+eq("the float that closed is the one the first press opened",
+  stub.closed_layers[#stub.closed_layers].layer_id, first_press.layer_id)
+eq("the float is closed in the terminal's session",
+  stub.closed_layers[#stub.closed_layers].session_id, "session:1")
 
 -- The tab's other blocks are somebody's programs, so each travels along as its
 -- own --running: the script cannot see the tab, and this is the one blocker it

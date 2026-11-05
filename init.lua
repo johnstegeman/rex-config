@@ -804,6 +804,19 @@ local function open_picker(ctx, project)
   return { layer_id = layer.layer_id }
 end
 
+-- The audit this client opened last, so a second press replaces it instead of
+-- stacking another float on top. Two `done` runs in one tab would each be
+-- willing to remove the worktree, which is why this guard is the picker's.
+local done = {}
+
+local function close_done()
+  if done.layer_id == nil then
+    return
+  end
+  pcall(rex.session.close_layer, { session_id = done.session_id, layer_id = done.layer_id })
+  done.session_id, done.layer_id = nil, nil
+end
+
 -- argv for new-work.sh's done subcommand, every word of it built here: the
 -- directory the audit is about, the tab it will close, and what that tab is
 -- still running -- the one thing only Rex knows, because the script cannot see
@@ -832,6 +845,7 @@ end
 -- under audit is the one it may remove, and nothing can be read from there
 -- after that.
 local function open_done_screen(ctx, project, cwd, window, running)
+  close_done()
   local called, layer, reason = pcall(rex.session.new_layer, {
     session_id = ctx.session_id,
     bounds = M.options.bounds,
@@ -853,6 +867,7 @@ local function open_done_screen(ctx, project, cwd, window, running)
   if type(layer) ~= "table" then
     error("could not open the done screen: " .. tostring(reason), 0)
   end
+  done.session_id, done.layer_id = ctx.session_id, layer.layer_id
   return { layer_id = layer.layer_id }
 end
 
