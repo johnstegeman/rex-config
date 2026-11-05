@@ -559,10 +559,10 @@ Everything runs from `bash test/run.sh`, no pty.
   listing), `--diff` (a saved `jj diff --summary` for the base range),
   `--own-status` (a saved `jj diff --summary -r @`), `--main-state` (a saved
   rendering of the two `main` checks), `--bd-json` and `--running`. Every
-  scripted run passes `--no-fetch` except the one that proves the hook refusal
-  comes before the fetch — and that run refuses before jj is reached, so the
-  suite still never touches the network. A `wt` stand-in beside the `jj` and
-  `rex` ones records its own argv, which is how the one live
+  scripted run passes `--no-fetch` except three — the hook-ordering run and the
+  two fetch-failure runs — and each of those reaches jj through the stand-in
+  first on `PATH`, so no real jj and no network is touched. A `wt` stand-in
+  beside the `jj` and `rex` ones records its own argv, which is how the one live
   `wt hook show post-remove` read is pinned: that case passes `--wt-json` and no
   `--hooks-json`, and asserts the recorded `cwd` is `--main`, because worktrunk
   reads project hooks from there and a read made anywhere else would answer
