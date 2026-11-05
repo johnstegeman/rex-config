@@ -245,7 +245,7 @@ The workspace **name** is what the tab is called; the workspace **root path** is
 what `wt remove` is given, because a path cannot be a branch name and cannot
 collide with one.
 
-### The audit: fetch, then four facts and a bead
+### The audit: the hook, the fetch, then four facts and a bead
 
 The audit's reference base is resolved the way `bases` already resolves it —
 `refs/remotes/origin/HEAD`'s target, then `main`, then `master` — and rendered as
@@ -253,7 +253,21 @@ one jj revision, `<branch>@origin`. It is not hard-coded, because the wrapper
 root's default branch is a property of the remote, and a project whose default is
 not `main` would otherwise refuse forever.
 
-**The fetch comes first**, because every comparison below is a comparison against
+**Before the fetch, one question decides whether the teardown can finish at
+all**: will worktrunk actually run the hook that forgets the jj workspace?
+`wt hook show post-remove --format=json`, read from `main`, answers it. worktrunk
+gates a project hook on approval, and `wt remove -y` **skips the prompt rather
+than granting it**, so an unapproved hook does not run: the worktree goes, the
+jj row stays, and the flow would learn that only after the directory was gone —
+the one outcome this design forbids (*a teardown is complete or it is not*). So
+the audit refuses, before anything is fetched or moved, when no project hook's
+template mentions `jj workspace forget` (a repo that was never seeded — the
+refusal names `main/.config/wt.toml` and `ginit`), when that hook reports
+`needs_approval: true` (the one-time approval, `wt config approvals add` run in
+`main`, is the remedy), or when the listing cannot be read or parsed at all: a
+prerequisite that cannot be checked is not a prerequisite that holds.
+
+**Then the fetch**, because every comparison below is a comparison against
 `main@origin` and a stale `main@origin` makes the answer wrong in the direction
 that matters: it reports merged work as unmerged. One `jj git fetch`, bounded by
 `timeout`/`gtimeout` at 30 seconds when installed (the `gws` discipline, moved
@@ -472,6 +486,12 @@ part of this change that is not code in a worktree.
 - **jj lists the row, worktrunk does not** (or the reverse) — refused, naming
   both halves, because removing one of them is the state that is hard to unpick
   by hand.
+- **worktrunk will not run the `post-remove` hook** — no project hook that
+  forgets the jj workspace, or one that reports `needs_approval: true`, or a
+  listing that cannot be read. Refused **before the fetch**, naming the remedy
+  (`ginit`, or `wt config approvals add` in `main`), because the removal would
+  otherwise go through and leave the row behind: a teardown that cannot finish
+  must not start.
 - **The fetch fails** (no network, no credentials, timeout) — refused, naming
   the fetch and that no comparison was possible. Nothing is removed, and
   `main@origin` is not silently believed.
@@ -531,6 +551,8 @@ Everything runs from `bash test/run.sh`, no pty.
 - **`test/done_test.sh`** (new) — the audit, the refresh and the screen, with
   every tool read replaced by a fixture: `--workspaces` (a saved
   `jj workspace list -T …`), `--wt-json` (a saved `wt list --format=json`),
+  `--hooks-json` (a saved `wt hook show post-remove --format=json`: approved,
+  `needs_approval: true`, empty, and a reply that is not a listing),
   `--diff` (a saved `jj diff --summary` for the base range), `--own-status` (a
   saved `jj diff --summary -r @`), `--main-state` (a saved rendering of the two
   `main` checks), `--bd-json` and `--running`. `--no-fetch` is passed by every

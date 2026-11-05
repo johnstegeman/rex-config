@@ -60,6 +60,7 @@ run_done() {
     --session s1 --window w1 \
     --workspaces test/fixtures/workspaces.txt \
     --wt-json "${DONE_WT:-test/fixtures/done-wt-list.json}" \
+    --hooks-json "${DONE_HOOKS:-test/fixtures/done-hooks-approved.json}" \
     --diff "${DONE_DIFF:-$tmp/clean-diff}" \
     --own-status "${DONE_OWN:-$tmp/clean-own}" \
     --changes "${DONE_CHANGES:-$tmp/clean-changes}" \
@@ -236,6 +237,109 @@ ran=$((ran + 1))
 grep -q 'cd:' "$tmp/err" &&
   fail "a missing wt is not bash's cd error" "stderr: $(cat "$tmp/err")"
 
+# --- The post-remove hook that forgets the jj workspace ---
+
+# worktrunk gates a project hook on approval, and `wt remove -y` skips the
+# prompt rather than granting it: an unapproved hook does not run at all, so the
+# worktree goes, the jj row stays and the flow only finds out once the
+# directory is gone. Every answer here is read before the fetch, because a
+# teardown that cannot finish must not start.
+
+# An approved hook is not a blocker: the run carries on, and the fetch is
+# still the first thing jj is asked.
+DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=test/fixtures/done-hooks-approved.json run_done
+want_status "an approved post-remove hook is not a blocker" 0
+want_out "an approved hook prints nothing of its own" ""
+
+# The hook is there, but nobody approved it -- so worktrunk would skip it in
+# silence. The remedy is the approval, and it is run in main.
+DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=test/fixtures/done-hooks-unapproved.json run_done
+want_status "an unapproved post-remove hook is refused" 4
+want_out "the unapproved-hook block" "can't tear down feat/6c4
+
+  worktrunk will skip the post-remove hook that forgets the jj workspace until it is approved: run wt config approvals add in $tmp/real-main
+
+nothing was removed; press any key"
+
+# A repo that was never seeded answers []. The row would survive the removal,
+# and the file ginit writes is what fixes it.
+DONE_HOOKS=test/fixtures/done-hooks-empty.json run_done
+want_status "a repo with no post-remove hook is refused" 4
+want_out "the never-seeded block" "can't tear down feat/6c4
+
+  worktrunk has no post-remove hook that forgets the jj workspace, so the row would survive: run ginit to seed /p/demo/main/.config/wt.toml
+
+nothing was removed; press any key"
+
+# A project hook that does something else is the same answer as none: it is the
+# forget that matters, not the existence of a hook.
+DONE_HOOKS=test/fixtures/done-hooks-other.json run_done
+want_status "a post-remove hook that does not forget is refused" 4
+want_out_has "the other-hook block is the never-seeded one" \
+  "worktrunk has no post-remove hook that forgets the jj workspace"
+
+# The check is the audit's first question, so it is the whole screen: the
+# reasons that would have followed -- a dirty working copy among them -- are not
+# asked for, because this refusal is the one that says the teardown could not
+# finish, and it stops the run where it was found, as a failed fetch does.
+DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=test/fixtures/done-hooks-unapproved.json \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "the hook refusal is the first blocker and the only one" 4
+want_out "the hook blocker is the whole block" "can't tear down feat/6c4
+
+  worktrunk will skip the post-remove hook that forgets the jj workspace until it is approved: run wt config approvals add in $tmp/real-main
+
+nothing was removed; press any key"
+
+# A reply that is not a listing -- here a worktrunk worktree list, read whole --
+# cannot answer the question, so the question does not hold.
+DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=test/fixtures/done-wt-list.json run_done
+want_status "a hook reply that is not a listing is refused" 4
+want_out "the unreadable-reply block, naming the read" "can't tear down feat/6c4
+
+  the post-remove hook could not be read, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $tmp/real-main
+
+nothing was removed; press any key"
+
+# And a listing that is not there at all is the same refusal, for the same
+# reason: a prerequisite that cannot be checked is not a prerequisite that
+# holds.
+DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=$tmp/no-such-hooks.json run_done
+want_status "a hook listing that cannot be read is refused" 4
+want_out "the missing-listing block" "can't tear down feat/6c4
+
+  the post-remove hook could not be read, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $tmp/real-main
+
+nothing was removed; press any key"
+
+# Nothing is fetched when the check fires: a teardown that cannot finish must
+# not start, and the fetch is the first thing that would start it. This one run
+# is given no --no-fetch, so jj's own argv is the proof.
+ran=$((ran + 1))
+rm -f "$tmp/jj-args"
+PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
+  ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
+  --project demo --session s1 --window w1 \
+  --workspaces test/fixtures/workspaces.txt \
+  --wt-json test/fixtures/done-wt-list.json \
+  --hooks-json test/fixtures/done-hooks-unapproved.json \
+  --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
+  --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
+  --bd-json test/fixtures/ready.json \
+  --base-bookmarks test/fixtures/bookmarks.txt \
+  --origin-head origin/main \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+want_status "the hook check refuses before the fetch" 4
+want_out_has "the before-the-fetch block names the approval" \
+  "wt config approvals add in $tmp/real-main"
+ran=$((ran + 1))
+[ ! -s "$tmp/jj-args" ] ||
+  fail "nothing is fetched when worktrunk would skip the hook" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+[ ! -s "$tmp/rex-args" ] ||
+  fail "a hook refusal never reaches rex" "$(cat "$tmp/rex-args")"
+
 # --- The store blockers: what the branch has, and what the working copy has ---
 
 # Three changes touch four paths. The change count comes from --changes, the
@@ -331,6 +435,7 @@ PATH="$tmp/failbin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args 
   --project demo --session s1 --window w1 \
   --workspaces test/fixtures/workspaces.txt \
   --wt-json test/fixtures/done-wt-list.json \
+  --hooks-json test/fixtures/done-hooks-approved.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
   --bd-json test/fixtures/ready.json \
@@ -362,6 +467,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   --project demo --session s1 --window w1 \
   --workspaces test/fixtures/workspaces.txt \
   --wt-json test/fixtures/done-wt-list.json \
+  --hooks-json test/fixtures/done-hooks-approved.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
   --bd-json test/fixtures/ready.json \
@@ -516,6 +622,7 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   --project demo --session s1 --window w1 \
   --workspaces test/fixtures/workspaces.txt \
   --wt-json test/fixtures/done-wt-list.json \
+  --hooks-json test/fixtures/done-hooks-approved.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
   --bd-json test/fixtures/ready.json \

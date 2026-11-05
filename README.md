@@ -431,13 +431,23 @@ disagree — a jj row with no worktree at its root, or a worktree no row
 claims — because removing one half of that is the state nobody unpicks from a
 float.
 
+Then, before it fetches, one question decides whether the teardown can finish
+at all: whether worktrunk will actually run the project's `post-remove` hook —
+`wt hook show post-remove --format=json`, read in the main worktree, which is
+the only place worktrunk reads project hooks from. worktrunk gates a project
+hook on approval and `wt remove -y` skips that prompt rather than granting it,
+so an unapproved hook does not run: the worktree would go, the jj row would
+stay, and the tab would be left open in a directory that is gone. A hook that
+is missing, unapproved, or not readable is a refusal before anything is fetched,
+moved or removed.
+
 The audit removes nothing, and beyond the fetch its only writes are the two
-`main` moves below. It fetches once first — `jj git fetch`, capped at 30
-seconds when `timeout` or `gtimeout` is installed, with `GIT_TERMINAL_PROMPT=0`
-so a credential prompt cannot hang a terminal nobody can type into — because
-every comparison below is a comparison against what the remote has, and a stale
-base reports merged work as unmerged. A fetch that fails is itself a refusal,
-naming that nothing could be compared. Then:
+`main` moves below. It fetches once the hook is settled — `jj git fetch`,
+capped at 30 seconds when `timeout` or `gtimeout` is installed, with
+`GIT_TERMINAL_PROMPT=0` so a credential prompt cannot hang a terminal nobody
+can type into — because every comparison below is a comparison against what the
+remote has, and a stale base reports merged work as unmerged. A fetch that
+fails is itself a refusal, naming that nothing could be compared. Then:
 
 - **whether the branch is merged.** The base is the picker's own opening base —
   the chain in [The base](#the-base), rendered as one jj revision:
@@ -520,6 +530,16 @@ before it exits 4. The float is held open for that key, so the screen is there
 to be read; by the time it is, nothing has been removed. The title is `can't
 tear down <workspace>`, and the bead line comes after the blockers, in a
 paragraph of its own.
+
+- **A `post-remove` hook worktrunk will not run.** `worktrunk will skip the
+  post-remove hook that forgets the jj workspace until it is approved: run wt
+  config approvals add in <main>` — the removal would go through and the jj row
+  would outlive the worktree, so this is asked before the fetch and nothing is
+  fetched or removed on it. A repo that was never seeded says the other line,
+  `worktrunk has no post-remove hook that forgets the jj workspace, so the row
+  would survive: run ginit to seed <main>/.config/wt.toml`, and a hook listing
+  that cannot be read refuses the same way, because a prerequisite that cannot
+  be checked is not a prerequisite that holds.
 
 - **Changes not merged into the base.** `changes not merged into <base>: 3
   changes, 4 paths` — the base is the one resolved above, `main@origin` in a

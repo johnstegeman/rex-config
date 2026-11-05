@@ -54,7 +54,7 @@ commands:
       run, and branch-field prints nothing
   done --cwd PATH --main DIR --root PATH --project NAME --session ID
        --window ID [--running NAME]... [--workspaces FILE] [--wt-json FILE]
-       [--diff FILE] [--own-status FILE] [--changes FILE]
+       [--hooks-json FILE] [--diff FILE] [--own-status FILE] [--changes FILE]
        [--main-state FILE] [--bd-json FILE] [--base-bookmarks FILE]
        [--origin-head REF] [--no-fetch] [--dry-run]
       audit the workspace the focused pane is in and, when nothing would be
@@ -70,6 +70,9 @@ commands:
         --workspaces     a saved `jj workspace list -T` rendering, one
                          "name<TAB>root" row per line, instead of asking jj
         --wt-json        a saved `wt list --format=json`, instead of worktrunk
+        --hooks-json     a saved `wt hook show post-remove --format=json`,
+                         the answer on whether worktrunk will run the hook
+                         that forgets the jj workspace
         --diff           a saved `jj diff --summary` of the branch against its base
         --own-status     a saved `jj diff --summary` of the working copy
         --changes        a saved list of the change ids the branch holds
@@ -91,10 +94,11 @@ waits for a key, with nothing removed: that answer is exit 4, shown and
 stopped rather than failed. A clean run prints nothing of its own, hands the
 five paths to Rex and lets the tab close itself.
 
---bd-json, --wt-json, --refs and --base-bookmarks read saved tool output instead
-of asking the tools, which is how the tests and dry runs work: --bd-json stands
-in for bd, --wt-json with --refs for both of the lookups --main would be read
-for, --base-bookmarks for the bookmark list bases reads, so a run given all four
+--bd-json, --wt-json, --refs, --hooks-json and --base-bookmarks read saved tool
+output instead of asking the tools, which is how the tests and dry runs work:
+--bd-json stands in for bd, --wt-json with --refs for both of the lookups
+--main would be read for, --hooks-json for the post-remove hooks --main is read
+for, --base-bookmarks for the bookmark list bases reads, so a run given all five
 never touches --main at all. --origin-head is the same seam for the one ref git is
 still asked about. PICK_SCREEN=1 in the environment says the run has the float's
 terminal, which is how the screen's own paths are driven without one.
@@ -2284,6 +2288,66 @@ done_workspace() {
   root_path=$best_root
 }
 
+# The project's post-remove hooks as worktrunk reports them, read from the main
+# worktree -- the one place worktrunk reads project hooks from -- or from a
+# saved reply. Reads `main` and `hooks_json` from cmd_done, its only caller.
+# A read that fails keeps its status, and done_hooks refuses on it: a reply
+# this flow could not get is not a reply it will read.
+done_hooks_list() {
+  if [ -n "$hooks_json" ]; then
+    cat "$hooks_json" 2>/dev/null
+  else
+    ( cd "$main" && wt hook show post-remove --format=json 2>/dev/null )
+  fi
+}
+
+# Whether worktrunk will actually run the hook that forgets the jj workspace --
+# the whole reason this is asked before the fetch rather than after it:
+# worktrunk gates a project hook on approval and `wt remove -y` skips the
+# prompt rather than granting it, so an unapproved hook does not run at all.
+# The worktree would go, the jj row would stay, and the flow would learn that
+# only once the directory was already gone -- the one outcome it exists to
+# prevent. Reads `main` and `hooks_json` from cmd_done, its only caller, and
+# adds the first blocker: there is nothing to ask about a teardown that cannot
+# finish, and no point fetching for it either.
+done_hooks() {
+  local listing='' state=''
+  listing=$(done_hooks_list) || listing=''
+  # Three answers this flow can act on -- a project hook whose template forgets
+  # the workspace and is approved, that hook unapproved, and no such hook at all
+  # -- and a fourth for anything else: no reply, or a reply that is not a
+  # listing, is refused like the other two, because a prerequisite that cannot
+  # be checked is not a prerequisite that holds.
+  state=$(printf '%s' "$listing" | jq -r '
+      if type == "array" then
+        [ .[]
+          | select((.source // "") == "project")
+          | select(((.template // "") | tostring) | contains("jj workspace forget")) ]
+        | if length == 0 then "missing"
+          elif any(.[]; (.needs_approval // false)) then "unapproved"
+          else "approved" end
+      else "unreadable" end' 2>/dev/null) || state=''
+  case $state in
+    approved) return 0 ;;
+    unapproved)
+      # Named, because the person can clear it: one approval, in main, and
+      # the hook runs from then on.
+      done_blocker "  worktrunk will skip the post-remove hook that forgets the jj workspace until it is approved: run wt config approvals add in $main"
+      done_stop
+      ;;
+    missing)
+      # Never seeded: the file ginit writes is the one worktrunk reads, so the
+      # line names the file as well as the command.
+      done_blocker "  worktrunk has no post-remove hook that forgets the jj workspace, so the row would survive: run ginit to seed $main/.config/wt.toml"
+      done_stop
+      ;;
+    *)
+      done_blocker "  the post-remove hook could not be read, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $main"
+      done_stop
+      ;;
+  esac
+}
+
 # `new-work.sh done --cwd PATH --main DIR --root PATH --project NAME
 #                 --session ID --window ID [...]`
 #
@@ -2299,7 +2363,8 @@ cmd_done() {
   # blockers, the programs still running in the tab, main's fast-forward and the
   # hand-back. They are parsed here so a missing value is refused as a usage
   # error now rather than surfacing as an empty answer later.
-  local workspaces='' wt_json='' diff='' own_status='' changes='' main_state=''
+  local workspaces='' wt_json='' hooks_json='' diff='' own_status=''
+  local changes='' main_state=''
   local bd_json='' bookmarks='' origin_head='' running=''
   local no_fetch=0 dry_run=0
   # The blockers collected so far, and what the two store questions leave
@@ -2362,6 +2427,11 @@ cmd_done() {
       --wt-json)
         [ $# -ge 2 ] || usage_error 'done: --wt-json needs a file'
         wt_json=$2
+        shift 2
+        ;;
+      --hooks-json)
+        [ $# -ge 2 ] || usage_error 'done: --hooks-json needs a file'
+        hooks_json=$2
         shift 2
         ;;
       --diff)
@@ -2436,9 +2506,11 @@ cmd_done() {
 
   # Every payload this command reads is JSON, read through jq like the rest of
   # this file's, and worktrunk is the other tool that answers -- unless a saved
-  # list stands in for it, which is the seam a test or a dry run uses.
+  # answer stands in for it, which is the seam a test or a dry run uses. Both of
+  # worktrunk's answers are its own: --wt-json and --hooks-json together are
+  # what let a run touch no tool at all.
   need jq
-  [ -n "$wt_json" ] || need wt
+  { [ -n "$wt_json" ] && [ -n "$hooks_json" ]; } || need wt
 
   # jj is read from --cwd and worktrunk from --main, unless a saved answer
   # stands in for one of them, so a directory that is not there is refused here
@@ -2446,8 +2518,13 @@ cmd_done() {
   # as a line number in this script rather than as a place that does not exist.
   [ -n "$workspaces" ] || [ -d "$cwd" ] || die "done: no such directory: $cwd"
   [ -n "$wt_json" ] || [ -d "$main" ] || die "done: no such directory: $main"
-
   done_workspace
+
+  # And before the fetch, because this is the one question that can answer "this
+  # teardown cannot finish" -- worktrunk skips a post-remove hook nobody
+  # approved, so the row would outlive the worktree. Nothing is fetched, moved
+  # or removed when it fires: a teardown that cannot finish must not start.
+  done_hooks
 
   # The fetch comes before every comparison, because each one below is about what
   # origin has.
