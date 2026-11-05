@@ -1,3 +1,4 @@
 default	/p/demo
 feat/6c4	/p/demo/feat-6c4
+feat/6c4-sub	/p/demo/feat-6c4/sub
 main	/p/demo/main

@@ -1997,25 +1997,41 @@ done_refuse() {
   exit "$refused"
 }
 
-# The worktrunk worktree path that is exactly $1, or nothing. --wt-json stands
-# in for worktrunk, as it does for pick; otherwise `wt list` is asked from the
-# main worktree, which is the worktree every wt call uses. Reads `main` and
-# `wt_json` from cmd_done, its only caller.
-done_wt_path() {
-  local path=$1 records
+# The worktrunk worktree list as JSON: --wt-json when one is given, else
+# `wt list` asked from the main worktree, which is the worktree every wt call
+# uses. Reads `main` and `wt_json` from cmd_done, its only caller.
+done_wt_list() {
   if [ -n "$wt_json" ]; then
-    records=$(cat "$wt_json") ||
+    cat "$wt_json" ||
       die "done: could not read the worktree list from $wt_json"
   else
-    records=$( cd "$main" && wt list --format=json ) ||
+    ( cd "$main" && wt list --format=json ) ||
       die "done: could not read the worktrees of $main"
   fi
-  printf '%s\n' "$records" |
-    jq -r --arg path "$path" '
+}
+
+# The worktrunk worktree path that is exactly $1, or nothing.
+done_wt_path() {
+  done_wt_list |
+    jq -r --arg path "$1" '
       (.items // [])
       | map(.worktree.path // "")
       | map(select(. == $path))
       | .[0] // ""
+    '
+}
+
+# The worktrunk worktree that owns $1, or nothing: the longest listed path
+# that is $1 or a directory of it, compared as whole path segments as jj's
+# roots are.
+done_wt_owner() {
+  done_wt_list |
+    jq -r --arg want "$1" '
+      (.items // [])
+      | map(.worktree.path // "")
+      | map(select(. as $path | $want == $path or ($want | startswith($path + "/"))))
+      | sort_by(length)
+      | .[-1] // ""
     '
 }
 
@@ -2037,7 +2053,7 @@ done_workspace() {
       ;;
   esac
 
-  local listed best_name='' best_root='' row_name row_path wt_path=''
+  local listed best_name='' best_root='' row_name row_path wt_path='' wt_owner=''
   if [ -n "$workspaces" ]; then
     listed=$(cat "$workspaces") ||
       die "done: could not read the workspace list from $workspaces"
@@ -2065,6 +2081,14 @@ done_workspace() {
   done <<<"$listed"
 
   if [ -z "$best_root" ]; then
+    # A worktree jj has no row for is the other half of the same disagreement:
+    # worktrunk would be asked to remove a path jj does not believe is a
+    # workspace, so it is refused, naming the worktree and jj's silence both.
+    wt_owner=$(done_wt_owner "$cwd") || exit $?
+    if [ -n "$wt_owner" ]; then
+      done_refuse "can't tear down $wt_owner" \
+        "  worktrunk has a worktree at $wt_owner, but jj lists no workspace there"
+    fi
     done_refuse "can't tear down $cwd" \
       "  $cwd is not inside a jj workspace this wrapper knows about"
   fi
@@ -2210,9 +2234,18 @@ cmd_done() {
   need_absolute 'done: --main' "$main"
   need_absolute 'done: --root' "$root"
 
+  # Roots are compared as strings -- $cwd is "$root" or "$root"/... and jj's
+  # rows are compared to "$root" -- so /p/demo/ and /p/demo would answer
+  # differently: the trailing slash would stop the wrapper row being
+  # recognised and turn the wrapper's own directories into a worktrunk
+  # disagreement. One form, decided here, and a bare / keeps its slash.
+  [ "$root" = / ] || root=${root%/}
+
   # Every payload this command reads is JSON, read through jq like the rest of
-  # this file's.
+  # this file's, and worktrunk is the other tool that answers -- unless a saved
+  # list stands in for it, which is the seam a test or a dry run uses.
   need jq
+  [ -n "$wt_json" ] || need wt
 
   # jj is read from --cwd and worktrunk from --main, unless a saved answer
   # stands in for one of them, so a directory that is not there is refused here

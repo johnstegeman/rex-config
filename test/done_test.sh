@@ -37,10 +37,18 @@ chmod +x "$tmp/bin/rex" "$tmp/bin/jj"
 : >"$tmp/clean-changes"
 printf 'contained yes\nat-empty yes\n' >"$tmp/clean-main"
 
+# A PATH holding bash -- the script's own `#!/usr/bin/env bash` needs it -- with
+# jq and cat beside it, and no worktrunk. One case runs there, so "wt is missing"
+# is proven rather than left to the developer's machine.
+mkdir -p "$tmp/no-wt-bin"
+ln -sf "$(command -v bash)" "$tmp/no-wt-bin/bash"
+ln -sf "$(command -v jq)" "$tmp/no-wt-bin/jq"
+ln -sf "$(command -v cat)" "$tmp/no-wt-bin/cat"
+
 run_done() {
   ran=$((ran + 1))
   rm -f "$tmp/rex-args" "$tmp/jj-args"
-  PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
+  PATH="${DONE_PATH:-$tmp/bin:$PATH}" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
     ./new-work.sh done \
     --cwd "${DONE_CWD:-/p/demo/feat-6c4}" \
     --main /p/demo/main --root /p/demo --project demo \
@@ -127,12 +135,43 @@ DONE_CWD=/p/demo/feat-6c41 run_done
 want_status "a string-prefix sibling is not a match" 4
 want_out_has "the string-prefix sibling is refused as outside" "not inside a jj workspace"
 
+# A trailing slash on --root is the same wrapper, and has to answer the same
+# way: roots are compared as strings, so without normalising it the wrapper row
+# would not be recognised and this would be a worktrunk disagreement instead.
+DONE_CWD=/p/demo/nope run_done --root /p/demo/
+want_status "a trailing slash on --root is the same wrapper" 4
+want_out "the no-workspace block with --root /p/demo/" "can't tear down /p/demo/nope
+
+  /p/demo/nope is not inside a jj workspace this wrapper knows about
+
+nothing was removed; press any key"
+
+# The other half of the disagreement: worktrunk has a worktree jj lists no
+# workspace for, and the block names both halves.
+DONE_WT=test/fixtures/done-wt-list-orphan.json DONE_CWD=/p/demo/orphan run_done
+want_status "a worktree jj does not list is refused" 4
+want_out "the reverse disagreement block" "can't tear down /p/demo/orphan
+
+  worktrunk has a worktree at /p/demo/orphan, but jj lists no workspace there
+
+nothing was removed; press any key"
+
 # jj lists the row, worktrunk does not.
 DONE_WT=test/fixtures/done-wt-list-no-feat.json run_done
 want_status "jj and worktrunk disagreeing is refused" 4
 want_out "the disagreement block" "can't tear down feat/6c4
 
   jj lists this workspace at /p/demo/feat-6c4, but worktrunk has no worktree there
+
+nothing was removed; press any key"
+
+# A subdirectory that is a workspace of its own answers to the longer root: the
+# longest listed root that owns the cwd wins, not the first one that matches.
+DONE_CWD=/p/demo/feat-6c4/sub run_done
+want_status "the longest matching root is the workspace" 4
+want_out "the nested-workspace block names the nested workspace" "can't tear down feat/6c4-sub
+
+  jj lists this workspace at /p/demo/feat-6c4/sub, but worktrunk has no worktree there
 
 nothing was removed; press any key"
 
@@ -158,6 +197,18 @@ grep -q 'cd:' "$tmp/err" &&
 # says, not something to ignore.
 run_done --nonsense x
 want_status "an unknown option is a usage error" 2
+
+# With no saved worktree list worktrunk is asked, and a machine without it says
+# so by name -- not by bash's "command not found", which would read as the
+# repository's worktrees being unreadable. --main is a real directory here, so
+# the run reaches the worktrunk question rather than stopping earlier.
+mkdir -p "$tmp/real-main"
+DONE_PATH=$tmp/no-wt-bin run_done --wt-json '' --main "$tmp/real-main"
+want_status "a missing wt is a missing tool" 1
+want_err_has "a missing wt is named" 'wt not found on PATH'
+ran=$((ran + 1))
+grep -q 'cd:' "$tmp/err" &&
+  fail "a missing wt is not bash's cd error" "stderr: $(cat "$tmp/err")"
 
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
