@@ -2342,7 +2342,7 @@ done_hooks() {
       done_stop
       ;;
     *)
-      done_blocker "  the post-remove hook could not be read, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $main"
+      done_blocker "  the post-remove hook could not be read as a listing, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $main"
       done_stop
       ;;
   esac

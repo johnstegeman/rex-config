@@ -537,10 +537,10 @@ paragraph of its own.
   would outlive the worktree, so this is asked before the fetch and nothing is
   fetched or removed on it. A repo that was never seeded says the other line,
   `worktrunk has no post-remove hook that forgets the jj workspace, so the row
-  would survive: run ginit to seed <main>/.config/wt.toml`, and a hook listing
-  that cannot be read refuses the same way, because a prerequisite that cannot
-  be checked is not a prerequisite that holds.
-
+  would survive: run ginit to seed <main>/.config/wt.toml` — and a listing that
+  cannot be read as one, whether the read failed or the reply was not a hook
+  listing, refuses the same way and names the read itself, because a
+  prerequisite that cannot be checked is not a prerequisite that holds.
 - **Changes not merged into the base.** `changes not merged into <base>: 3
   changes, 4 paths` — the base is the one resolved above, `main@origin` in a
   clone whose default branch is `main` — and the paths are listed underneath,

@@ -29,7 +29,18 @@ cat >"$tmp/bin/jj" <<'EOF'
 printf 'cwd=%s argv=%s\n' "$PWD" "$*" >>"$JJ_ARGS_FILE"
 [ -z "$JJ_FAIL" ] || { printf 'jj: %s\n' "$JJ_FAIL" >&2; exit 1; }
 EOF
-chmod +x "$tmp/bin/rex" "$tmp/bin/jj"
+# worktrunk's own stand-in. The hook read is the query whose cwd is load-bearing
+# -- worktrunk reads project hooks from the main worktree, so a read made
+# anywhere else would answer about another repo -- and this is the only place
+# that read is really made, because every case given --hooks-json skips it (and
+# with --wt-json beside it, skips `need wt` too). It answers the approved
+# listing and records where it was asked.
+cat >"$tmp/bin/wt" <<EOF
+#!/bin/sh
+printf 'cwd=%s argv=%s\\n' "\$PWD" "\$*" >>"\${WT_ARGS_FILE:-/dev/null}"
+cat "$(pwd)/test/fixtures/done-hooks-approved.json"
+EOF
+chmod +x "$tmp/bin/rex" "$tmp/bin/jj" "$tmp/bin/wt"
 
 # The answers a clean, merged, idle workspace gives.
 : >"$tmp/clean-diff"
@@ -52,8 +63,9 @@ ln -sf "$(command -v cat)" "$tmp/no-wt-bin/cat"
 
 run_done() {
   ran=$((ran + 1))
-  rm -f "$tmp/rex-args" "$tmp/jj-args"
-  PATH="${DONE_PATH:-$tmp/bin:$PATH}" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
+  rm -f "$tmp/rex-args" "$tmp/jj-args" "$tmp/wt-args"
+  PATH="${DONE_PATH:-$tmp/bin:$PATH}" REX_ARGS_FILE=$tmp/rex-args \
+    JJ_ARGS_FILE=$tmp/jj-args WT_ARGS_FILE=$tmp/wt-args \
     ./new-work.sh done \
     --cwd "${DONE_CWD:-/p/demo/feat-6c4}" \
     --main "${DONE_MAIN_DIR:-/p/demo/main}" --root /p/demo --project demo \
@@ -245,11 +257,31 @@ grep -q 'cd:' "$tmp/err" &&
 # directory is gone. Every answer here is read before the fetch, because a
 # teardown that cannot finish must not start.
 
-# An approved hook is not a blocker: the run carries on, and the fetch is
-# still the first thing jj is asked.
+# An approved hook is not a blocker: the run carries on to the store questions
+# and the hand-back. That jj is asked nothing before the fetch is the ordering
+# case below, which is the one run here given no --no-fetch.
 DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=test/fixtures/done-hooks-approved.json run_done
 want_status "an approved post-remove hook is not a blocker" 0
 want_out "an approved hook prints nothing of its own" ""
+
+# The live read, and the only case that makes it: with --wt-json standing in for
+# the worktree list and no --hooks-json, the script has to ask worktrunk itself.
+# Where it asks is the load-bearing part -- `wt hook show` reads the project
+# hooks of the repository it runs in, so a read made anywhere but --main would
+# answer about another repo, come back [] and refuse a repo that is seeded.
+DONE_MAIN_DIR=$tmp/real-main run_done --hooks-json ''
+want_status "the hook listing is read from worktrunk when no fixture stands in" 0
+ran=$((ran + 1))
+[ "$(cat "$tmp/wt-args")" = "cwd=$tmp/real-main argv=hook show post-remove --format=json" ] ||
+  fail "the hook is read from --main, as one wt hook show post-remove" "$(cat "$tmp/wt-args")"
+
+# A listing that carries more than the forgetting hook is read hook by hook: an
+# unrelated unapproved post-remove hook is not this flow's business, so it does
+# not refuse a repo whose forgetting hook is approved.
+DONE_MAIN_DIR=$tmp/real-main \
+  DONE_HOOKS=test/fixtures/done-hooks-approved-plus-unapproved-other.json run_done
+want_status "an unapproved hook that does not forget is not a blocker" 0
+want_out "an approved forgetting hook beside another hook prints nothing" ""
 
 # The hook is there, but nobody approved it -- so worktrunk would skip it in
 # silence. The remedy is the approval, and it is run in main.
@@ -297,7 +329,7 @@ DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=test/fixtures/done-wt-list.json run_done
 want_status "a hook reply that is not a listing is refused" 4
 want_out "the unreadable-reply block, naming the read" "can't tear down feat/6c4
 
-  the post-remove hook could not be read, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $tmp/real-main
+  the post-remove hook could not be read as a listing, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $tmp/real-main
 
 nothing was removed; press any key"
 
@@ -308,7 +340,7 @@ DONE_MAIN_DIR=$tmp/real-main DONE_HOOKS=$tmp/no-such-hooks.json run_done
 want_status "a hook listing that cannot be read is refused" 4
 want_out "the missing-listing block" "can't tear down feat/6c4
 
-  the post-remove hook could not be read, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $tmp/real-main
+  the post-remove hook could not be read as a listing, so whether the jj workspace would be forgotten is unknown: run wt hook show post-remove --format=json in $tmp/real-main
 
 nothing was removed; press any key"
 
