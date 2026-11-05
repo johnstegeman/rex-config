@@ -52,6 +52,42 @@ commands:
       change them while the screen is up: rows and header print what fzf shows,
       cycle-agent, cycle-base and branch-field are what ctrl-a, ctrl-r and ctrl-b
       run, and branch-field prints nothing
+  done --cwd PATH --main DIR --root PATH --project NAME --session ID
+       --window ID [--running NAME]... [--workspaces FILE] [--wt-json FILE]
+       [--diff FILE] [--own-status FILE] [--changes FILE]
+       [--main-state FILE] [--bd-json FILE] [--base-bookmarks FILE]
+       [--origin-head REF] [--no-fetch] [--dry-run]
+      audit the workspace the focused pane is in and, when nothing would be
+      lost, hand it back to Rex as `rex do work_done_go` -- else print why not
+      and take nothing apart
+        --cwd            the directory the focused pane is in
+        --main           the project's main worktree
+        --root           the wrapper holding main and the branch workspaces
+        --project        the project's name, as Rex knows it
+        --session        the Rex session whose tab is closed last
+        --window         the Rex window whose tab is closed last
+        --running        a program still running in the tab; repeat for each
+        --workspaces     a saved `jj workspace list -T` rendering, one
+                         "name<TAB>root" row per line, instead of asking jj
+        --wt-json        a saved `wt list --format=json`, instead of worktrunk
+        --diff           a saved `jj diff --summary` of the branch against its base
+        --own-status     a saved `jj diff --summary` of the working copy
+        --changes        a saved list of the change ids the branch holds
+        --main-state     a saved answer on what main holds beyond its parent
+        --bd-json        a saved `bd ready --json`, holding the bead the branch is on
+        --base-bookmarks a saved `jj bookmark list`, as bases reads it
+        --origin-head    what origin/HEAD names, where the branch's base comes from
+        --no-fetch       do not fetch before the audit
+        --dry-run        print the hand-back instead of running it
+
+done is the key behind rex's "I'm done" flow: one press tears down the
+worktree, the branch, the jj workspace and the tab the pane is in. It asks
+first whether anything would be lost -- the paths say what to look at and the
+fixture seams above say where to look, so a run given them never touches the
+repository -- and prints every reason it will not go ahead as one block, then
+waits for a key, with nothing removed: that answer is exit 4, shown and
+stopped rather than failed. A clean run prints nothing of its own, hands the
+five paths to Rex and lets the tab close itself.
 
 --bd-json, --wt-json, --refs and --base-bookmarks read saved tool output instead
 of asking the tools, which is how the tests and dry runs work: --bd-json stands
@@ -171,6 +207,13 @@ wait_for_key() {
 # heredoc cannot interpolate this one.
 cancelled=3
 
+# The status a refused done leaves with: an answer that is not a failure -- the
+# block was shown and the flow stopped, and nothing was removed. The float
+# stays up for the key the block asks for, so this is not a status that closes
+# it. As with cancelled, the usage text says the number in prose, because a
+# quoted heredoc cannot interpolate it.
+refused=4
+
 # The first row of the bead question: not a bead, but the way to write a prompt
 # when the text would match a bead or needs more than fzf's one line. It carries
 # no id -- a marker no bead id can be -- so field 1 alone tells it from every
@@ -189,6 +232,19 @@ hold_pick() {
     rm -rf "$composer_state"
   fi
   if [ "$status" -ne 0 ] && [ "$status" -ne "$cancelled" ] && [ "$held" -eq 0 ]; then
+    wait_for_key
+  fi
+  exit "$status"
+}
+
+# On the way out of done -- usage_error's 2, die's 1, a missing tool's 1, rex's
+# own status -- hold the float with what it printed still on screen, as
+# hold_pick does. A refusal has already taken its key inside done_refuse and
+# says so through `held`, so it is not waited on twice. done keeps no state
+# directory, so there is nothing to remove here.
+hold_done() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ "$held" -eq 0 ]; then
     wait_for_key
   fi
   exit "$status"
@@ -1926,6 +1982,254 @@ cmd_pick() {
   fi
 }
 
+# The refusal block, then the key the float waits for. The float closes when
+# this script exits, so the wait is what keeps the message readable. Every
+# refusal is printed here, so the shape of the block -- a title, a blank line,
+# the lines, a blank line, and the one sentence that says nothing was removed --
+# is written once.
+done_refuse() {
+  local title=$1 line
+  shift
+  printf '%s\n\n' "$title"
+  for line in "$@"; do printf '%s\n' "$line"; done
+  printf '\nnothing was removed; press any key\n'
+  wait_for_key
+  exit "$refused"
+}
+
+# The worktrunk worktree path that is exactly $1, or nothing. --wt-json stands
+# in for worktrunk, as it does for pick; otherwise `wt list` is asked from the
+# main worktree, which is the worktree every wt call uses. Reads `main` and
+# `wt_json` from cmd_done, its only caller.
+done_wt_path() {
+  local path=$1 records
+  if [ -n "$wt_json" ]; then
+    records=$(cat "$wt_json") ||
+      die "done: could not read the worktree list from $wt_json"
+  else
+    records=$( cd "$main" && wt list --format=json ) ||
+      die "done: could not read the worktrees of $main"
+  fi
+  printf '%s\n' "$records" |
+    jq -r --arg path "$path" '
+      (.items // [])
+      | map(.worktree.path // "")
+      | map(select(. == $path))
+      | .[0] // ""
+    '
+}
+
+# The workspace the pane is in, left in the caller's `name` and `root_path`, or
+# a refusal. Reads `cwd`, `main`, `root` and `workspaces` from cmd_done, its
+# only caller -- and `wt_json` through done_wt_path -- and answers in those two
+# variables rather than on stdout, because a refusal printed inside a command
+# substitution would be caught by the capture instead of reaching the screen.
+#
+# Roots nest -- jj's default workspace is the wrapper itself, main is a
+# directory inside it, and a branch's workspace is another -- so the longest
+# listed root that owns cwd is the answer, compared as whole path segments so
+# that /p/demo/feat-6c41 is not read as /p/demo/feat-6c4.
+done_workspace() {
+  case $cwd in
+    "$main" | "$main"/* | "$root")
+      done_refuse "can't tear down the main worktree" \
+        "  $cwd is the main worktree, not a workspace this flow removes"
+      ;;
+  esac
+
+  local listed best_name='' best_root='' row_name row_path wt_path=''
+  if [ -n "$workspaces" ]; then
+    listed=$(cat "$workspaces") ||
+      die "done: could not read the workspace list from $workspaces"
+  else
+    listed=$( cd "$cwd" && jj workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
+      die "done: could not read the jj workspaces of $cwd"
+  fi
+
+  while IFS=$'\t' read -r row_name row_path; do
+    [ -n "$row_name" ] || continue
+    # The wrapper is jj's default workspace -- the directory main and the
+    # branch workspaces sit in -- and it is refused above by name. Left in the
+    # scan it would claim every directory under the wrapper that no other
+    # workspace owns, and read one of those as "a jj row with no worktree" when
+    # it is not a workspace at all.
+    [ "$row_path" != "$root" ] || continue
+    case $cwd in
+      "$row_path" | "$row_path"/*)
+        if [ ${#row_path} -gt ${#best_root} ]; then
+          best_name=$row_name
+          best_root=$row_path
+        fi
+        ;;
+    esac
+  done <<<"$listed"
+
+  if [ -z "$best_root" ]; then
+    done_refuse "can't tear down $cwd" \
+      "  $cwd is not inside a jj workspace this wrapper knows about"
+  fi
+
+  # The two halves have to agree before anything is removed: a jj row with no
+  # worktree, or a worktree with no row, is the state that is hard to unpick --
+  # and the one a person cannot repair from the float.
+  wt_path=$(done_wt_path "$best_root") || exit $?
+  if [ -z "$wt_path" ]; then
+    done_refuse "can't tear down $best_name" \
+      "  jj lists this workspace at $best_root, but worktrunk has no worktree there"
+  fi
+
+  name=$best_name
+  root_path=$best_root
+}
+
+# `new-work.sh done --cwd PATH --main DIR --root PATH --project NAME
+#                 --session ID --window ID [...]`
+#
+# The audit behind rex's "I'm done" key: the workspace the focused pane is in
+# is found, then -- as the steps that follow this one land -- everything that
+# would be lost by tearing it down is asked about, and either the block of
+# reasons is printed (exit 4, nothing removed) or the answer goes back to Rex to
+# do the removal.
+cmd_done() {
+  local cwd='' main='' root='' project='' session='' window=''
+  local name='' root_path=''
+  # Read by the steps this command grows into -- the fetch, the two store
+  # blockers, the programs still running in the tab, main's fast-forward and the
+  # hand-back. They are parsed here so a missing value is refused as a usage
+  # error now rather than surfacing as an empty answer later.
+  local workspaces='' wt_json='' diff='' own_status='' changes='' main_state=''
+  local bd_json='' bookmarks='' origin_head='' running=''
+  local no_fetch=0 dry_run=0
+
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --cwd)
+        [ $# -ge 2 ] || usage_error 'done: --cwd needs a directory'
+        cwd=$2
+        shift 2
+        ;;
+      --main)
+        [ $# -ge 2 ] || usage_error 'done: --main needs a directory'
+        main=$2
+        shift 2
+        ;;
+      --root)
+        [ $# -ge 2 ] || usage_error 'done: --root needs a path'
+        root=$2
+        shift 2
+        ;;
+      --project)
+        [ $# -ge 2 ] || usage_error 'done: --project needs a name'
+        project=$2
+        shift 2
+        ;;
+      --session)
+        [ $# -ge 2 ] || usage_error 'done: --session needs an id'
+        session=$2
+        shift 2
+        ;;
+      --window)
+        [ $# -ge 2 ] || usage_error 'done: --window needs an id'
+        window=$2
+        shift 2
+        ;;
+      # One --running per program, in the order they are listed: the block
+      # names them in one comma-separated line.
+      --running)
+        [ $# -ge 2 ] || usage_error 'done: --running needs a name'
+        running=${running:+$running, }$2
+        shift 2
+        ;;
+      --workspaces)
+        [ $# -ge 2 ] || usage_error 'done: --workspaces needs a file'
+        workspaces=$2
+        shift 2
+        ;;
+      --wt-json)
+        [ $# -ge 2 ] || usage_error 'done: --wt-json needs a file'
+        wt_json=$2
+        shift 2
+        ;;
+      --diff)
+        [ $# -ge 2 ] || usage_error 'done: --diff needs a file'
+        diff=$2
+        shift 2
+        ;;
+      --own-status)
+        [ $# -ge 2 ] || usage_error 'done: --own-status needs a file'
+        own_status=$2
+        shift 2
+        ;;
+      --changes)
+        [ $# -ge 2 ] || usage_error 'done: --changes needs a file'
+        changes=$2
+        shift 2
+        ;;
+      --main-state)
+        [ $# -ge 2 ] || usage_error 'done: --main-state needs a file'
+        main_state=$2
+        shift 2
+        ;;
+      --bd-json)
+        [ $# -ge 2 ] || usage_error 'done: --bd-json needs a file'
+        bd_json=$2
+        shift 2
+        ;;
+      --base-bookmarks)
+        [ $# -ge 2 ] || usage_error 'done: --base-bookmarks needs a file'
+        bookmarks=$2
+        shift 2
+        ;;
+      --origin-head)
+        [ $# -ge 2 ] || usage_error 'done: --origin-head needs a ref'
+        origin_head=$2
+        shift 2
+        ;;
+      --no-fetch)
+        no_fetch=1
+        shift
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      *) usage_error "done: unknown option $1" ;;
+    esac
+  done
+
+  [ -n "$cwd" ] || usage_error 'done: need --cwd PATH'
+  [ -n "$main" ] || usage_error 'done: need --main DIR'
+  [ -n "$root" ] || usage_error 'done: need --root PATH'
+  [ -n "$project" ] || usage_error 'done: need --project NAME'
+  [ -n "$session" ] || usage_error 'done: need --session ID'
+  [ -n "$window" ] || usage_error 'done: need --window ID'
+
+  # Rex reads these paths against its own working directory, not this one, so
+  # each has to say where it is -- the same guard pick makes for its hand-back.
+  need_absolute 'done: --cwd' "$cwd"
+  need_absolute 'done: --main' "$main"
+  need_absolute 'done: --root' "$root"
+
+  # Every payload this command reads is JSON, read through jq like the rest of
+  # this file's.
+  need jq
+
+  # jj is read from --cwd and worktrunk from --main, unless a saved answer
+  # stands in for one of them, so a directory that is not there is refused here
+  # by name: left to the `cd` in the subshell that reads it, the failure reads
+  # as a line number in this script rather than as a place that does not exist.
+  [ -n "$workspaces" ] || [ -d "$cwd" ] || die "done: no such directory: $cwd"
+  [ -n "$wt_json" ] || [ -d "$main" ] || die "done: no such directory: $main"
+
+  done_workspace
+
+  # What is left -- fetching, the content blockers, the programs still running in
+  # the tab, main's fast-forward, the hand-back and the close -- is the work of
+  # the steps that follow. A clean run prints nothing of its own and leaves 0,
+  # and `name` with `root_path` is what those steps read.
+  return 0
+}
+
 case ${1:-} in
   beads)
     shift
@@ -1961,6 +2265,13 @@ case ${1:-} in
     # pause that keeps its message on screen is taken in one place.
     trap hold_pick EXIT
     cmd_pick "$@"
+    ;;
+  done)
+    shift
+    # Every way the flow can stop passes through here on its way out, so the
+    # pause that keeps a message on screen is taken in one place.
+    trap hold_done EXIT
+    cmd_done "$@"
     ;;
   *)
     usage_error "unknown command ${1:-<none>}"
