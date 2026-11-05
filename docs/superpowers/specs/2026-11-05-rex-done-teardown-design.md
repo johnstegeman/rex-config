@@ -80,8 +80,10 @@ and "unmerged" means content rather than ancestry.
   moving `main` forward, which is the exception named below and nothing more.
 - **Moving any workspace other than `main`.** Every other workspace is a report,
   not a target — Step 8's rule, kept.
-- **Forcing.** No `-f`, no `-D`, no `--reap`, no `--no-hooks`. The audit already
-  refused the situations those flags exist for.
+- **Forcing.** No `-f`, no `-D`, no `--reap`. The audit already refused the
+  situations those flags exist for. No `--no-hooks` either, but for the opposite
+  reason: the hook is the step that forgets the jj workspace, so skipping it
+  would leave half the teardown undone.
 - **Reaping processes.** Killing dev servers is `wt --reap`'s experimental job,
   and it kills things rex did not start.
 - **Merging, pushing, rebasing, or opening a PR.** The merge is the person's, on
