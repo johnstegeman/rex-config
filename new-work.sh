@@ -2088,6 +2088,77 @@ done_base() {
   base_chain "$main" "$bookmarks" "$origin_head" '' '' 'done' | sed -n 1p
 }
 
+# The two answers the moves below are guarded by, in the shape --main-state
+# saves: whether main's bookmark is contained in the base -- so moving it is a
+# move forward and never back -- and whether main's working copy is provably
+# empty, so moving it strands nothing. Both are read in main, because both are
+# about that workspace. --main-state is the seam a test or a dry run uses; the
+# saved answers are read here rather than at the call site so the two guards
+# read the same shape either way.
+done_main_state() {
+  local ahead at desc contained at_empty
+  if [ -n "$main_state" ]; then
+    cat "$main_state" || return 1
+    return 0
+  fi
+  # main's own commits are the ones the base does not have, asked as a set
+  # difference: an empty answer means every commit main has, the base has too,
+  # so the bookmark can only move forward.
+  ahead=$(cd "$main" && jj log -r "main ~ ::$base" --no-graph \
+    -T 'change_id.short() ++ "\n"') || return 1
+  if [ -z "$ahead" ]; then contained=yes; else contained=no; fi
+  # Provably empty is two answers, not one: nothing between @- and @, and no
+  # description on @. Each alone can be true of a working copy with work in it,
+  # and jj new over that work is the one loss this flow must not cause.
+  at=$(cd "$main" && jj diff --from @- --to @ --name-only) || return 1
+  desc=$(cd "$main" && jj log -r @ --no-graph -T 'description') || return 1
+  if [ -z "$at" ] && [ -z "$desc" ]; then at_empty=yes; else at_empty=no; fi
+  printf 'contained %s\nat-empty %s\n' "$contained" "$at_empty"
+}
+
+# Keep main current, and only ever forward: the bookmark first, then the working
+# copy, each behind its own guard, because either write run on the wrong
+# repository loses work -- a bookmark set onto a base main is not an ancestor
+# of is a move back, and jj new over a working copy with work in it strands
+# that work. A guard that cannot be made out is a blocker rather than a skip,
+# and it names the command that would clear it: an untidy main is one command
+# away from being tidy, and a main moved when it should not have been is a
+# loss. This runs whether the rest of the audit refused or not -- keeping main
+# current removes nothing, and the next branch starting from a stale base is
+# the failure this step exists to prevent.
+done_main_move() {
+  local key value contained=no at_empty=no state
+  state=$(done_main_state) || die "done: could not read main's state"
+  while read -r key value; do
+    case $key in
+      contained) contained=$value ;;
+      at-empty) at_empty=$value ;;
+    esac
+  done <<<"$state"
+
+  # A write jj itself refuses is not reported as a blocker: the guards above
+  # are the answers this step makes about main, and jj's own message -- a lock,
+  # a divergent bookmark -- is the one that says what to do about that. What
+  # must not happen is the screen aborting on it (`set -e`), because the audit
+  # still owes the person every reason it found, in one block.
+  if [ "$contained" = yes ]; then
+    ( cd "$main" && jj bookmark set main -r "$base" ) || true
+  else
+    done_blocker "  main was not moved: it has commits $base does not; run jj new $base in $main"
+  fi
+
+  # The working copy moves only onto a base its bookmark has reached: with main's
+  # own commits still on the bookmark, jj new would take the checkout off them
+  # and leave a main whose working copy is not its branch -- half a refresh, and
+  # the half that misleads. A working copy that is not provably empty is reported
+  # either way, because it is a reason main was not moved.
+  if [ "$at_empty" = no ]; then
+    done_blocker "  main was not moved: its working copy is not empty; run jj new $base in $main"
+  elif [ "$contained" = yes ]; then
+    ( cd "$main" && jj new "$base" ) || true
+  fi
+}
+
 # The worktrunk worktree list as JSON: --wt-json when one is given, else
 # `wt list` asked from the main worktree, which is the worktree every wt call
 # uses. Reads `main` and `wt_json` from cmd_done, its only caller.
@@ -2422,22 +2493,29 @@ cmd_done() {
     done_blocker "  working copy has changes: $own_count path$([ "$own_count" -eq 1 ] || echo s)"
   fi
 
-  # A program still running in the tab is the next question, and the last of the
-  # reasons collected here: it is the one blocker the person can clear without
-  # touching jj or worktrunk, so it belongs on the same screen rather than on
-  # one of its own. The names are already one comma-separated list, in the order
-  # the tab listed them.
+  # A program still running in the tab is the next question: it is the one
+  # blocker the person can clear without touching jj or worktrunk, so it
+  # belongs on the same screen rather than on one of its own. The names are
+  # already one comma-separated list, in the order the tab listed them.
   [ -z "$running" ] || done_blocker "  still running in this tab: $running"
 
-  # One screen for all of them, in the order they were asked. The steps that
-  # follow add their blockers above this line and stop here with them.
+  # Then main itself: the flow's only writes beyond the fetch, made here --
+  # before the block is printed rather than after it -- because keeping main
+  # current is desirable on its own. Neither move removes anything, and the
+  # next branch starting from a stale base is what this step exists to prevent.
+  # A move its guard refuses adds its own line instead, after the reasons above
+  # and before the bead.
+  done_main_move
+
+  # One screen for all of them, in the order they were asked: the reasons
+  # above, then main's two lines, then the bead the workspace belongs to.
   if [ ${#done_lines[@]} -gt 0 ]; then
     done_stop
   fi
 
-  # What is left -- main's fast-forward, the hand-back and the close -- is the
-  # work of the steps that follow. A clean run prints nothing of its own and
-  # leaves 0, and `name` with `root_path` is what those steps read.
+  # What is left -- the hand-back and the close -- is the work of the steps that
+  # follow. A clean run prints nothing of its own and leaves 0, and `name` with
+  # `root_path` is what those steps read.
   return 0
 }
 

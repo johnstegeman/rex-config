@@ -457,6 +457,96 @@ want_out "the whole block" "can't tear down feat/6c4
 
 nothing was removed; press any key"
 
+# --- Moving main forward, and only forward, after the fetch ---
+
+# A clean workspace beside a clean, provably empty main: both writes happen,
+# both in main, and both after the fetch -- the fetch first because every
+# answer the moves decide from is about what origin has, the bookmark before
+# the move of the working copy because that is the order the refresh reads.
+# The moves run in --main, so --main is a directory that is there; /p/demo/main
+# is an answer, not a place.
+mkdir -p "$tmp/real-main"
+ran=$((ran + 1))
+rm -f "$tmp/rex-args" "$tmp/jj-args"
+PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
+  ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
+  --project demo --session s1 --window w1 \
+  --workspaces test/fixtures/workspaces.txt \
+  --wt-json test/fixtures/done-wt-list.json \
+  --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
+  --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
+  --bd-json test/fixtures/ready.json \
+  --base-bookmarks test/fixtures/bookmarks.txt \
+  --origin-head origin/main \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+want_status "a clean workspace with a clean main carries on" 0
+ran=$((ran + 1))
+[ "$(sed -n 1p "$tmp/jj-args")" = "cwd=$tmp/real-main argv=git fetch" ] ||
+  fail "the fetch comes first, in main" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+[ "$(sed -n 2p "$tmp/jj-args")" = "cwd=$tmp/real-main argv=bookmark set main -r main@origin" ] ||
+  fail "the bookmark is set onto the base, after the fetch" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+[ "$(sed -n 3p "$tmp/jj-args")" = "cwd=$tmp/real-main argv=new main@origin" ] ||
+  fail "main's working copy is moved in main, after the bookmark" "$(cat "$tmp/jj-args")"
+
+# main has commits the base does not: setting its bookmark onto the base would
+# be a move backwards, so neither move is made -- moving only the working copy
+# would leave a main whose checkout is not its branch -- and the block names
+# the command that would clear it.
+printf 'contained no\nat-empty yes\n' >"$tmp/main-ahead"
+DONE_MAIN=$tmp/main-ahead run_done --main "$tmp/real-main"
+want_status "an ahead main is a blocker" 4
+want_out "the ahead-main block" "can't tear down feat/6c4
+
+  main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+[ ! -s "$tmp/jj-args" ] ||
+  fail "neither move runs on an ahead main, not even the working copy" \
+    "$(cat "$tmp/jj-args")"
+
+# A working copy that is not provably empty is not moved either: jj new over
+# it would strand whatever is in it. The bookmark guard is its own, and still
+# passes.
+printf 'contained yes\nat-empty no\n' >"$tmp/main-dirty"
+DONE_MAIN=$tmp/main-dirty run_done --main "$tmp/real-main"
+want_status "a non-empty main working copy is a blocker" 4
+want_out "the dirty-main block" "can't tear down feat/6c4
+
+  main was not moved: its working copy is not empty; run jj new main@origin in $tmp/real-main
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+grep -q '^cwd=.* argv=bookmark set main -r main@origin$' "$tmp/jj-args" ||
+  fail "a contained main bookmark is still moved" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+! grep -q 'argv=new ' "$tmp/jj-args" ||
+  fail "a non-empty main keeps its working copy" "$(cat "$tmp/jj-args")"
+
+# The two main lines join the block after the programs still running in the
+# tab and before the bead paragraph: one block, one footer, and the audit
+# asked the tab before it asked main.
+printf 'contained no\nat-empty no\n' >"$tmp/main-both"
+DONE_MAIN=$tmp/main-both DONE_BD_JSON=test/fixtures/done-beads.json \
+  run_done --main "$tmp/real-main" --running pi
+want_status "both main blockers are a refusal" 4
+want_out "the main lines sit after the running line" "can't tear down feat/6c4
+
+  still running in this tab: pi
+  main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
+  main was not moved: its working copy is not empty; run jj new main@origin in $tmp/real-main
+
+  bead rex-config-6c4 is still in_progress
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+[ ! -s "$tmp/jj-args" ] ||
+  fail "a main that is not provably clean is not touched" "$(cat "$tmp/jj-args")"
+
+
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
   exit 1
