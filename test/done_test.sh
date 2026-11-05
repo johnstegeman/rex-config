@@ -37,6 +37,11 @@ chmod +x "$tmp/bin/rex" "$tmp/bin/jj"
 : >"$tmp/clean-changes"
 printf 'contained yes\nat-empty yes\n' >"$tmp/clean-main"
 
+# The two moves run in --main, so a case that reaches them needs a directory
+# that is there: /p/demo/main is an answer, not a place. Cases that only
+# assert on the main worktree's path keep the /p/demo answer.
+mkdir -p "$tmp/real-main"
+
 # A PATH holding bash -- the script's own `#!/usr/bin/env bash` needs it -- with
 # jq and cat beside it, and no worktrunk. One case runs there, so "wt is missing"
 # is proven rather than left to the developer's machine.
@@ -51,7 +56,7 @@ run_done() {
   PATH="${DONE_PATH:-$tmp/bin:$PATH}" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
     ./new-work.sh done \
     --cwd "${DONE_CWD:-/p/demo/feat-6c4}" \
-    --main /p/demo/main --root /p/demo --project demo \
+    --main "${DONE_MAIN_DIR:-/p/demo/main}" --root /p/demo --project demo \
     --session s1 --window w1 \
     --workspaces test/fixtures/workspaces.txt \
     --wt-json "${DONE_WT:-test/fixtures/done-wt-list.json}" \
@@ -60,7 +65,6 @@ run_done() {
     --changes "${DONE_CHANGES:-$tmp/clean-changes}" \
     --main-state "${DONE_MAIN:-$tmp/clean-main}" \
     --bd-json "${DONE_BD_JSON:-test/fixtures/ready.json}" \
-    --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
     --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
     --origin-head origin/main \
     "$@" >"$tmp/out" 2>"$tmp/err" </dev/null
@@ -91,12 +95,12 @@ want_err_has() {
 
 # A cwd in a workspace gets past identification. Nothing is printed yet: the
 # hand-back arrives in Task 5, and silence is what the clean path prints.
-DONE_CWD=/p/demo/feat-6c4 run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_CWD=/p/demo/feat-6c4 run_done
 want_status "a workspace cwd is not refused" 0
 want_out "a clean run prints nothing yet" ""
 
 # A subdirectory of a workspace belongs to that workspace.
-DONE_CWD=/p/demo/feat-6c4/docs run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_CWD=/p/demo/feat-6c4/docs run_done
 want_status "a subdirectory of a workspace is that workspace" 0
 
 # The main worktree, and anywhere inside it, is refused by path.
@@ -237,7 +241,7 @@ grep -q 'cd:' "$tmp/err" &&
 # Three changes touch four paths. The change count comes from --changes, the
 # paths from --diff, and every path is listed.
 printf 'aaa111\nbbb222\nccc333\n' >"$tmp/changes-3"
-DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 run_done
 want_status "unmerged content is a blocker" 4
 want_out "the unmerged block" "can't tear down feat/6c4
 
@@ -250,7 +254,7 @@ want_out "the unmerged block" "can't tear down feat/6c4
 nothing was removed; press any key"
 
 # A working copy with changes of its own.
-DONE_OWN=test/fixtures/done-own-status.txt run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a dirty working copy is a blocker" 4
 want_out "the dirty block" "can't tear down feat/6c4
 
@@ -260,7 +264,8 @@ nothing was removed; press any key"
 
 # Both, in the order the audit asks them: the branch's changes first, the
 # working copy's after.
-DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
+DONE_MAIN_DIR=$tmp/real-main \
+  DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
   DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "both store blockers is a refusal" 4
 want_out "both store blockers, in order" "can't tear down feat/6c4
@@ -277,7 +282,7 @@ nothing was removed; press any key"
 # The case a reachability test gets wrong: the range has changes and the
 # content diff is empty, which is what a squash merge leaves behind. Nothing
 # would be lost, so nothing is refused.
-DONE_CHANGES=$tmp/changes-3 run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_CHANGES=$tmp/changes-3 run_done
 want_status "a squash-merged branch is not a blocker" 0
 want_out "a squash-merged branch prints nothing" ""
 
@@ -285,7 +290,8 @@ want_out "a squash-merged branch prints nothing" ""
 # hard-coded main@origin: this clone tracks develop, and develop is what the
 # block names.
 printf 'main@\ndevelop@\ndevelop@origin\n' >"$tmp/bookmarks.develop"
-DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 run_done \
+DONE_MAIN_DIR=$tmp/real-main DONE_DIFF=test/fixtures/done-diff.txt \
+  DONE_CHANGES=$tmp/changes-3 run_done \
   --base-bookmarks "$tmp/bookmarks.develop" --origin-head origin/develop
 want_status "a develop clone is a blocker too" 4
 want_out_has "the base comes from --origin-head, not a fixed name" \
@@ -349,7 +355,7 @@ ran=$((ran + 1))
 
 # A program still running in the tab is a reason not to tear it down, and the
 # names come in the order they were given, in one comma-separated line.
-run_done --running pi --running node
+DONE_MAIN_DIR=$tmp/real-main run_done --running pi --running node
 want_status "a running program is a blocker" 4
 want_out "the running block" "can't tear down feat/6c4
 
@@ -365,13 +371,13 @@ want_status "an empty --running is a usage error" 2
 
 # The bead is information, not a reason: on a clean run it prints nothing at
 # all, because a run that removes the workspace has no screen.
-DONE_BD_JSON=test/fixtures/done-beads.json run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=test/fixtures/done-beads.json run_done
 want_status "a claimed bead is not a blocker on its own" 0
 want_out "a claimed bead on a clean run prints nothing" ""
 
 # With a blocker it says which bead this workspace is, in a paragraph of its
 # own, after the reasons and before the footer.
-DONE_BD_JSON=test/fixtures/done-beads.json \
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=test/fixtures/done-beads.json \
   DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a claimed bead with a dirty copy is a refusal" 4
 want_out "the bead line sits after the blockers" "can't tear down feat/6c4
@@ -387,13 +393,14 @@ nothing was removed; press any key"
 # The evidence for "silence, not a failure" is a refusal, where the bead line is
 # asked for: a blocker is still the whole block, and the bead paragraph is
 # simply absent.
-DONE_BD_JSON="$tmp/clean-changes" run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON="$tmp/clean-changes" run_done
 want_status "an empty bead list on a clean run prints nothing" 0
-DONE_BD_JSON=/nonexistent run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=/nonexistent run_done
 want_status "an unreadable bead list on a clean run prints nothing" 0
 
 # A bead read that fails.
-DONE_BD_JSON=/nonexistent DONE_OWN=test/fixtures/done-own-status.txt run_done
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=/nonexistent \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "an unreadable bead list is not a bead line, and is no failure" 4
 want_out "the dirty block with an unreadable bead list" "can't tear down feat/6c4
 
@@ -403,7 +410,7 @@ nothing was removed; press any key"
 
 # A bead list that is readable and matches nothing: the only bead in it is
 # another workspace's.
-DONE_BD_JSON=test/fixtures/done-beads-no-match.json \
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=test/fixtures/done-beads-no-match.json \
   DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a bead list that matches nothing is not a bead line" 4
 want_out "the dirty block with a non-matching bead list" "can't tear down feat/6c4
@@ -415,7 +422,7 @@ nothing was removed; press any key"
 # A row with no status is not a bead line: the block is prose, and a missing
 # field would reach it as the word "null".
 printf '[{"id":"rex-config-6c4"}]' >"$tmp/beads-no-status"
-DONE_BD_JSON="$tmp/beads-no-status" \
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON="$tmp/beads-no-status" \
   DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a bead row with no status is still a refusal" 4
 want_out "the dirty block with a statusless bead" "can't tear down feat/6c4
@@ -426,7 +433,7 @@ nothing was removed; press any key"
 
 # An empty status is no better than a missing one: "is still " with nothing
 # after it is a sentence that stopped.
-DONE_BD_JSON=test/fixtures/done-beads-empty-status.json \
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=test/fixtures/done-beads-empty-status.json \
   DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a bead row with an empty status is still a refusal" 4
 want_out "the dirty block with an empty-status bead" "can't tear down feat/6c4
@@ -438,7 +445,7 @@ nothing was removed; press any key"
 # Everything at once (Review Focus 4): the pinned order, the bead paragraph
 # in its place, and exactly one "nothing was removed" line.
 printf 'aaa111\nbbb222\nccc333\n' >"$tmp/changes-3"
-DONE_BD_JSON=test/fixtures/done-beads.json \
+DONE_MAIN_DIR=$tmp/real-main DONE_BD_JSON=test/fixtures/done-beads.json \
   DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
   DONE_OWN=test/fixtures/done-own-status.txt run_done \
   --running pi --running node
@@ -490,13 +497,20 @@ ran=$((ran + 1))
 ran=$((ran + 1))
 [ "$(sed -n 3p "$tmp/jj-args")" = "cwd=$tmp/real-main argv=new main@origin" ] ||
   fail "main's working copy is moved in main, after the bookmark" "$(cat "$tmp/jj-args")"
+# Three calls and no more: a stray read or a second write in main would show up
+# here as a fourth line.
+ran=$((ran + 1))
+[ "$(wc -l <"$tmp/jj-args")" -eq 3 ] ||
+  fail "the clean path makes exactly the three jj calls" "$(cat "$tmp/jj-args")"
+# And the clean path still says nothing: it hands back, so there is no screen.
+want_out "a clean run with a clean main prints nothing" ""
 
 # main has commits the base does not: setting its bookmark onto the base would
 # be a move backwards, so neither move is made -- moving only the working copy
 # would leave a main whose checkout is not its branch -- and the block names
 # the command that would clear it.
 printf 'contained no\nat-empty yes\n' >"$tmp/main-ahead"
-DONE_MAIN=$tmp/main-ahead run_done --main "$tmp/real-main"
+DONE_MAIN_DIR=$tmp/real-main DONE_MAIN=$tmp/main-ahead run_done
 want_status "an ahead main is a blocker" 4
 want_out "the ahead-main block" "can't tear down feat/6c4
 
@@ -512,11 +526,11 @@ ran=$((ran + 1))
 # it would strand whatever is in it. The bookmark guard is its own, and still
 # passes.
 printf 'contained yes\nat-empty no\n' >"$tmp/main-dirty"
-DONE_MAIN=$tmp/main-dirty run_done --main "$tmp/real-main"
+DONE_MAIN_DIR=$tmp/real-main DONE_MAIN=$tmp/main-dirty run_done
 want_status "a non-empty main working copy is a blocker" 4
 want_out "the dirty-main block" "can't tear down feat/6c4
 
-  main was not moved: its working copy is not empty; run jj new main@origin in $tmp/real-main
+  main's working copy was not moved: it is not empty; run jj new main@origin in $tmp/real-main
 
 nothing was removed; press any key"
 ran=$((ran + 1))
@@ -530,14 +544,14 @@ ran=$((ran + 1))
 # tab and before the bead paragraph: one block, one footer, and the audit
 # asked the tab before it asked main.
 printf 'contained no\nat-empty no\n' >"$tmp/main-both"
-DONE_MAIN=$tmp/main-both DONE_BD_JSON=test/fixtures/done-beads.json \
-  run_done --main "$tmp/real-main" --running pi
+DONE_MAIN_DIR=$tmp/real-main DONE_MAIN=$tmp/main-both \
+  DONE_BD_JSON=test/fixtures/done-beads.json run_done --running pi
 want_status "both main blockers are a refusal" 4
 want_out "the main lines sit after the running line" "can't tear down feat/6c4
 
   still running in this tab: pi
   main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
-  main was not moved: its working copy is not empty; run jj new main@origin in $tmp/real-main
+  main's working copy was not moved: it is not empty; run jj new main@origin in $tmp/real-main
 
   bead rex-config-6c4 is still in_progress
 
@@ -545,6 +559,116 @@ nothing was removed; press any key"
 ran=$((ran + 1))
 [ ! -s "$tmp/jj-args" ] ||
   fail "a main that is not provably clean is not touched" "$(cat "$tmp/jj-args")"
+
+# --- When jj itself refuses a move ---
+
+# jj refuses the bookmark write -- a divergent bookmark, another op holding the
+# lock. main was not refreshed, so the audit says so instead of handing back as
+# though it were; and the working copy must not be moved onto a base its
+# bookmark never reached, because that is the half-refresh whose next
+# `jj git push -b main` pushes the stale commit.
+mkdir -p "$tmp/nobookbin"
+cp "$tmp/bin/rex" "$tmp/nobookbin/rex"
+cat >"$tmp/nobookbin/jj" <<'EOF'
+#!/bin/sh
+printf 'cwd=%s argv=%s\n' "$PWD" "$*" >>"$JJ_ARGS_FILE"
+case "$*" in
+  "bookmark set "*) printf 'jj: bookmark main is divergent\n' >&2; exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$tmp/nobookbin/jj"
+DONE_PATH="$tmp/nobookbin:$tmp/bin:$PATH" DONE_MAIN_DIR=$tmp/real-main run_done
+want_status "a refused bookmark write is a blocker" 4
+want_out "the refused-bookmark block" "can't tear down feat/6c4
+
+  main was not moved: jj refused to move its bookmark; run jj bookmark set main -r main@origin in $tmp/real-main
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+! grep -q 'argv=new ' "$tmp/jj-args" ||
+  fail "a bookmark that did not move does not take the working copy with it" \
+    "$(cat "$tmp/jj-args")"
+
+# jj takes the bookmark but refuses the working copy: a blocker too, one line
+# for the one write that did not happen, and still the 4 of a refusal rather
+# than jj's exit code.
+mkdir -p "$tmp/nonewbin"
+cp "$tmp/bin/rex" "$tmp/nonewbin/rex"
+cat >"$tmp/nonewbin/jj" <<'EOF'
+#!/bin/sh
+printf 'cwd=%s argv=%s\n' "$PWD" "$*" >>"$JJ_ARGS_FILE"
+case "$*" in
+  new\ *) printf 'jj: cannot create a new commit\n' >&2; exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$tmp/nonewbin/jj"
+DONE_PATH="$tmp/nonewbin:$tmp/bin:$PATH" DONE_MAIN_DIR=$tmp/real-main run_done
+want_status "a refused working-copy move is a blocker" 4
+want_out "the refused-new block" "can't tear down feat/6c4
+
+  main's working copy was not moved; run jj new main@origin in $tmp/real-main
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+grep -q '^cwd=.* argv=bookmark set main -r main@origin$' "$tmp/jj-args" ||
+  fail "the refused working copy still had its bookmark moved" "$(cat "$tmp/jj-args")"
+
+# --- main's state read from jj rather than saved ---
+
+# --main-state is the seam; this is the read it stands in for. A jj that
+# answers "nothing ahead of the base, nothing in the working copy" is the clean
+# answer, and the two writes follow from it.
+mkdir -p "$tmp/statebin"
+cp "$tmp/bin/rex" "$tmp/statebin/rex"
+cat >"$tmp/statebin/jj" <<'EOF'
+#!/bin/sh
+# main's state as jj would answer it: nothing ahead of the base and nothing in
+# the working copy, unless JJ_AHEAD says main carries a commit of its own.
+# Every call is recorded, so the reads and the writes can both be read back.
+printf 'cwd=%s argv=%s\n' "$PWD" "$*" >>"$JJ_ARGS_FILE"
+case "$*" in
+  "log -r main ~ ::main@origin"*) [ -z "${JJ_AHEAD:-}" ] || printf '%s\n' "$JJ_AHEAD" ;;
+esac
+exit 0
+EOF
+chmod +x "$tmp/statebin/jj"
+DONE_PATH="$tmp/statebin:$tmp/bin:$PATH" DONE_MAIN_DIR=$tmp/real-main \
+  run_done --main-state ''
+want_status "main's state read from jj, both answers clean, carries on" 0
+want_out "a clean main read from jj prints nothing" ""
+ran=$((ran + 1))
+grep -q 'argv=log -r main ~ ::main@origin --no-graph' "$tmp/jj-args" ||
+  fail "the containment question is asked of jj" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+grep -q 'argv=diff --from @- --to @ --name-only$' "$tmp/jj-args" ||
+  fail "the working copy is asked for its diff" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+grep -q 'argv=log -r @ --no-graph -T description$' "$tmp/jj-args" ||
+  fail "the working copy is asked for its description" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+grep -q '^cwd=.* argv=bookmark set main -r main@origin$' "$tmp/jj-args" ||
+  fail "a clean answer from jj still moves the bookmark" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+grep -q '^cwd=.* argv=new main@origin$' "$tmp/jj-args" ||
+  fail "a clean answer from jj still moves the working copy" "$(cat "$tmp/jj-args")"
+
+# A change id from the containment read is main carrying a commit the base does
+# not have, and that is the blocker -- read from jj rather than passed in.
+export JJ_AHEAD=aaa111
+DONE_PATH="$tmp/statebin:$tmp/bin:$PATH" DONE_MAIN_DIR=$tmp/real-main \
+  run_done --main-state ''
+unset JJ_AHEAD
+want_status "an ahead answer from jj is a blocker" 4
+want_out "the ahead block read from jj" "can't tear down feat/6c4
+
+  main was not moved: it has commits main@origin does not; run jj new main@origin in $tmp/real-main
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+! grep -q 'argv=new main@origin' "$tmp/jj-args" ||
+  fail "an ahead answer from jj moves nothing" "$(cat "$tmp/jj-args")"
 
 
 if [ "$fails" -ne 0 ]; then

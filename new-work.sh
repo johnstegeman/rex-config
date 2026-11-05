@@ -2127,8 +2127,9 @@ done_main_state() {
 # current removes nothing, and the next branch starting from a stale base is
 # the failure this step exists to prevent.
 done_main_move() {
-  local key value contained=no at_empty=no state
-  state=$(done_main_state) || die "done: could not read main's state"
+  local key value contained=no at_empty=no moved=no state where="jj in $main"
+  [ -z "$main_state" ] || where=$main_state
+  state=$(done_main_state) || die "done: could not read main's state from $where"
   while read -r key value; do
     case $key in
       contained) contained=$value ;;
@@ -2136,13 +2137,17 @@ done_main_move() {
     esac
   done <<<"$state"
 
-  # A write jj itself refuses is not reported as a blocker: the guards above
-  # are the answers this step makes about main, and jj's own message -- a lock,
-  # a divergent bookmark -- is the one that says what to do about that. What
-  # must not happen is the screen aborting on it (`set -e`), because the audit
-  # still owes the person every reason it found, in one block.
+  # Neither write is allowed to abort the screen: `done_main_move` is called
+  # bare under `set -e`, and the flow's exit codes are 0/2/4 with jj's own
+  # failure belonging to none of them. A write jj refuses is therefore a
+  # blocker -- the person is told main was not refreshed, and the audit still
+  # prints every other reason it found. jj's message itself stays on stderr.
   if [ "$contained" = yes ]; then
-    ( cd "$main" && jj bookmark set main -r "$base" ) || true
+    if ( cd "$main" && jj bookmark set main -r "$base" ); then
+      moved=yes
+    else
+      done_blocker "  main was not moved: jj refused to move its bookmark; run jj bookmark set main -r $base in $main"
+    fi
   else
     done_blocker "  main was not moved: it has commits $base does not; run jj new $base in $main"
   fi
@@ -2150,12 +2155,13 @@ done_main_move() {
   # The working copy moves only onto a base its bookmark has reached: with main's
   # own commits still on the bookmark, jj new would take the checkout off them
   # and leave a main whose working copy is not its branch -- half a refresh, and
-  # the half that misleads. A working copy that is not provably empty is reported
-  # either way, because it is a reason main was not moved.
+  # the half that would push a stale main. A working copy that is not provably
+  # empty is reported either way, because it is a reason main was not moved.
   if [ "$at_empty" = no ]; then
-    done_blocker "  main was not moved: its working copy is not empty; run jj new $base in $main"
-  elif [ "$contained" = yes ]; then
-    ( cd "$main" && jj new "$base" ) || true
+    done_blocker "  main's working copy was not moved: it is not empty; run jj new $base in $main"
+  elif [ "$moved" = yes ]; then
+    ( cd "$main" && jj new "$base" ) ||
+      done_blocker "  main's working copy was not moved; run jj new $base in $main"
   fi
 }
 
