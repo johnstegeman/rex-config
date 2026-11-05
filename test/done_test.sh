@@ -93,11 +93,11 @@ want_err_has() {
   grep -qF -- "$2" "$tmp/err" || fail "$1" "stderr lacks: $2; got: $(cat "$tmp/err")"
 }
 
-# A cwd in a workspace gets past identification. Nothing is printed yet: the
-# hand-back arrives in Task 5, and silence is what the clean path prints.
+# A cwd in a workspace gets past identification. The clean path says nothing of
+# its own: it hands back to Rex, and the close is what the person sees.
 DONE_MAIN_DIR=$tmp/real-main DONE_CWD=/p/demo/feat-6c4 run_done
 want_status "a workspace cwd is not refused" 0
-want_out "a clean run prints nothing yet" ""
+want_out "a clean run prints nothing" ""
 
 # A subdirectory of a workspace belongs to that workspace.
 DONE_MAIN_DIR=$tmp/real-main DONE_CWD=/p/demo/feat-6c4/docs run_done
@@ -669,6 +669,56 @@ nothing was removed; press any key"
 ran=$((ran + 1))
 ! grep -q 'argv=new main@origin' "$tmp/jj-args" ||
   fail "an ahead answer from jj moves nothing" "$(cat "$tmp/jj-args")"
+
+
+# --- The hand-back, and the close that comes last ---
+
+# A clean workspace: one hand-back carrying the five keys, then the close, and
+# nothing else. --main is a directory that is there, because the flow moves it
+# before it hands back and because the close runs in it; /p/demo/main is an
+# answer, not a place, and cd would fail there after the workspace is gone.
+# The payload carries the path for worktrunk and the workspace name for the
+# tab, both as cmd_done resolved them.
+want_line="rex do work_done_go --args '{\"project\":\"demo\",\"root\":\"/p/demo\",\"main\":\"$tmp/real-main\",\"workspace\":\"feat/6c4\",\"path\":\"/p/demo/feat-6c4\"}'"
+DONE_MAIN_DIR=$tmp/real-main run_done --dry-run
+want_status "a clean dry run exits 0" 0
+want_out "the dry run prints the one hand-back" "$want_line"
+ran=$((ran + 1))
+[ ! -s "$tmp/rex-args" ] || fail "a dry run closes nothing" "$(cat "$tmp/rex-args")"
+
+# The same run for real: the hand-back first, then the close, and no third
+# rex call. The close runs in --main, the one directory that is still there
+# once the workspace under the script's own cwd is gone.
+DONE_MAIN_DIR=$tmp/real-main run_done
+want_status "a clean run exits 0" 0
+want_out "a clean run prints nothing" ""
+ran=$((ran + 1))
+[ "$(wc -l <"$tmp/rex-args")" -eq 2 ] ||
+  fail "exactly the hand-back and the close" "$(cat "$tmp/rex-args")"
+ran=$((ran + 1))
+# The hand-back runs where the float runs, not in main: the payload says
+# where everything is, and this script has not moved yet.
+[ "$(sed -n 1p "$tmp/rex-args")" = "cwd=$PWD argv=do work_done_go --args {\"project\":\"demo\",\"root\":\"/p/demo\",\"main\":\"$tmp/real-main\",\"workspace\":\"feat/6c4\",\"path\":\"/p/demo/feat-6c4\"}" ] ||
+  fail "the hand-back is the first rex call, from the float's own cwd" "$(cat "$tmp/rex-args")"
+ran=$((ran + 1))
+[ "$(sed -n 2p "$tmp/rex-args")" = "cwd=$tmp/real-main argv=window close -s s1 w1" ] ||
+  fail "the close is the second and last rex call, run in main" "$(cat "$tmp/rex-args")"
+
+# A refused run never reaches rex at all: nothing was removed, so there is
+# nothing to hand back and no tab to close.
+DONE_MAIN_DIR=$tmp/real-main DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "a refusal exits 4" 4
+ran=$((ran + 1))
+[ ! -s "$tmp/rex-args" ] || fail "a refusal never reaches rex" "$(cat "$tmp/rex-args")"
+
+# A hand-back Rex refuses is one line, and closes nothing: the tab stays, so
+# the person can read what rex said and try again.
+REX_FAIL=boom DONE_MAIN_DIR=$tmp/real-main run_done
+want_status "a failed hand-back exits 1" 1
+want_err_has "a failed hand-back is named" "could not finish the hand-back"
+ran=$((ran + 1))
+[ "$(wc -l <"$tmp/rex-args")" -eq 1 ] ||
+  fail "a failed hand-back closes nothing" "$(cat "$tmp/rex-args")"
 
 
 if [ "$fails" -ne 0 ]; then

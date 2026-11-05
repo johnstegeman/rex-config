@@ -2519,10 +2519,37 @@ cmd_done() {
     done_stop
   fi
 
-  # What is left -- the hand-back and the close -- is the work of the steps that
-  # follow. A clean run prints nothing of its own and leaves 0, and `name` with
-  # `root_path` is what those steps read.
-  return 0
+  # Nothing is in the way, so the removal goes back to Rex: worktrunk's steps,
+  # the hook and the two verifications are the tab's work, and what this script
+  # has left to say is which workspace it means. The five keys are the whole
+  # contract -- `workspace` is the name the tab carries and `path` the worktree
+  # worktrunk removes -- and jq builds them so a path with a quote or a space in
+  # it cannot break the hand-back.
+  local payload
+  payload=$(jq -cn \
+    --arg project "$project" --arg root "$root" --arg main "$main" \
+    --arg workspace "$name" --arg path "$root_path" \
+    '{project: $project, root: $root, main: $main, workspace: $workspace, path: $path}')
+
+  if [ "$dry_run" -eq 1 ]; then
+    printf 'rex do work_done_go --args %s\n' "$(shell_quote "$payload")"
+    return 0
+  fi
+
+  # The hand-back is the last thing that can fail while the float still exists,
+  # so its failure is the one line this run prints: rex says why on this
+  # terminal, and this says that the hand-back did not finish.
+  local handed=0
+  rex do work_done_go --args "$payload" || handed=$?
+  if [ "$handed" -ne 0 ]; then
+    die "could not finish the hand-back: rex exited $handed"
+  fi
+
+  # The tab goes last, and nothing may follow it: closing a window kills the
+  # block that asked, which is this script. The cd comes first because the
+  # workspace under this script's own cwd has been removed by now.
+  cd "$main"
+  rex window close -s "$session" "$window"
 }
 
 case ${1:-} in
