@@ -1,5 +1,5 @@
 -- Tests for the Rex-facing half of init.lua: setup(), project resolution and the
--- work_new action.
+-- work_new and work_done actions.
 --
 -- A stub `rex` global stands in for the app, so these run with no Rex server,
 -- no git repository and no beads database: every call the module makes is
@@ -113,10 +113,12 @@ local function stub_rex()
   local stub = {
     actions = {},
     warns = {},
+    calls = {},
     exec_calls = {},
     block_calls = {},
     layers = {},
     closed_layers = {},
+    call_replies = {},
     exec_replies = {},
     json_replies = {},
   }
@@ -133,8 +135,18 @@ local function stub_rex()
     end
   end
 
-  stub.bind = unused("bind")
-  stub.call = unused("call")
+  -- The server's methods answer from call_replies, keyed by method, the way
+  -- action_test.lua does it: a method no test stubs raises rather than
+  -- answering plausibly, which is what keeps a new call from going unnoticed.
+  function stub.call(method, request)
+    stub.calls[#stub.calls + 1] = { method = method, request = request }
+    local reply = stub.call_replies[method]
+    if type(reply) == "function" then return reply(method, request) end
+    if reply == nil then
+      error("setup_test: rex.call(" .. tostring(method) .. ") was called, but no test stubs it", 2)
+    end
+    return reply
+  end
 
   -- nil is a program Rex could not start, which is also what the real one
   -- returns, with a message as its second value. A login-shell probe is one
@@ -160,9 +172,12 @@ local function stub_rex()
     encode = unused("json.encode"),
   }
 
+  -- process_reply is either the one answer every block gets or a function of the
+  -- request, for the flows that ask several blocks and depend on which is which.
   function stub.block_call(creator, method, request)
     stub.block_calls[#stub.block_calls + 1] = { creator = creator, method = method, request = request }
     if stub.process_reply == nil then return nil, "no terminal here" end
+    if type(stub.process_reply) == "function" then return stub.process_reply(request) end
     return stub.process_reply
   end
   stub.block = { call = function(creator, method, request) return stub.block_call(creator, method, request) end }
@@ -253,13 +268,40 @@ local script_file = io.open(tostring(M.options.script), "r")
 eq("script default exists beside the module", script_file ~= nil, true)
 if script_file then script_file:close() end
 
-eq("setup registers two actions", #rex_stub.actions, 2)
-eq("action names", action_names(rex_stub.actions), { "work_new", "work_new_go" })
+local done = rex_stub.actions[3] or {}
+local done_go = rex_stub.actions[4] or {}
+
+eq("setup registers four actions", #rex_stub.actions, 4)
+eq("action names", action_names(rex_stub.actions),
+  { "work_new", "work_new_go", "work_done", "work_done_go" })
 eq("work_new title", rex_stub.actions[1].title, "New work: from a bead…")
 eq("work_new category", rex_stub.actions[1].category, "New work")
 eq("work_new_go category", rex_stub.actions[2].category, "New work")
 eq("work_new run", type(rex_stub.actions[1].run), "function")
 eq("work_new_go run", type(rex_stub.actions[2].run), "function")
+
+-- The teardown is key-bound, so it takes no arguments: everything it needs is
+-- the terminal it was pressed in.
+eq("work_done title", done.title, "Done: tear down this worktree")
+eq("work_done category", done.category, "New work")
+eq("work_done takes no arguments", done.args, nil)
+eq("work_done run", type(done.run), "function")
+
+-- Its hand-back is registered now, though its action arrives in the next
+-- task, so the palette order does not move later: the declaration is what a
+-- named call is checked against.
+eq("work_done_go title", done_go.title, "Done: remove the worktree the audit approved")
+eq("work_done_go category", done_go.category, "New work")
+eq("work_done_go run", type(done_go.run), "function")
+eq("work_done_go declares its five fields",
+  table.concat((done_go.args and done_go.args.required) or {}, ","),
+  "project,root,main,workspace,path")
+eq("work_done_go declares every field as a string",
+  (done_go.args and done_go.args.properties) or {}, {
+    project = { type = "string" }, root = { type = "string" },
+    main = { type = "string" }, workspace = { type = "string" },
+    path = { type = "string" },
+  })
 
 M.setup{ agent = "claude" }
 eq("a caller's agent wins", M.options.agent, "claude")
@@ -271,7 +313,7 @@ eq("the warning's level", rex_stub.warns[#rex_stub.warns].level, "warn")
 contains("the warning names the option", rex_stub.warns[#rex_stub.warns].message, "nope")
 eq("an unknown option is not kept", M.options.nope, nil)
 eq("an unknown option leaves the others alone", M.options.agent, "claude")
-eq("a repeated setup registers nothing new", #rex_stub.actions, 2)
+eq("a repeated setup registers nothing new", #rex_stub.actions, 4)
 
 -- A string where a list belongs is one ipairs away from failing in the middle of
 -- building a tab, so setup refuses it by name.
@@ -536,6 +578,122 @@ contains("an empty agent name names the option", blank_message, "agents")
 local ok_number, number_message = pcall(M.setup, { agents = { 3 } })
 eq("a number in agents is refused", ok_number, false)
 contains("a number in agents names the option", number_message, "agents")
+
+-- work_done() ---------------------------------------------------------------
+--
+-- The teardown opens one float on the pane's own tab: the directory the audit is
+-- about, the tab it will close, and -- the part only Rex can know -- what that
+-- tab is still running. Nothing else is resolved here; the float's script asks
+-- the project for the rest.
+
+-- A worktrunk project whose session has one tab, feat/6c4, holding the pane the
+-- action was pressed in and one other (blocks lists them, two by default).
+-- What each block is running is answered per block, because "the pane's own
+-- directory" and "what the tab is running" are the same question asked about
+-- different blocks.
+local function done_stub(by_block, blocks)
+  local stub = project_stub()
+  local held = {}
+  for _, id in ipairs(blocks or { "block:1", "block:2" }) do
+    held[#held + 1] = { block_id = id }
+  end
+  stub.call_replies["session.attach"] = {
+    client_id = "client:app",
+    view = {
+      session_id = "session:1",
+      windows = { {
+        window_id = "window:feat",
+        label = "feat/6c4",
+        layers = { { blocks = held } },
+      } },
+    },
+  }
+  stub.process_reply = function(request)
+    local reply = by_block[request.block_id]
+    if type(reply) == "function" then return reply() end
+    return reply
+  end
+  return stub
+end
+
+-- A tab of shells: the audit opens on the pane's own worktree, and the tab it
+-- will close travels with it.
+stub = done_stub({
+  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:2"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+})
+local ok_done, done_layer = pcall(M.work_done,
+  { block_id = "block:1", session_id = "session:1", origin = "key" })
+eq("work_done opens the audit", ok_done, true)
+eq("work_done returns the layer id",
+  type(done_layer) == "table" and done_layer.layer_id or done_layer, "layer:1")
+eq("the tab is read from the pane's own session", stub.calls[1].request.session_id, "session:1")
+eq("one float is opened", #stub.layers, 1)
+local done_float = stub.layers[1]
+eq("the done float opens in the terminal's session", done_float.session_id, "session:1")
+eq("the done float uses the configured bounds", done_float.bounds, { 0.15, 0.1, 0.7, 0.8 })
+eq("the done float takes focus", done_float.focus, true)
+eq("the done float holds a shell",
+  done_float.layout.block.flavor, "com.superlogical.terminal.shell")
+eq("the done float's label", done_float.layout.block.label, "done")
+eq("the audit starts in the main worktree", done_float.layout.block.options.cwd,
+  "/x/pmm-iris/main")
+eq("the audit command", done_float.layout.block.options.command,
+  { M.options.script, "done", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+    "--project", "pmm-iris", "--cwd", "/x/pmm-iris/feat-6c4",
+    "--session", "session:1", "--window", "window:feat" })
+
+-- The tab's other blocks are somebody's programs, so each travels along as its
+-- own --running: the script cannot see the tab, and this is the one blocker it
+-- could never work out for itself. Two of them, in the order the tab lists
+-- them, because the refusal names them in that order.
+stub = done_stub({
+  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:2"] = { foreground = { name = "node" } },
+  ["block:3"] = { foreground = { name = "pi" } },
+}, { "block:1", "block:2", "block:3" })
+pcall(M.work_done, { block_id = "block:1", session_id = "session:1", origin = "key" })
+eq("the running programs travel with the audit", stub.layers[1].layout.block.options.command,
+  { M.options.script, "done", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+    "--project", "pmm-iris", "--cwd", "/x/pmm-iris/feat-6c4",
+    "--session", "session:1", "--window", "window:feat",
+    "--running", "node", "--running", "pi" })
+
+-- A terminal whose directory Rex cannot tell: refused before anything opens, so
+-- no float is left to close.
+stub = done_stub({})
+local ok_done_no_cwd, done_no_cwd_message = pcall(M.work_done,
+  { block_id = "block:1", session_id = "session:1" })
+eq("work_done with an unknown directory fails", ok_done_no_cwd, false)
+contains("work_done's unknown directory is named", done_no_cwd_message,
+  "cannot tell which directory")
+eq("work_done with an unknown directory opens nothing", #stub.layers, 0)
+
+-- A directory in no repository: there would be no project to audit.
+stub = done_stub({ ["block:1"] = { foreground = { name = "fish", cwd = "/tmp" } } })
+stub.exec_replies.git = { ok = false, code = 128, stdout = "",
+  stderr = "fatal: not a git repository\n" }
+local ok_done_outside, done_outside_message = pcall(M.work_done,
+  { block_id = "block:1", session_id = "session:1" })
+eq("work_done outside a repository fails", ok_done_outside, false)
+eq("work_done outside a repository names the directory", done_outside_message,
+  "not a git repository: /tmp")
+eq("work_done outside a repository opens nothing", #stub.layers, 0)
+
+-- A pane in no tab: the flow cannot name the window whose tab it would close,
+-- so it refuses rather than open an audit whose last step would fail.
+stub = done_stub({
+  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+})
+stub.call_replies["session.attach"] = {
+  client_id = "client:app",
+  view = { session_id = "session:1", windows = {} },
+}
+local ok_done_no_tab, done_no_tab_message = pcall(M.work_done,
+  { block_id = "block:1", session_id = "session:1" })
+eq("work_done with no tab fails", ok_done_no_tab, false)
+contains("work_done's refusal names the tab", done_no_tab_message, "cannot tell which tab")
+eq("work_done with no tab opens nothing", #stub.layers, 0)
 
 if fails > 0 then os.exit(1) end
 print("ok " .. count .. " assertions")

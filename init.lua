@@ -804,6 +804,58 @@ local function open_picker(ctx, project)
   return { layer_id = layer.layer_id }
 end
 
+-- argv for new-work.sh's done subcommand, every word of it built here: the
+-- directory the audit is about, the tab it will close, and what that tab is
+-- still running -- the one thing only Rex knows, because the script cannot see
+-- the tab it was started from. One --running per program, in the order the tab
+-- lists them, which is the order the refusal prints them in.
+local function done_command(project, cwd, ctx, window, running)
+  local command = {
+    M.options.script, "done",
+    "--main", project.main,
+    "--root", project.root,
+    "--project", project.name,
+    "--cwd", cwd,
+    "--session", ctx.session_id,
+    "--window", window.window_id,
+  }
+  for _, name in ipairs(running) do
+    command[#command + 1] = "--running"
+    command[#command + 1] = name
+  end
+  return command
+end
+
+-- Open the audit in a floating terminal and return at once: a key-bound action
+-- cannot wait for input, so the float decides and hands its answer back with
+-- `rex do work_done_go`. It opens in the main worktree, because the worktree
+-- under audit is the one it may remove, and nothing can be read from there
+-- after that.
+local function open_done_screen(ctx, project, cwd, window, running)
+  local called, layer, reason = pcall(rex.session.new_layer, {
+    session_id = ctx.session_id,
+    bounds = M.options.bounds,
+    focus = true,
+    layout = {
+      block = {
+        flavor = "com.superlogical.terminal.shell",
+        label = "done",
+        options = {
+          command = done_command(project, cwd, ctx, window, running),
+          cwd = project.main,
+        },
+      },
+    },
+  })
+  if not called then
+    error("could not open the done screen: " .. tostring(layer), 0)
+  end
+  if type(layer) ~= "table" then
+    error("could not open the done screen: " .. tostring(reason), 0)
+  end
+  return { layer_id = layer.layer_id }
+end
+
 -- Action work_new: from the terminal's directory to the picker. Every reason
 -- the flow cannot start is refused here, naming what stands in the way, so
 -- nothing opens for a directory that would only fail later.
@@ -825,6 +877,27 @@ function M.work_new(ctx)
     error("beads is required, but no beads database was found in " .. project.main, 0)
   end
   return open_picker(ctx, project)
+end
+
+-- Action work_done: from the pane to the audit. Every reason the flow cannot
+-- start is refused here, naming what stands in the way, so no float opens for a
+-- terminal whose teardown would only fail later -- and none of them needs the
+-- script to be run to find out.
+function M.work_done(ctx)
+  ctx = ctx or {}
+  local cwd = block_cwd(ctx)
+  if cwd == nil then
+    error("cannot tell which directory this terminal is in", 0)
+  end
+  local project, reason = M.project_for(cwd)
+  if project == nil then
+    error(reason, 0)
+  end
+  local window, window_reason = M.tab_window(ctx)
+  if window == nil then
+    error(window_reason, 0)
+  end
+  return open_done_screen(ctx, project, cwd, window, M.tab_processes(ctx, window))
 end
 
 -- Attach to the target session, because a session method only reaches a session
@@ -1101,9 +1174,9 @@ function M.work_new_go(ctx, args)
   return { window_id = created.window_id, created = true }
 end
 
--- Options from the configuration file, then the two actions. run takes the
--- action's context, and for work_new_go the hand-back payload as a second
--- argument.
+-- Options from the configuration file, then the four actions. run takes the
+-- action's context, and for work_new_go and work_done_go the hand-back payload
+-- as a second argument.
 local actions_registered = false
 
 function M.setup(opts)
@@ -1205,8 +1278,37 @@ function M.setup(opts)
       return M.work_new_go(ctx, args)
     end,
   }
-  -- Set only once both are in, so a registration Rex rejects leaves the flag
-  -- alone and a retry registers again.
+  -- Key-bound, so no arguments: everything it needs is the terminal it was pressed
+  -- in, and its float carries the answers it found there to the script.
+  rex.action{
+    name = "work_done",
+    title = "Done: tear down this worktree",
+    category = "New work",
+    run = function(ctx) return M.work_done(ctx) end,
+  }
+  -- The audit's hand-back, registered here so the palette order does not move
+  -- once its action lands: the five keys are the whole contract, and every one
+  -- of them is required, because a removal with a key missing has nothing to
+  -- remove.
+  rex.action{
+    name = "work_done_go",
+    title = "Done: remove the worktree the audit approved",
+    category = "New work",
+    args = {
+      type = "object",
+      properties = {
+        project = { type = "string" },
+        root = { type = "string" },
+        main = { type = "string" },
+        workspace = { type = "string" },
+        path = { type = "string" },
+      },
+      required = { "project", "root", "main", "workspace", "path" },
+    },
+    run = function(ctx, args) return M.work_done_go(ctx, args) end,
+  }
+  -- Set only once every action is in, so a registration Rex rejects leaves the
+  -- flag alone and a retry registers again.
   actions_registered = true
 
   return M

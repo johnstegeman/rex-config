@@ -444,6 +444,70 @@ do
   contains("the refusal says the tab cannot be told", reason, "cannot tell which tab")
 end
 
+-- work_done() ------------------------------------------------------------------
+--
+-- The teardown, end to end from the pane: the audit is opened on the pane's own
+-- tab, and what that tab is still running travels with it. The per-block
+-- process replies are what these cases turn on -- a tab is where a person
+-- leaves work behind, and a block Rex cannot read has to reach the audit as a
+-- program rather than as an idle pane -- so they sit beside tab_processes,
+-- whose stub already answers per block.
+local function done_stub(by_block)
+  local stub = tab_stub(by_block)
+  -- The project is the fixture's, so project_for's two questions answer here as
+  -- they do in setup_test.lua.
+  stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pmm-iris/.git\n", stderr = "" }
+  stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "wt list", stderr = "" }
+  stub.json_replies = {
+    ["wt list"] = { items = { { worktree = { path = MAIN, main = true } } } },
+  }
+  stub.json.decode = function(text)
+    local value = stub.json_replies[text]
+    if value == nil then return nil, "rex.json.decode: text is not valid JSON" end
+    return value
+  end
+  -- The float itself: one layer, recorded, because the argv it is opened with
+  -- is the whole of what this action decides.
+  stub.layers = {}
+  stub.session.new_layer = function(request)
+    stub.layers[#stub.layers + 1] = request
+    return { layer_id = "layer:done", block_ids = { "block:done" } }
+  end
+  return stub
+end
+
+do
+  local stub = done_stub({
+    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:two"] = { foreground = { name = "node" } },
+  })
+  local ok = pcall(M.work_done,
+    { session_id = "session:iris", block_id = "block:one", origin = "key" })
+  eq("work_done opens the audit", ok, true)
+  eq("the audit names the tab it will close, and what that tab is running",
+    stub.layers[1].layout.block.options.command,
+    { M.options.script, "done", "--main", MAIN, "--root", ROOT, "--project", PROJECT,
+      "--cwd", "/x/pmm-iris/bug-58h", "--session", "session:iris",
+      "--window", "window:tab", "--running", "node" })
+end
+
+-- The block Rex cannot read is the one that matters most: it reaches the audit
+-- as a program, so the script refuses rather than tearing down somebody's
+-- work.
+do
+  local stub = done_stub({
+    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:two"] = function() error("no process") end,
+  })
+  local ok = pcall(M.work_done,
+    { session_id = "session:iris", block_id = "block:one", origin = "key" })
+  eq("a tab with an unreadable block still opens the audit", ok, true)
+  local command = stub.layers[1].layout.block.options.command
+  eq("the unreadable block is passed along as a program",
+    { command[#command - 1], command[#command] },
+    { "--running", "a program Rex could not name" })
+end
+
 -- new_tab_argv() --------------------------------------------------------------
 
 -- The tab does not run one program any more: it runs a fish wrapper that
