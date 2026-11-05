@@ -2234,12 +2234,15 @@ cmd_done() {
   need_absolute 'done: --main' "$main"
   need_absolute 'done: --root' "$root"
 
-  # Roots are compared as strings -- $cwd is "$root" or "$root"/... and jj's
-  # rows are compared to "$root" -- so /p/demo/ and /p/demo would answer
-  # differently: the trailing slash would stop the wrapper row being
-  # recognised and turn the wrapper's own directories into a worktrunk
-  # disagreement. One form, decided here, and a bare / keeps its slash.
-  [ "$root" = / ] || root=${root%/}
+  # These two are compared as strings -- $cwd is "$main" or "$main"/... and
+  # "$root" or "$root"/..., and jj's rows are compared to "$root" -- so
+  # /p/demo/ and /p/demo would answer differently. A trailing slash on --main
+  # stops the main worktree being recognised as one, which is the one answer
+  # this flow must never give, and one on --root stops the wrapper row being
+  # recognised at all. One form for each, decided here: every slash goes, not
+  # just the last, and a bare / is left with its one.
+  while [ "$main" != / ] && [ "${main%/}" != "$main" ]; do main=${main%/}; done
+  while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root=${root%/}; done
 
   # Every payload this command reads is JSON, read through jq like the rest of
   # this file's, and worktrunk is the other tool that answers -- unless a saved

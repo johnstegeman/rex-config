@@ -146,6 +146,27 @@ want_out "the no-workspace block with --root /p/demo/" "can't tear down /p/demo/
 
 nothing was removed; press any key"
 
+# Two of them are two, not one: stripping a single slash would leave /p/demo/
+# and the same broken answer.
+DONE_CWD=/p/demo/nope run_done --root /p/demo//
+want_status "two trailing slashes on --root are the same wrapper" 4
+want_out "the no-workspace block with --root /p/demo//" "can't tear down /p/demo/nope
+
+  /p/demo/nope is not inside a jj workspace this wrapper knows about
+
+nothing was removed; press any key"
+
+# --main is compared the same way, and there it is not an answer to get wrong:
+# /p/demo/main/ is the main worktree, and a run that did not recognise it would
+# hand the one directory this flow must never remove to the removal step.
+DONE_CWD=/p/demo/main run_done --main /p/demo/main/
+want_status "a trailing slash on --main is still the main worktree" 4
+want_out "the main worktree block with --main /p/demo/main/" "can't tear down the main worktree
+
+  /p/demo/main is the main worktree, not a workspace this flow removes
+
+nothing was removed; press any key"
+
 # The other half of the disagreement: worktrunk has a worktree jj lists no
 # workspace for, and the block names both halves.
 DONE_WT=test/fixtures/done-wt-list-orphan.json DONE_CWD=/p/demo/orphan run_done
