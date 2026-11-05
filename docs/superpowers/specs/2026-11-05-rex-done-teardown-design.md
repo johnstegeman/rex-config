@@ -129,7 +129,9 @@ and "unmerged" means content rather than ancestry.
   seconds when either is installed — the discipline `gws` already uses.
 - **`wt` post-* hooks run in the background** with output logged, so a removal
   that succeeds at the git level can still leave the jj workspace row behind,
-  invisibly. `wt remove --foreground` runs the hook inline and blocks.
+  invisibly. `wt remove --foreground` blocks the *removal*, not the hook — only
+  `wt hook <type> --foreground` runs a hook inline — so the row is something the
+  verification *waits for* rather than something it can trust.
 - **`wt remove` deletes the branch only when `wt` itself judges it merged**, and
   reports what it did as `branch_outcome` in its `--format=json` reply
   (`deleted`, `retained_unmerged`, `retained_checked_out`, …).
@@ -380,9 +382,10 @@ confirmation: with nothing at risk, the tab going away is the feedback.
 `work_done_go` removes and reports; it does not close anything.
 
 1. **`wt remove <path> --foreground -y --format=json`**, run through the login
-   shell with `cwd = main`. `--foreground` so the `post-remove` hook has finished
-   before anything is verified; `-y` because nobody is there to approve a prompt;
-   `--format=json` so the reply can be read rather than guessed. No `-f`, no
+   shell with `cwd = main`. `--foreground` so the removal itself blocks and its
+   `branch_outcome` is final — it does not wait for the `post-remove` hook, which
+   worktrunk runs in the background; `-y` because nobody is there to approve a
+   prompt; `--format=json` so the reply can be read rather than guessed. No `-f`,
    `-D`, no `--reap`, no `--no-hooks`: if worktrunk refuses on its own terms,
    that refusal is the report.
 2. **The branch really went.** `branch_outcome` must be `deleted`. Anything else
@@ -394,8 +397,11 @@ confirmation: with nothing at risk, the tab going away is the feedback.
 3. **Verify the store, rather than trust the hook.** `jj workspace list` must no
    longer list the name, and `wt list --format=json` must no longer show the
    path. This is the check the bead's comment asked for, because the seeded hook
-   ends in `|| true` and a background hook can fail silently. A surviving jj row
-   is reported with the one command that would clear it.
+   ends in `|| true` and a background hook can fail silently — and because it
+   runs after the removal has returned, the row is given a bounded moment (a few
+   reads totalling about two seconds) before it counts as left behind, so a row
+   a healthy hook clears a moment later is not a failure. A surviving jj row is
+   reported with the one command that would clear it.
 4. **Return.** Success returns nothing; every failure returns its line, which
    Rex prints on the float's terminal and which makes `rex do` exit non-zero.
 
@@ -479,8 +485,9 @@ part of this change that is not code in a worktree.
   directory, and **not** a blocker. This is my call: they are the thing
   `post-start` hooks recreate, and refusing on `node_modules` would make the flow
   useless in every repo that has one. The screen does not count them.
-- **The removal succeeds, the jj row survives** — the hook failed and swallowed
-  it. Reported with the exact command to finish by hand, on the float that stays.
+- **The removal succeeds, the jj row survives** — the hook failed, or never
+  finished, and the row is still there at the end of the wait. Reported with
+  the exact command to finish by hand, on the float that stays.
 - **The removal succeeds, the branch is retained** — reported with
   `wt remove <path> -D`, and the tab does **not** close (nothing is closed on any
   failure), so the person can finish from where they are.
@@ -532,7 +539,8 @@ Everything runs from `bash test/run.sh`, no pty.
   --format=json` with `cwd = main`, and **never** closes a window: a stub reply
   with `branch_outcome = "deleted"` returns success; `retained_unmerged` returns
   the branch line; a surviving `jj workspace list` row returns the leftover-row
-  line; a `wt` that exits non-zero returns its stderr.
+  line only after the list has been read again within the wait, and a row the
+  next read loses is a success; a `wt` that exits non-zero returns its stderr.
 - **`test/setup_test.lua`** — both actions are registered, `work_done` has
   `category = "New work"` and no `args`, and `work_done_go` declares exactly
   `project`, `root`, `main`, `workspace`, `path`.

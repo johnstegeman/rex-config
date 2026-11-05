@@ -564,6 +564,15 @@ local function go_stub(by_command, documents)
   return stub
 end
 
+-- How many times a command ran, so a wait can be shown to be a wait.
+local function runs(stub, name)
+  local count = 0
+  for _, call in ipairs(stub.exec_calls) do
+    if program(call) == name then count = count + 1 end
+  end
+  return count
+end
+
 -- The clean path: one removal, then the two verifications, and nothing else.
 do
   local stub = go_stub()
@@ -580,6 +589,8 @@ do
   -- The block that would be closed is the one whose script called this action, so
   -- this action makes no rex.call at all: there is nothing it could close.
   eq("a complete removal closes nothing", #stub.calls, 0)
+  -- A teardown that is already clean has nothing to wait for.
+  eq("a clean teardown never sleeps", runs(stub, "sleep"), 0)
 end
 
 -- A branch worktrunk kept is a failure, reported with the one command that would
@@ -610,16 +621,67 @@ do
 end
 
 -- The seeded hook ends in || true, so the jj row is verified rather than
--- trusted: a row it left behind is reported with the command that clears it.
+-- trusted -- and, because worktrunk's post-* hooks are background hooks, the
+-- first read can be too early on a healthy teardown. The wait is what the next
+-- cases turn on; the sleep is stubbed, so they cost nothing to run.
+
 do
   local stub = go_stub({
     [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
   })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a surviving jj row fails", ok, false)
   contains("the surviving row names the command", said,
     "jj workspace forget 'feat/6c4'")
-  eq("a surviving jj row stops before the worktrees are asked", #stub.exec_calls, 2)
+  eq("the surviving row is read again before it is believed",
+    runs(stub, WORKSPACES) > 1, true)
+  eq("every read after the first waits first",
+    runs(stub, "sleep"), runs(stub, WORKSPACES) - 1)
+  eq("a surviving jj row stops before the worktrees are asked",
+    exec_for(stub, WORKTREES).argv, nil)
+end
+
+-- The background hook on a healthy run: the row is still there for the first
+-- read and gone by the next one. That is not a failure -- the wait is what
+-- keeps a false "still registered" off the screen -- and it closes nothing.
+do
+  local reads = 0
+  local stub = go_stub({ [WORKSPACES] = function()
+    reads = reads + 1
+    if reads == 1 then
+      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+    end
+    return WORKSPACES_CLEAR
+  end })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a row the hook clears a moment later is not a failure", ok, true)
+  eq("a row that cleared returns nothing", result, nil)
+  eq("the wait reads the list again after the sleep", stub.events,
+    { REMOVE, WORKSPACES, "sleep", WORKSPACES, WORKTREES })
+  eq("a row that cleared is read exactly twice", reads, 2)
+  eq("a row that cleared closes nothing", #stub.calls, 0)
+end
+
+-- A read that fails during the wait is a failure, not more waiting: jj's own
+-- line is the report, and a wait does not paper over it.
+do
+  local reads = 0
+  local stub = go_stub({ [WORKSPACES] = function()
+    reads = reads + 1
+    if reads == 1 then
+      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+    end
+    return { code = 1, stdout = "", stderr = "jj: workspace is locked\n" }
+  end })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a read that fails during the wait fails the teardown", ok, false)
+  contains("the mid-wait failure is named as the listing", said,
+    "could not list jj workspaces")
+  contains("the mid-wait failure carries jj's line", said, "workspace is locked")
+  eq("a failed read ends the wait", reads, 2)
 end
 
 -- And the worktree itself.

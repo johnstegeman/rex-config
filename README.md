@@ -481,8 +481,10 @@ worktree, the workspace's name and its directory — and that action runs
 `wt remove '<path>' --foreground -y --format=json` from the main worktree. It is
 given no `-f`, no `-D`, no `--reap` and no `--no-hooks`: the audit already
 refused the situations those flags exist for, and a refusal worktrunk makes on
-its own terms is the report. `--foreground` is what makes the seeded
-`post-remove` hook finish inline, so the jj row is verified rather than trusted.
+its own terms is the report. `--foreground` makes the removal itself block, so
+the reply is final; the `post-remove` hook is a *background* hook, so the jj row
+is not trusted — `jj workspace list` is read again for a bounded moment before a
+surviving row is called a leftover.
 Then three things have to hold, in this order: the reply's `branch_outcome` is
 `deleted`; `jj workspace list` no longer names the workspace; `wt list` no
 longer shows the directory. The tab is closed last, by the script and not by the
@@ -524,8 +526,9 @@ stays up:
   audit disagree about merged, that is yours to settle.
 - **A jj row that survived the hook.** `the jj workspace feat/6c4 is still
   registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends in
-  `|| true`, so the row is verified rather than assumed, and this is that
-  verification speaking.
+  `|| true` and runs in the background, so the row is read again for a moment
+  rather than assumed gone — and this line is that verification, at the end of
+  the wait, speaking.
 
 Neither of those closes the tab. The directory is gone either way, and the
 command on the screen is the last thing left to type.

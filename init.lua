@@ -1197,9 +1197,37 @@ function M.work_new_go(ctx, args)
   return { window_id = created.window_id, created = true }
 end
 
--- The jj workspaces as name and root pairs: the same read new-work.sh makes, and
--- the only thing that can say whether the post-remove hook did its job.
+-- The jj workspaces as name and root rows, in the order workspaces were added.
 local WORKSPACE_LIST = [[jj workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- How long a background hook is given to clear the jj workspace row before the
+-- row is called a leftover: a read, then a short sleep and another read, until
+-- the reads are spent. The hook is one `jj workspace forget`, so about two
+-- seconds is generous, and the wait cannot hang the audit's exit.
+local SETTLE_READS = 10
+local SETTLE_SECONDS = "0.2"
+
+-- The jj workspace rows, or an error: a listing that cannot be run or cannot be
+-- read is not a proof that the row is gone.
+local function jj_workspace_list(main)
+  local listed, reason = run_in_shell(WORKSPACE_LIST, main)
+  if listed == nil or listed.code ~= 0 then
+    error("could not list jj workspaces: "
+      .. first_line(listed and listed.stderr or reason), 0)
+  end
+  return listed.stdout or ""
+end
+
+-- Whether a jj workspace listing still names NAME: one row per workspace, a tab
+-- between the name and the root.
+local function lists_workspace(stdout, name)
+  for line in tostring(stdout or ""):gmatch("[^\n]+") do
+    if line:match("^([^\t]+)") == name then
+      return true
+    end
+  end
+  return false
+end
 
 -- Action work_done_go: the audit's answer, carried out. It removes and it
 -- reports; it closes nothing. The block that would be closed is the one whose
@@ -1220,9 +1248,13 @@ function M.work_done_go(ctx, args)
   end
   local workspace, path, main = args.workspace, args.path, args.main
 
-  -- --foreground so the post-remove hook has finished before anything is
-  -- verified; -y because nobody is there to approve a prompt; --format=json so
-  -- the branch's fate is read rather than guessed. No -f, no -D, no --reap: if
+  -- --foreground so the removal itself blocks: its exit code and its
+  -- branch_outcome are then final, where a background removal could still be
+  -- running when the tab closes. It does *not* wait for the post-remove hook --
+  -- worktrunk's post-* hooks run in the background -- which is what the wait
+  -- below is for.
+  -- -y because nobody is there to approve a prompt; --format=json so the
+  -- branch's fate is read rather than guessed. No -f, no -D, no --reap: if
   -- worktrunk refuses on its own terms, that refusal is the report. It runs in
   -- the main worktree, because the one being removed is the pane's own.
   local removed, remove_reason = run_in_shell(
@@ -1245,19 +1277,24 @@ function M.work_done_go(ctx, args)
       .. "): run wt remove " .. M.shell_quote(path) .. " -D", 0)
   end
 
-  -- The seeded hook ends in || true, so the row is verified rather than trusted:
-  -- a background hook, or one whose jj was not found, leaves the workspace
-  -- registered and says nothing about it.
-  local listed, list_reason = run_in_shell(WORKSPACE_LIST, main)
-  if listed == nil or listed.code ~= 0 then
-    error("could not list jj workspaces: "
-      .. first_line(listed and listed.stderr or list_reason), 0)
-  end
-  for line in (listed.stdout or ""):gmatch("[^\n]+") do
-    if line:match("^([^\t]+)") == workspace then
-      error("the jj workspace " .. workspace
-        .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace), 0)
+  -- The seeded hook ends in || true, so the row is verified rather than trusted.
+  -- The hook is also a background hook: it starts after the removal has already
+  -- returned, so the first read can be too early on a teardown that is
+  -- perfectly healthy. The row is therefore given a bounded moment to go, and
+  -- only what is still there at the end of it is a leftover.
+  local rows = jj_workspace_list(main)
+  for _ = 2, SETTLE_READS do
+    if not lists_workspace(rows, workspace) then
+      break
     end
+    -- A sleep that cannot be run only makes the next read come sooner; the
+    -- budget is the reads, so its reply is not checked.
+    run({ "sleep", SETTLE_SECONDS })
+    rows = jj_workspace_list(main)
+  end
+  if lists_workspace(rows, workspace) then
+    error("the jj workspace " .. workspace
+      .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace), 0)
   end
 
   -- And the worktree itself. A listing that cannot be read is not a proof of
