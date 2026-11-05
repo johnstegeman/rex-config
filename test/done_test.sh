@@ -61,7 +61,8 @@ run_done() {
     --main-state "${DONE_MAIN:-$tmp/clean-main}" \
     --bd-json test/fixtures/ready.json \
     --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
-    --origin-head refs/remotes/origin/main \
+    --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
+    --origin-head origin/main \
     "$@" >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
 }
@@ -230,6 +231,119 @@ want_err_has "a missing wt is named" 'wt not found on PATH'
 ran=$((ran + 1))
 grep -q 'cd:' "$tmp/err" &&
   fail "a missing wt is not bash's cd error" "stderr: $(cat "$tmp/err")"
+
+# --- The store blockers: what the branch has, and what the working copy has ---
+
+# Three changes touch four paths. The change count comes from --changes, the
+# paths from --diff, and every path is listed.
+printf 'aaa111\nbbb222\nccc333\n' >"$tmp/changes-3"
+DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 run_done
+want_status "unmerged content is a blocker" 4
+want_out "the unmerged block" "can't tear down feat/6c4
+
+  changes not merged into main@origin: 3 changes, 4 paths
+    init.lua
+    new-work.sh
+    docs/plan.md
+    test/run.sh
+
+nothing was removed; press any key"
+
+# A working copy with changes of its own.
+DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "a dirty working copy is a blocker" 4
+want_out "the dirty block" "can't tear down feat/6c4
+
+  working copy has changes: 2 paths
+
+nothing was removed; press any key"
+
+# Both, in the order the audit asks them: the branch's changes first, the
+# working copy's after.
+DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "both store blockers is a refusal" 4
+want_out "both store blockers, in order" "can't tear down feat/6c4
+
+  changes not merged into main@origin: 3 changes, 4 paths
+    init.lua
+    new-work.sh
+    docs/plan.md
+    test/run.sh
+  working copy has changes: 2 paths
+
+nothing was removed; press any key"
+
+# The case a reachability test gets wrong: the range has changes and the
+# content diff is empty, which is what a squash merge leaves behind. Nothing
+# would be lost, so nothing is refused.
+DONE_CHANGES=$tmp/changes-3 run_done
+want_status "a squash-merged branch is not a blocker" 0
+want_out "a squash-merged branch prints nothing" ""
+
+# The base is whatever --base-bookmarks and --origin-head resolve, never a
+# hard-coded main@origin: this clone tracks develop, and develop is what the
+# block names.
+printf 'main@\ndevelop@\ndevelop@origin\n' >"$tmp/bookmarks.develop"
+DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 run_done \
+  --base-bookmarks "$tmp/bookmarks.develop" --origin-head origin/develop
+want_status "a develop clone is a blocker too" 4
+want_out_has "the base comes from --origin-head, not a fixed name" \
+  "changes not merged into develop@origin: 3 changes, 4 paths"
+
+# With no saved diff the comparison is really made, and it is made against
+# <branch>@origin. jj is asked from the workspace root, so the two lists point
+# at a directory that is there -- the /p/demo ones are answers, not places.
+mkdir -p "$tmp/real-ws"
+printf 'feat/6c4\t%s\n' "$tmp/real-ws" >"$tmp/ws-real.txt"
+printf '{"items":[{"branch":"main","worktree":{"path":"%s","main":true}},{"branch":"feat/6c4","worktree":{"path":"%s","main":false}}]}' \
+  "$tmp/real-main" "$tmp/real-ws" >"$tmp/wt-real.json"
+run_done --cwd "$tmp/real-ws" --workspaces "$tmp/ws-real.txt" \
+  --wt-json "$tmp/wt-real.json" --main "$tmp/real-main" \
+  --diff '' --own-status ''
+want_status "a run with no saved diff asks jj for it" 0
+ran=$((ran + 1))
+grep -q 'argv=diff --summary -r main@origin\.\.@$' "$tmp/jj-args" ||
+  fail "jj diff runs against <base>..@" "$(cat "$tmp/jj-args")"
+
+# A failed fetch stops the audit before anything is compared: a comparison
+# against state this run could not refresh is worse than none. --main is a
+# real directory, so jj is reached rather than bash's cd.
+mkdir -p "$tmp/failbin"
+cp "$tmp/bin/rex" "$tmp/failbin/rex"
+cat >"$tmp/failbin/jj" <<'EOF'
+#!/bin/sh
+printf 'cwd=%s argv=%s\n' "$PWD" "$*" >>"$JJ_ARGS_FILE"
+printf 'jj: no network\n' >&2
+exit 1
+EOF
+chmod +x "$tmp/failbin/rex" "$tmp/failbin/jj"
+ran=$((ran + 1))
+rm -f "$tmp/jj-args"
+PATH="$tmp/failbin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
+  ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
+  --project demo --session s1 --window w1 \
+  --workspaces test/fixtures/workspaces.txt \
+  --wt-json test/fixtures/done-wt-list.json \
+  --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
+  --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
+  --bd-json test/fixtures/ready.json \
+  --base-bookmarks test/fixtures/bookmarks.txt \
+  --origin-head origin/main \
+  >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+want_status "a failed fetch is a refusal" 4
+want_out "the fetch block" "can't tear down feat/6c4
+
+  the fetch failed, so nothing was compared: jj: no network
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+grep -q 'argv=git fetch$' "$tmp/jj-args" ||
+  fail "the fetch is one jj git fetch" "$(cat "$tmp/jj-args")"
+ran=$((ran + 1))
+! grep -q 'argv=diff' "$tmp/jj-args" ||
+  fail "no comparison runs after a failed fetch" "$(cat "$tmp/jj-args")"
 
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"

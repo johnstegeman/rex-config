@@ -1982,19 +1982,65 @@ cmd_pick() {
   fi
 }
 
-# The refusal block, then the key the float waits for. The float closes when
-# this script exits, so the wait is what keeps the message readable. Every
-# refusal is printed here, so the shape of the block -- a title, a blank line,
-# the lines, a blank line, and the one sentence that says nothing was removed --
-# is written once.
-done_refuse() {
+# The shape of every block this command prints: a title, a blank line, the lines
+# of the block, a blank line, and the one sentence that says nothing was
+# removed. Written once because a refusal and a set of blockers are the same
+# screen -- a person reading it wants every reason at once.
+done_print_block() {
   local title=$1 line
   shift
   printf '%s\n\n' "$title"
   for line in "$@"; do printf '%s\n' "$line"; done
   printf '\nnothing was removed; press any key\n'
+}
+
+# Refuse: print the block, take the key the float waits for, and leave with the
+# status that says this was an answer rather than a failure. The float closes
+# when this script exits, so the wait is what keeps the message readable.
+done_refuse() {
+  done_print_block "$@"
   wait_for_key
   exit "$refused"
+}
+
+# A reason the flow will not go ahead. Collected rather than printed: the audit
+# asks several questions, and a person wants every reason in one block, in the
+# order the steps asked them. Appends to `done_lines`, declared in cmd_done.
+done_blocker() {
+  done_lines+=("$@")
+}
+
+# Stop on the reasons collected so far: done_refuse under the workspace's own
+# name, which is the title every blocker belongs to.
+done_stop() {
+  done_refuse "can't tear down $name" ${done_lines[@]+"${done_lines[@]}"}
+}
+
+# Fetch before anything is compared, because every comparison below is about
+# what origin has: a stale origin would clear a branch that is not merged.
+# Bounded, and with no terminal to prompt on -- a credential prompt has to fail
+# rather than hang the float. A failed fetch stops the audit: a comparison
+# against state this run could not refresh is worse than none.
+# --no-fetch is the seam a test or a dry run uses.
+done_fetch() {
+  local cmd='jj git fetch' out
+  if command -v timeout >/dev/null 2>&1; then
+    cmd="timeout 30 $cmd"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    cmd="gtimeout 30 $cmd"
+  fi
+  if ! out=$(cd "$main" && GIT_TERMINAL_PROMPT=0 $cmd 2>&1); then
+    done_blocker "  the fetch failed, so nothing was compared: $(printf '%s' "$out" | sed -n 1p)"
+    done_stop
+  fi
+}
+
+# The revision the branch is compared against: the opening row of the base
+# cycle, which is the "<branch>@origin" rendering of what this clone clones.
+# Never a hard-coded main@origin -- a wrapper whose default branch is develop
+# would then compare the branch against a revision it never started from.
+done_base() {
+  base_chain "$main" "$bookmarks" "$origin_head" '' '' 'done' | sed -n 1p
 }
 
 # The worktrunk worktree list as JSON: --wt-json when one is given, else
@@ -2124,6 +2170,11 @@ cmd_done() {
   local workspaces='' wt_json='' diff='' own_status='' changes='' main_state=''
   local bd_json='' bookmarks='' origin_head='' running=''
   local no_fetch=0 dry_run=0
+  # The blockers collected so far, and what the two store questions leave
+  # behind: the base revision, the branch's diff against it, and the working
+  # copy's own diff -- each either jj's answer or the saved one above.
+  local done_lines=() base='' range='' own='' count=0 own_count=0 p=''
+  local paths=()
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -2259,10 +2310,79 @@ cmd_done() {
 
   done_workspace
 
-  # What is left -- fetching, the content blockers, the programs still running in
-  # the tab, main's fast-forward, the hand-back and the close -- is the work of
-  # the steps that follow. A clean run prints nothing of its own and leaves 0,
-  # and `name` with `root_path` is what those steps read.
+  # The fetch comes before every comparison, because each one below is about what
+  # origin has.
+  if [ "$no_fetch" -eq 0 ]; then
+    done_fetch
+  fi
+
+  # What the branch has that its base does not, as content. Content rather than
+  # reachability: a change that was already merged is absent from this diff even
+  # when its change id is still in the range, which is what a squash merge
+  # leaves behind -- and refusing it would be refusing work that is not there.
+  # --diff and --changes are the two answers saved, and a run given them asks jj
+  # for neither.
+  base=$(done_base)
+  if [ -z "$base" ]; then
+    done_blocker "  no base revision could be resolved for this clone"
+    done_stop
+  fi
+
+  if [ -n "$diff" ]; then
+    range=$(cat "$diff") || die "done: could not read the diff from $diff"
+  else
+    range=$(cd "$root_path" && jj diff --summary -r "$base..@") ||
+      die "done: could not read the changes of $root_path"
+  fi
+  if [ -n "$range" ]; then
+    if [ -n "$changes" ]; then
+      [ -r "$changes" ] || die "done: could not read the change list from $changes"
+      count=$(grep -c . "$changes" || true)
+    else
+      count=$(cd "$root_path" && jj log -r "$base..@" --no-graph \
+        -T 'change_id.short() ++ "\n"' | grep -c . || true)
+    fi
+    paths=()
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      # "M path" and "A path" both carry a two-character status.
+      paths+=("${p#??}")
+    done <<<"$range"
+    done_blocker "  changes not merged into $base: $count change$([ "$count" -eq 1 ] || echo s), ${#paths[@]} path$([ ${#paths[@]} -eq 1 ] || echo s)"
+    for p in ${paths[@]+"${paths[@]}"}; do
+      done_blocker "    $p"
+    done
+  fi
+
+  # The working copy's own changes go with the workspace, so they stop it too.
+  # One line and no path list: the person is looking at those files already, and
+  # there can be a great many of them.
+  if [ -n "$own_status" ]; then
+    own=$(cat "$own_status") ||
+      die "done: could not read the working copy status from $own_status"
+  else
+    own=$(cd "$root_path" && jj diff --summary -r @) ||
+      die "done: could not read the working copy of $root_path"
+  fi
+  if [ -n "$own" ]; then
+    own_count=0
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      own_count=$((own_count + 1))
+    done <<<"$own"
+    done_blocker "  working copy has changes: $own_count path$([ "$own_count" -eq 1 ] || echo s)"
+  fi
+
+  # One screen for all of them, in the order they were asked. The steps that
+  # follow add their blockers above this line and stop here with them.
+  if [ ${#done_lines[@]} -gt 0 ]; then
+    done_stop
+  fi
+
+  # What is left -- the programs still running in the tab, main's fast-forward,
+  # the hand-back and the close -- is the work of the steps that follow. A clean
+  # run prints nothing of its own and leaves 0, and `name` with `root_path` is
+  # what those steps read.
   return 0
 }
 
