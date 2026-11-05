@@ -59,7 +59,7 @@ run_done() {
     --own-status "${DONE_OWN:-$tmp/clean-own}" \
     --changes "${DONE_CHANGES:-$tmp/clean-changes}" \
     --main-state "${DONE_MAIN:-$tmp/clean-main}" \
-    --bd-json test/fixtures/ready.json \
+    --bd-json "${DONE_BD_JSON:-test/fixtures/ready.json}" \
     --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
     --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
     --origin-head origin/main \
@@ -357,15 +357,22 @@ want_out "the running block" "can't tear down feat/6c4
 
 nothing was removed; press any key"
 
+# A blank name is not a program: accumulated it would leave the list empty, so
+# the blocker would vanish and a teardown of a tab with work in it would go
+# ahead. Refused as the bad argument it is, like every other empty value here.
+run_done --running ''
+want_status "an empty --running is a usage error" 2
+
 # The bead is information, not a reason: on a clean run it prints nothing at
 # all, because a run that removes the workspace has no screen.
-run_done --bd-json test/fixtures/done-beads.json
+DONE_BD_JSON=test/fixtures/done-beads.json run_done
 want_status "a claimed bead is not a blocker on its own" 0
 want_out "a claimed bead on a clean run prints nothing" ""
 
 # With a blocker it says which bead this workspace is, in a paragraph of its
 # own, after the reasons and before the footer.
-DONE_OWN=test/fixtures/done-own-status.txt run_done --bd-json test/fixtures/done-beads.json
+DONE_BD_JSON=test/fixtures/done-beads.json \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a claimed bead with a dirty copy is a refusal" 4
 want_out "the bead line sits after the blockers" "can't tear down feat/6c4
 
@@ -375,20 +382,54 @@ want_out "the bead line sits after the blockers" "can't tear down feat/6c4
 
 nothing was removed; press any key"
 
-# A bead list that matches nothing, and a bead read that fails, are both
-# silence rather than a failure: naming the bead is a courtesy, and a
-# workspace whose bead cannot be read is still a workspace.
-run_done --bd-json "$tmp/clean-changes"
-want_status "no matching bead is silence" 0
-run_done --bd-json /nonexistent
-want_status "an unreadable bead list is silence" 0
+# Those two clean runs never reach the printer -- a run that removes the
+# workspace prints nothing -- so they say nothing about a bead read that fails.
+# The evidence for "silence, not a failure" is a refusal, where the bead line is
+# asked for: a blocker is still the whole block, and the bead paragraph is
+# simply absent.
+DONE_BD_JSON="$tmp/clean-changes" run_done
+want_status "an empty bead list on a clean run prints nothing" 0
+DONE_BD_JSON=/nonexistent run_done
+want_status "an unreadable bead list on a clean run prints nothing" 0
+
+# A bead read that fails.
+DONE_BD_JSON=/nonexistent DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "an unreadable bead list is not a bead line, and is no failure" 4
+want_out "the dirty block with an unreadable bead list" "can't tear down feat/6c4
+
+  working copy has changes: 2 paths
+
+nothing was removed; press any key"
+
+# A bead list that is readable and matches nothing: the only bead in it is
+# another workspace's.
+DONE_BD_JSON=test/fixtures/done-beads-no-match.json \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "a bead list that matches nothing is not a bead line" 4
+want_out "the dirty block with a non-matching bead list" "can't tear down feat/6c4
+
+  working copy has changes: 2 paths
+
+nothing was removed; press any key"
 
 # A row with no status is not a bead line: the block is prose, and a missing
 # field would reach it as the word "null".
 printf '[{"id":"rex-config-6c4"}]' >"$tmp/beads-no-status"
-DONE_OWN=test/fixtures/done-own-status.txt run_done --bd-json "$tmp/beads-no-status"
+DONE_BD_JSON="$tmp/beads-no-status" \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
 want_status "a bead row with no status is still a refusal" 4
-want_out "the dirty block with no bead paragraph" "can't tear down feat/6c4
+want_out "the dirty block with a statusless bead" "can't tear down feat/6c4
+
+  working copy has changes: 2 paths
+
+nothing was removed; press any key"
+
+# An empty status is no better than a missing one: "is still " with nothing
+# after it is a sentence that stopped.
+DONE_BD_JSON=test/fixtures/done-beads-empty-status.json \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done
+want_status "a bead row with an empty status is still a refusal" 4
+want_out "the dirty block with an empty-status bead" "can't tear down feat/6c4
 
   working copy has changes: 2 paths
 
@@ -397,9 +438,10 @@ nothing was removed; press any key"
 # Everything at once (Review Focus 4): the pinned order, the bead paragraph
 # in its place, and exactly one "nothing was removed" line.
 printf 'aaa111\nbbb222\nccc333\n' >"$tmp/changes-3"
-DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
+DONE_BD_JSON=test/fixtures/done-beads.json \
+  DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
   DONE_OWN=test/fixtures/done-own-status.txt run_done \
-  --running pi --running node --bd-json test/fixtures/done-beads.json
+  --running pi --running node
 want_status "every blocker at once is a refusal" 4
 want_out "the whole block" "can't tear down feat/6c4
 

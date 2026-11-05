@@ -2010,6 +2010,9 @@ done_print_block() {
 # the bead being unknown.
 done_bead_line() {
   local listing id status
+  # A bead is only named for a workspace that was found, and a refusal before
+  # done_workspace -- the wrapper, main, a directory no workspace owns -- has
+  # no name to match, so those blocks stay the one-line refusals they are.
   [ -n "$name" ] || return 0
   if [ -n "$bd_json" ]; then
     listing=$(cat "$bd_json" 2>/dev/null) || return 0
@@ -2021,8 +2024,9 @@ done_bead_line() {
       return 0
   fi
   [ -n "$listing" ] || return 0
-  # Only a row that carries both an id and a status can be named: the block is
-  # prose, and a missing field there would print as the word "null".
+  # A row has to carry a real id and a real status to be named: the block is
+  # prose, and a missing field would print as the word "null" while an empty
+  # one would leave the sentence hanging.
   while IFS=$'\t' read -r id status; do
     [ "${id##*-}" = "${name##*/}" ] || continue
     # "still" and not the bare status: every row in this list is an in_progress
@@ -2030,7 +2034,7 @@ done_bead_line() {
     printf '  bead %s is still %s\n' "$id" "$status"
     break
   done < <(printf '%s' "$listing" |
-    jq -r '.[] | select(.id != null and .status != null)
+    jq -r '.[] | select((.id // "") != "" and (.status // "") != "")
       | "\(.id)\t\(.status)"' 2>/dev/null)
   return 0
 }
@@ -2253,6 +2257,10 @@ cmd_done() {
       # names them in one comma-separated line.
       --running)
         [ $# -ge 2 ] || usage_error 'done: --running needs a name'
+        # An empty name would erase the reason instead of naming it: the
+        # accumulation below would leave $running empty, and a tab with a
+        # program in it would look idle.
+        [ -n "$2" ] || usage_error 'done: --running needs a name'
         running=${running:+$running, }$2
         shift 2
         ;;
