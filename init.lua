@@ -528,6 +528,14 @@ local function run_in_shell(command, cwd)
   return run({ login_shell(), "-lc", command }, cwd)
 end
 
+-- One shell word, whatever the text holds: a path with a space or an apostrophe
+-- is data for the shell, not argv of its own. A single-quoted word cannot carry
+-- an apostrophe, so the word is closed, the apostrophe escaped and the word
+-- reopened -- the same quoting new-work.sh's shell_quote does.
+function M.shell_quote(text)
+  return "'" .. tostring(text):gsub("'", "'\\''") .. "'"
+end
+
 -- The first line of a program's error output, for a one-line refusal.
 local function first_line(text)
   local line = tostring(text or ""):match("^([^\n]*)") or ""
@@ -626,6 +634,92 @@ function M.has_beads(main)
   -- bd ran and failed for a reason of its own; "could not be run" is for the
   -- reply == nil case above, where there was no bd to ask.
   return false, "bd failed in " .. main .. ": " .. said
+end
+
+-- What a tab is still running, so a teardown never closes on somebody's work: a
+-- shell is what a tab idles at, and every other name -- and every name Rex cannot
+-- produce -- is a program. The names are compared after program_basename, because
+-- a login shell shows itself as `-fish` and a reply may carry a whole path.
+local SHELLS = { fish = true, zsh = true, bash = true, sh = true, nu = true }
+
+-- A program's name without its directory or the leading dash of a login shell.
+-- A trailing slash is the same program written as a directory -- an interpreter
+-- can report its script that way -- so the slashes go before the last segment is
+-- taken: without that, "/bin/fish/" has no segment and a shell would be named
+-- "a program Rex could not name" instead of a shell.
+function M.program_basename(name)
+  local path = (tostring(name or ""):gsub("/+$", ""))
+  local base = path:match("([^/]+)$") or ""
+  return (base:gsub("^%-", ""))
+end
+
+-- The program a process reply belongs to. An interpreter reports the script it
+-- runs beside its own name, and the script is the program; a login shell's argv0
+-- is the one name that still has the dash program_basename strips; and the
+-- system's own name is the last resort. Both slots are read because Rex answers
+-- with whichever process it could name -- the foreground first, the child when
+-- the foreground is gone -- and a reply with neither names nothing at all.
+function M.process_program(process)
+  if type(process) ~= "table" then
+    return ""
+  end
+  for _, slot in ipairs({ "foreground", "child" }) do
+    local running = process[slot]
+    if type(running) == "table" then
+      for _, key in ipairs({ "script", "argv0", "name" }) do
+        local name = running[key]
+        if type(name) == "string" and name ~= "" then
+          return M.program_basename(name)
+        end
+      end
+    end
+  end
+  return ""
+end
+
+-- Whether a name is one of the shells a tab idles at.
+function M.is_shell(name)
+  return SHELLS[M.program_basename(name)] == true
+end
+
+-- Every block in a window: each layer's, and a window that lists its own. Rex's
+-- window view puts blocks in layers, but a window handed over without them is
+-- read rather than counted empty -- an empty list would let a teardown proceed.
+function M.window_blocks(window)
+  local blocks = {}
+  if type(window) ~= "table" then
+    return blocks
+  end
+  for _, block in ipairs(type(window.blocks) == "table" and window.blocks or {}) do
+    blocks[#blocks + 1] = block
+  end
+  for _, layer in ipairs(type(window.layers) == "table" and window.layers or {}) do
+    -- A layer that is not a table is one whose blocks cannot be read out of it,
+    -- and it is counted as an unreadable entry rather than dropped: it may hold
+    -- somebody's program, and an entry dropped here would let a teardown through
+    -- -- the same reason a window handed over without layers is read rather than
+    -- counted empty. tab_processes names an entry it cannot read.
+    if type(layer) ~= "table" then
+      blocks[#blocks + 1] = layer
+    else
+      for _, block in ipairs(type(layer.blocks) == "table" and layer.blocks or {}) do
+        blocks[#blocks + 1] = block
+      end
+    end
+  end
+  return blocks
+end
+
+-- The window holding a block, or nil when no window does.
+function M.window_of_block(windows, block_id)
+  for _, window in ipairs(type(windows) == "table" and windows or {}) do
+    for _, block in ipairs(M.window_blocks(window)) do
+      if type(block) == "table" and block.block_id == block_id then
+        return window
+      end
+    end
+  end
+  return nil
 end
 
 -- The working directory of the terminal behind ctx's block, or nil when Rex
@@ -732,6 +826,73 @@ local function open_picker(ctx, project)
   return { layer_id = layer.layer_id }
 end
 
+-- The audit this client opened last, so a second press replaces it instead of
+-- stacking another float on top. Two `done` runs in one tab would each be
+-- willing to remove the worktree, which is why this guard is the picker's.
+local done = {}
+
+local function close_done()
+  if done.layer_id == nil then
+    return
+  end
+  pcall(rex.session.close_layer, { session_id = done.session_id, layer_id = done.layer_id })
+  done.session_id, done.layer_id = nil, nil
+end
+
+-- argv for new-work.sh's done subcommand, every word of it built here: the
+-- directory the audit is about, the tab it will close, and what that tab is
+-- still running -- the one thing only Rex knows, because the script cannot see
+-- the tab it was started from. One --running per program, in the order the tab
+-- lists them, which is the order the refusal prints them in.
+local function done_command(project, cwd, ctx, window, running)
+  local command = {
+    M.options.script, "done",
+    "--main", project.main,
+    "--root", project.root,
+    "--project", project.name,
+    "--cwd", cwd,
+    "--session", ctx.session_id,
+    "--window", window.window_id,
+  }
+  for _, name in ipairs(running) do
+    command[#command + 1] = "--running"
+    command[#command + 1] = name
+  end
+  return command
+end
+
+-- Open the audit in a floating terminal and return at once: a key-bound action
+-- cannot wait for input, so the float decides and hands its answer back with
+-- `rex do work_done_go`. It opens in the main worktree, because the worktree
+-- under audit is the one it may remove, and nothing can be read from there
+-- after that.
+local function open_done_screen(ctx, project, cwd, window, running)
+  close_done()
+  local called, layer, reason = pcall(rex.session.new_layer, {
+    session_id = ctx.session_id,
+    bounds = M.options.bounds,
+    focus = true,
+    layout = {
+      block = {
+        flavor = "com.superlogical.terminal.shell",
+        label = "done",
+        options = {
+          command = done_command(project, cwd, ctx, window, running),
+          cwd = project.main,
+        },
+      },
+    },
+  })
+  if not called then
+    error("could not open the done screen: " .. tostring(layer), 0)
+  end
+  if type(layer) ~= "table" then
+    error("could not open the done screen: " .. tostring(reason), 0)
+  end
+  done.session_id, done.layer_id = ctx.session_id, layer.layer_id
+  return { layer_id = layer.layer_id }
+end
+
 -- Action work_new: from the terminal's directory to the picker. Every reason
 -- the flow cannot start is refused here, naming what stands in the way, so
 -- nothing opens for a directory that would only fail later.
@@ -753,6 +914,27 @@ function M.work_new(ctx)
     error("beads is required, but no beads database was found in " .. project.main, 0)
   end
   return open_picker(ctx, project)
+end
+
+-- Action work_done: from the pane to the audit. Every reason the flow cannot
+-- start is refused here, naming what stands in the way, so no float opens for a
+-- terminal whose teardown would only fail later -- and none of them needs the
+-- script to be run to find out.
+function M.work_done(ctx)
+  ctx = ctx or {}
+  local cwd = block_cwd(ctx)
+  if cwd == nil then
+    error("cannot tell which directory this terminal is in", 0)
+  end
+  local project, reason = M.project_for(cwd)
+  if project == nil then
+    error(reason, 0)
+  end
+  local window, window_reason = M.tab_window(ctx)
+  if window == nil then
+    error(window_reason, 0)
+  end
+  return open_done_screen(ctx, project, cwd, window, M.tab_processes(ctx, window))
 end
 
 -- Attach to the target session, because a session method only reaches a session
@@ -793,6 +975,50 @@ local function attach_session(session_id)
       .. ", so there is no list of tabs"
   end
   return windows
+end
+
+-- The tab ctx's own terminal sits in, from the session's own view: the window
+-- holding ctx's block. A tab that cannot be found is refused with a reason rather
+-- than answered with nothing, because "no tab" would read as "nothing to stop".
+function M.tab_window(ctx)
+  local windows, reason = attach_session(ctx.session_id)
+  if windows == nil then
+    return nil, reason
+  end
+  local window = M.window_of_block(windows, ctx.block_id)
+  if window == nil then
+    return nil, "cannot tell which tab this terminal is in"
+  end
+  return window
+end
+
+-- The programs a tab is running that are not shells, in block order. A block
+-- Rex cannot read counts as one: a wrong pass here kills somebody's agent, so
+-- the only safe reading of "cannot tell" is "still running".
+function M.tab_processes(ctx, window)
+  local names = {}
+  for _, block in ipairs(M.window_blocks(window)) do
+    local name = ""
+    -- A block that is not a table is one Rex let through in a shape this cannot
+    -- read: there is no block_id to ask about, so it is the unreadable case below
+    -- rather than a call with nothing in it.
+    if type(block) == "table" then
+      local called, process = pcall(rex.block.call, "com.superlogical.terminal", "process", {
+        session_id = ctx.session_id,
+        block_id = block.block_id,
+      })
+      if called and type(process) == "table" then
+        name = M.process_program(process)
+      end
+    end
+    if name == "" then
+      name = "a program Rex could not name"
+    end
+    if not M.is_shell(name) then
+      names[#names + 1] = name
+    end
+  end
+  return names
 end
 
 -- The project's session, made when it is not there yet with one tab called
@@ -990,9 +1216,169 @@ function M.work_new_go(ctx, args)
   return { window_id = created.window_id, created = true }
 end
 
--- Options from the configuration file, then the two actions. run takes the
--- action's context, and for work_new_go the hand-back payload as a second
--- argument.
+-- The jj workspaces as name and root rows, in the order workspaces were added.
+-- Read from the op log rather than from the working copy: the background
+-- post-remove hook is running `jj workspace forget` in this same repository, and
+-- a plain read wants the working-copy lock that hook holds. The op log already
+-- carries the row the hook is removing, so a wait still sees it go.
+local WORKSPACE_LIST =
+  [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- How long a background hook is given to clear the jj workspace row before the
+-- row is called a leftover: a read, then a short sleep and another read, until
+-- the reads are spent. The hook is one `jj workspace forget`, so about two
+-- seconds is generous, and the wait cannot hang the audit's exit.
+local SETTLE_READS = 10
+local SETTLE_SECONDS = "0.2"
+
+-- The jj workspace rows, or an error: a listing that cannot be run or cannot be
+-- read is not a proof that the row is gone.
+local function jj_workspace_list(main)
+  local listed, reason = run_in_shell(WORKSPACE_LIST, main)
+  if listed == nil or listed.code ~= 0 then
+    error("could not list jj workspaces: "
+      .. first_line(listed and listed.stderr or reason), 0)
+  end
+  return listed.stdout or ""
+end
+
+-- Whether a jj workspace listing still names NAME: one row per workspace, a tab
+-- between the name and the root.
+local function lists_workspace(stdout, name)
+  for line in tostring(stdout or ""):gmatch("[^\n]+") do
+    if line:match("^([^\t]+)") == name then
+      return true
+    end
+  end
+  return false
+end
+
+-- Action work_done_go: the audit's answer, carried out. It removes and it
+-- reports; it closes nothing. The block that would be closed is the one whose
+-- script called this action, and killing the caller mid-removal is exactly what
+-- the script's own last-act close exists to avoid. So a success returns nothing
+-- and the script closes the tab.
+function M.work_done_go(ctx, args)
+  args = args or {}
+
+  -- The hand-back is also a `rex do` entry point, where an --args object is not
+  -- filtered against the declaration, so a payload missing what everything below
+  -- runs on is refused before anything is removed.
+  for _, name in ipairs({ "workspace", "path", "main" }) do
+    local value = args[name]
+    if type(value) ~= "string" or value == "" then
+      error("work_done_go needs a workspace, a path and a main worktree, but no " .. name, 0)
+    end
+  end
+  local workspace, path, main = args.workspace, args.path, args.main
+
+  -- --foreground so the removal itself blocks: its exit code and its
+  -- branch_outcome are then final, where a background removal could still be
+  -- running when the tab closes. It does *not* wait for the post-remove hook --
+  -- worktrunk's post-* hooks run in the background -- which is what the wait
+  -- below is for.
+  -- -y because nobody is there to approve a prompt; --format=json so the
+  -- branch's fate is read rather than guessed. No -f, no -D, no --reap: if
+  -- worktrunk refuses on its own terms, that refusal is the report. It runs in
+  -- the main worktree, because the one being removed is the pane's own.
+  local removed, remove_reason = run_in_shell(
+    "wt remove " .. M.shell_quote(path) .. " --foreground -y --format=json", main)
+  if removed == nil then
+    error("could not run worktrunk: " .. tostring(remove_reason), 0)
+  end
+  if removed.code ~= 0 then
+    error("could not remove " .. path .. ": " .. first_line(removed.stderr), 0)
+  end
+
+  -- worktrunk's --format=json reply is an array, one entry per removal; this flow
+  -- removes one path, so the entry that matters is the first. Reading it as an
+  -- object -- which an array is not -- is how a perfect removal came to be
+  -- reported as a failure after the worktree was already gone. A bare object is
+  -- tolerated as well, so a single-entry shape reads the same.
+  local decoded = rex.json.decode(removed.stdout or "")
+  -- An entry is an array's first, or a bare object's own self. An empty reply is
+  -- neither -- worktrunk exited 0 and then named no removal at all -- so there is
+  -- no branch to report and none to name a command for, and the kept-branch line
+  -- below would claim it kept something it never mentioned. A report that cannot
+  -- be made says so in its own words.
+  local entry = nil
+  if type(decoded) == "table" then
+    if decoded[1] ~= nil then
+      entry = decoded[1]
+    elseif next(decoded) ~= nil then
+      entry = decoded
+    end
+  end
+  if entry == nil then
+    error("worktrunk named no removal in its reply: run wt list --format=json in " .. main
+      .. " to see what is left", 0)
+  end
+  local outcome = type(entry) == "table" and entry.branch_outcome or nil
+  local branch = type(entry) == "table" and entry.branch or nil
+
+  -- A teardown is complete or it is not. `deleted` is worktrunk's word for a
+  -- branch it removed; `not_attempted` with no branch is the detached worktree a
+  -- jj wrapper produces -- `gws` adds workspaces with `jj workspace add` and
+  -- nothing attaches a branch, so there is nothing for worktrunk to delete and
+  -- nothing left behind. Everything else -- a retained branch, a reply that says
+  -- nothing about one, a value this flow does not know -- is reported with the one
+  -- command that would finish the job. A bookmark that survives is not that: a
+  -- bookmark belongs to the finishing skill's Step 8, and this flow neither
+  -- deletes nor reports one. -D is the person's to run: if worktrunk and the audit
+  -- disagree about merged, that is theirs to settle.
+  local complete = outcome == "deleted" or (outcome == "not_attempted" and branch == nil)
+  if not complete then
+    -- The command names the branch, not the path: by the time this line is read
+    -- the worktree is gone, and `wt remove <path> -D` has no path to work on.
+    -- The branch is what is left to remove, so that is what worktrunk is given.
+    local named = type(branch) == "string" and branch ~= "" and branch or workspace
+    error("the branch " .. named .. " was kept (" .. tostring(outcome or "worktrunk said nothing")
+      .. "): run wt remove -D " .. M.shell_quote(named), 0)
+  end
+
+  -- The seeded hook ends in || true, so the row is verified rather than trusted.
+  -- The hook is also a background hook: it starts after the removal has already
+  -- returned, so the first read can be too early on a teardown that is
+  -- perfectly healthy. The row is therefore given a bounded moment to go, and
+  -- only what is still there at the end of it is a leftover.
+  local rows = jj_workspace_list(main)
+  for _ = 2, SETTLE_READS do
+    if not lists_workspace(rows, workspace) then
+      break
+    end
+    -- A sleep that cannot be run only makes the next read come sooner; the
+    -- budget is the reads, so its reply is not checked.
+    run({ "sleep", SETTLE_SECONDS })
+    rows = jj_workspace_list(main)
+  end
+  if lists_workspace(rows, workspace) then
+    error("the jj workspace " .. workspace
+      .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace), 0)
+  end
+
+  -- And the worktree itself. A listing that cannot be read is not a proof of
+  -- absence, so it is reported rather than read as an empty one.
+  local worktrees, worktree_reason = run_in_shell("wt list --format=json", main)
+  if worktrees == nil or worktrees.code ~= 0 then
+    error("could not list worktrees: "
+      .. first_line(worktrees and worktrees.stderr or worktree_reason), 0)
+  end
+  local listing, listing_reason = rex.json.decode(worktrees.stdout or "")
+  if type(listing) ~= "table" then
+    error("could not read the worktrunk listing: "
+      .. tostring(listing_reason or ("it decoded to a " .. type(listing) .. ", not an object")), 0)
+  end
+  for _, item in ipairs(type(listing.items) == "table" and listing.items or {}) do
+    local worktree = type(item) == "table" and item.worktree or nil
+    if type(worktree) == "table" and worktree.path == path then
+      error(path .. " is still a worktree: run wt list to see why", 0)
+    end
+  end
+end
+
+-- Options from the configuration file, then the four actions. run takes the
+-- action's context, and for work_new_go and work_done_go the hand-back payload
+-- as a second argument.
 local actions_registered = false
 
 function M.setup(opts)
@@ -1094,8 +1480,37 @@ function M.setup(opts)
       return M.work_new_go(ctx, args)
     end,
   }
-  -- Set only once both are in, so a registration Rex rejects leaves the flag
-  -- alone and a retry registers again.
+  -- Key-bound, so no arguments: everything it needs is the terminal it was pressed
+  -- in, and its float carries the answers it found there to the script.
+  rex.action{
+    name = "work_done",
+    title = "Done: tear down this worktree",
+    category = "New work",
+    run = function(ctx) return M.work_done(ctx) end,
+  }
+  -- The audit's hand-back, registered here so the palette order does not move
+  -- once its action lands: the five keys are the whole contract, and every one
+  -- of them is required, because a removal with a key missing has nothing to
+  -- remove.
+  rex.action{
+    name = "work_done_go",
+    title = "Done: remove the worktree the audit approved",
+    category = "New work",
+    args = {
+      type = "object",
+      properties = {
+        project = { type = "string" },
+        root = { type = "string" },
+        main = { type = "string" },
+        workspace = { type = "string" },
+        path = { type = "string" },
+      },
+      required = { "project", "root", "main", "workspace", "path" },
+    },
+    run = function(ctx, args) return M.work_done_go(ctx, args) end,
+  }
+  -- Set only once every action is in, so a registration Rex rejects leaves the
+  -- flag alone and a retry registers again.
   actions_registered = true
 
   return M

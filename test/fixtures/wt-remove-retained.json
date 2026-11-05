@@ -1,0 +1,9 @@
+[
+  {
+    "kind": "worktree",
+    "branch": "feat/x",
+    "path": "/p/demo/feat-x",
+    "branch_outcome": "retained_unmerged",
+    "branch_checked_out_at": null
+  }
+]

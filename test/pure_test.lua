@@ -100,6 +100,62 @@ eq("main_worktree string flag false", M.main_worktree({ items = { { worktree = {
 eq("main_worktree none", M.main_worktree({ items = {} }), nil)
 eq("main_worktree non-table items", M.main_worktree({ items = "x" }), nil)
 
+-- What a tab is still running --------------------------------------------------
+--
+-- The done flow closes a tab only when nothing in it is somebody's work. A shell
+-- is what a tab idles at, so the names below are compared against the shell list
+-- after a directory and the leading dash of a login shell are stripped: `-fish`
+-- and `/usr/bin/fish` are the same program as `fish`. A process reply carries
+-- three possible names -- an interpreter's script, the argv0 a login shell shows,
+-- the system's own name -- in two slots, the foreground first and the child after
+-- it, because the one that answers is whichever the terminal could name.
+
+eq("a program's directory is stripped", M.program_basename("/usr/bin/fish"), "fish")
+eq("a login shell's dash is stripped", M.program_basename("-zsh"), "zsh")
+eq("a bare name is left alone", M.program_basename("fish"), "fish")
+eq("a trailing slash still names the program", M.program_basename("/usr/bin/fish/"), "fish")
+eq("slashes alone name nothing", M.program_basename("///"), "")
+eq("nothing names nothing", M.program_basename(nil), "")
+
+eq("a login shell names a shell", M.is_shell("-fish"), true)
+eq("a full path names a shell", M.is_shell("/bin/sh"), true)
+eq("a bare shell name is a shell", M.is_shell("fish"), true)
+eq("an agent is not a shell", M.is_shell("pi"), false)
+eq("a program is not a shell", M.is_shell("node"), false)
+eq("an unnamed program is not a shell", M.is_shell(""), false)
+
+eq("an interpreter's script is the program it runs",
+  M.process_program({ foreground = { name = "node", script = "/p/x/bin/pi" } }), "pi")
+eq("argv0 beats the system's name",
+  M.process_program({ foreground = { argv0 = "-fish", name = "fish" } }), "fish")
+eq("the child answers when the foreground cannot",
+  M.process_program({ child = { name = "zsh" } }), "zsh")
+eq("an empty reply names nothing", M.process_program({}), "")
+eq("a reply that is not a table names nothing", M.process_program(42), "")
+
+do
+  local window = { layers = {
+    { blocks = { { block_id = "b1" } } },
+    { blocks = { { block_id = "b2" } } },
+  } }
+  eq("every layer is read", #M.window_blocks(window), 2)
+  eq("a window carrying blocks directly is read",
+    #M.window_blocks({ blocks = { { block_id = "b9" } } }), 1)
+  eq("a window with no blocks has none", #M.window_blocks({ window_id = "w0" }), 0)
+  eq("a window that is not a table has none", #M.window_blocks(nil), 0)
+  -- A layer whose blocks cannot be read is counted as an unreadable entry
+  -- rather than dropped: it may hold a program, and tab_processes names what it
+  -- cannot read instead of raising on the index.
+  eq("a layer that cannot be read is counted",
+    #M.window_blocks({ layers = { 42 } }), 1)
+  eq("a layer that cannot be read finds no block",
+    M.window_of_block({ { layers = { 42 } } }, "b1"), nil)
+  eq("a block finds its window",
+    M.window_of_block({ { window_id = "w0" }, window }, "b2"), window)
+  eq("an unknown block finds nothing", M.window_of_block({ window }, "zz"), nil)
+  eq("no windows find nothing", M.window_of_block(nil, "b2"), nil)
+end
+
 -- new_tab_argv: the tab's positional words
 --
 -- The tab runs a fish wrapper, and everything the flow knows reaches it as a

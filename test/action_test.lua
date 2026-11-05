@@ -331,8 +331,563 @@ eq("find_tab takes the branch's tab among the others", M.find_tab({
 }, BRANCH), "w1")
 eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
 
--- new_tab_argv() --------------------------------------------------------------
+-- tab_window() and tab_processes() ------------------------------------------
+--
+-- The done flow closes a tab only when nothing in it is somebody's work. The
+-- tab is found from ctx's own block in the session's own view, and then every
+-- block in that window is asked what it is running: a shell is what a tab idles
+-- at, and anything else -- including a block whose process Rex cannot read -- is
+-- somebody's work. The window below carries its blocks in a layer, which is where
+-- Rex puts them.
 
+local TAB_VIEW = {
+  view = {
+    session_id = "session:iris",
+    windows = { {
+      window_id = "window:tab",
+      label = BRANCH,
+      layers = { { blocks = { { block_id = "block:one" }, { block_id = "block:two" } } } },
+    } },
+  },
+}
+
+-- A stub whose attach reply is TAB_VIEW and whose process reply is chosen per
+-- block id: a reply that is a function is called, so a test can make the call
+-- fail. The requests are kept, because asking the right session about the right
+-- block is half of the answer.
+local function tab_stub(by_block)
+  local stub = fresh_rex()
+  stub.call_replies["session.attach"] = TAB_VIEW
+  stub.asked = {}
+  stub.block = {
+    call = function(creator, method, request)
+      stub.asked[#stub.asked + 1] = { creator = creator, method = method, request = request }
+      local reply = by_block[request.block_id]
+      if type(reply) == "function" then return reply() end
+      return reply
+    end,
+  }
+  return stub
+end
+
+do
+  local stub = tab_stub({
+    ["block:one"] = { foreground = { name = "fish" } },
+    ["block:two"] = { foreground = { name = "node" } },
+  })
+  local ctx = { session_id = "session:iris", block_id = "block:two" }
+  local window, reason = M.tab_window(ctx)
+  eq("the tab is the window holding the block", window and window.window_id, "window:tab")
+  eq("a tab that is found has no reason to give", reason, nil)
+  eq("the block's session is the one attached",
+    request_of(stub, "session.attach").session_id, "session:iris")
+
+  -- The whole window is read, in the order Rex lists it: a node in the second
+  -- block still stops the close, and the shell beside it does not.
+  eq("a node in the tab is named", M.tab_processes(ctx, window), { "node" })
+  eq("every block in the tab is asked", #stub.asked, 2)
+  eq("each block is asked in ctx's session",
+    { stub.asked[1].request.session_id, stub.asked[2].request.session_id },
+    { "session:iris", "session:iris" })
+  eq("each block is asked about itself",
+    { stub.asked[1].request.block_id, stub.asked[2].request.block_id },
+    { "block:one", "block:two" })
+  eq("the terminal's process is the terminal's",
+    { stub.asked[1].creator, stub.asked[1].method },
+    { "com.superlogical.terminal", "process" })
+end
+
+-- A tab of shells is what a teardown may close.
+do
+  local stub = tab_stub({ ["block:one"] = { foreground = { name = "fish" } } })
+  local window = { window_id = "window:main", label = "main",
+    layers = { { blocks = { { block_id = "block:one" } } } } }
+  eq("a tab of shells runs nothing",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, window), {})
+  eq("a shell is still asked about", #stub.asked, 1)
+end
+
+-- A block whose process cannot be read is the one that matters most: the flow
+-- must refuse, so it is named as a program rather than counted as idle.
+do
+  tab_stub({ ["block:one"] = function() error("no process") end })
+  local window = { layers = { { blocks = { { block_id = "block:one" } } } } }
+  eq("a block Rex cannot read is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, window),
+    { "a program Rex could not name" })
+end
+
+-- A call that answers with nothing to name is the same refusal: a reply without
+-- a foreground or a child says nothing about what is running.
+do
+  tab_stub({ ["block:one"] = {} })
+  local window = { blocks = { { block_id = "block:one" } } }
+  eq("a block that names nothing is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, window),
+    { "a program Rex could not name" })
+end
+
+-- A block Rex hands over in a shape this cannot read is the same refusal as a
+-- block whose process reply cannot be read: an index on it would raise, and an
+-- entry skipped would let a teardown through with somebody's program in it. A
+-- layer is where the blocks usually are, so an unreadable layer is the case.
+do
+  -- The readable block is a shell, so only the unreadable one is named: a tab of
+  -- shells is what the close may close.
+  tab_stub({ ["block:one"] = { foreground = { name = "fish" } } })
+  local layered = { window_id = "window:tab",
+    layers = { { blocks = { { block_id = "block:one" } } }, 42 } }
+  eq("a layer that cannot be read is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, layered),
+    { "a program Rex could not name" })
+  local blocks = { window_id = "window:tab", blocks = { { block_id = "block:one" }, "x" } }
+  eq("a block that is not a table is named",
+    M.tab_processes({ session_id = "session:iris", block_id = "block:one" }, blocks),
+    { "a program Rex could not name" })
+end
+
+-- The tab cannot be found either way, and both are refusals with a reason
+-- rather than an empty answer that would read as "no tab, nothing to stop".
+do
+  local stub = fresh_rex()
+  stub.call_replies["session.attach"] = { client_id = "client:app" }
+  local window, reason = M.tab_window({ session_id = "session:iris", block_id = "block:one" })
+  eq("an attach without a view finds no tab", window, nil)
+  contains("the refusal says why the tab is unknown", reason, "no list of tabs")
+end
+
+do
+  tab_stub({})
+  local window, reason = M.tab_window({ session_id = "session:iris", block_id = "block:zz" })
+  eq("a block in no window finds no tab", window, nil)
+  contains("the refusal says the tab cannot be told", reason, "cannot tell which tab")
+end
+
+-- work_done() ------------------------------------------------------------------
+--
+-- The teardown, end to end from the pane: the audit is opened on the pane's own
+-- tab, and what that tab is still running travels with it. The per-block
+-- process replies are what these cases turn on -- a tab is where a person
+-- leaves work behind, and a block Rex cannot read has to reach the audit as a
+-- program rather than as an idle pane -- so they sit beside tab_processes,
+-- whose stub already answers per block.
+local function done_stub(by_block)
+  local stub = tab_stub(by_block)
+  -- The project is the fixture's, so project_for's two questions answer here as
+  -- they do in setup_test.lua.
+  stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pmm-iris/.git\n", stderr = "" }
+  stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "wt list", stderr = "" }
+  stub.json_replies = {
+    ["wt list"] = { items = { { worktree = { path = MAIN, main = true } } } },
+  }
+  stub.json.decode = function(text)
+    local value = stub.json_replies[text]
+    if value == nil then return nil, "rex.json.decode: text is not valid JSON" end
+    return value
+  end
+  -- The float itself: one layer, recorded, because the argv it is opened with
+  -- is the whole of what this action decides.
+  stub.layers = {}
+  stub.session.new_layer = function(request)
+    stub.layers[#stub.layers + 1] = request
+    return { layer_id = "layer:done", block_ids = { "block:done" } }
+  end
+  return stub
+end
+
+do
+  local stub = done_stub({
+    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:two"] = { foreground = { name = "node" } },
+  })
+  local ok = pcall(M.work_done,
+    { session_id = "session:iris", block_id = "block:one", origin = "key" })
+  eq("work_done opens the audit", ok, true)
+  eq("the audit names the tab it will close, and what that tab is running",
+    stub.layers[1].layout.block.options.command,
+    { M.options.script, "done", "--main", MAIN, "--root", ROOT, "--project", PROJECT,
+      "--cwd", "/x/pmm-iris/bug-58h", "--session", "session:iris",
+      "--window", "window:tab", "--running", "node" })
+end
+
+-- The block Rex cannot read is the one that matters most: it reaches the audit
+-- as a program, so the script refuses rather than tearing down somebody's
+-- work.
+do
+  local stub = done_stub({
+    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:two"] = function() error("no process") end,
+  })
+  local ok = pcall(M.work_done,
+    { session_id = "session:iris", block_id = "block:one", origin = "key" })
+  eq("a tab with an unreadable block still opens the audit", ok, true)
+  local command = stub.layers[1].layout.block.options.command
+  eq("the unreadable block is passed along as a program",
+    { command[#command - 1], command[#command] },
+    { "--running", "a program Rex could not name" })
+end
+
+-- work_done_go() ----------------------------------------------------------------
+--
+-- The audit's answer, carried out: one removal through the login shell in the main
+-- worktree, then the reads that decide whether it happened -- the branch worktrunk
+-- reported, the jj row the seeded hook may have left behind, and the worktree
+-- listing. The removal's reply is read from test/fixtures, where each file holds
+-- worktrunk's own reply shape -- an array, one entry per removal -- as measured on
+-- the installed wt; the value rex.json.decode makes of that text is written beside
+-- it. Each case gives the removal its own reply and says what the documents decode
+-- to; a command the flow did not run has no reply at all, so a wrong argv fails
+-- here instead of answering plausibly.
+
+local REMOVE = "wt remove '/p/demo/feat-6c4' --foreground -y --format=json"
+-- Read from the op log rather than the working copy: the background post-remove
+-- hook is running `jj workspace forget` in the same repository, and a plain read
+-- waits on the working-copy lock that hook holds.
+local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+local WORKTREES = "wt list --format=json"
+
+-- One fixture, exactly as worktrunk wrote it.
+local function fixture(name)
+  local file = assert(io.open(here .. "/fixtures/" .. name, "rb"))
+  local text = file:read("*a")
+  file:close()
+  return text
+end
+
+-- A successful exit for the command whose text it is.
+local function reply(text)
+  return { code = 0, stdout = text, stderr = "" }
+end
+
+-- The three removals a worktree can have: an attached branch worktrunk deleted,
+-- one it kept because the work was unmerged, and the detached workspace a jj
+-- wrapper produces, which has no branch to delete. `branch` is null in the last
+-- one, which is nil here, because rex.json.decode turns null into nil.
+local REMOVED = fixture("wt-remove-deleted.json")
+local RETAINED = fixture("wt-remove-retained.json")
+local DETACHED = fixture("wt-remove-detached.json")
+
+local DELETED_ENTRY = { kind = "worktree", branch = "feat/x", path = "/p/demo/feat-x",
+  branch_outcome = "deleted" }
+local RETAINED_ENTRY = { kind = "worktree", branch = "feat/x", path = "/p/demo/feat-x",
+  branch_outcome = "retained_unmerged" }
+local DETACHED_ENTRY = { kind = "worktree", path = "/p/demo/feat-6c4",
+  branch_outcome = "not_attempted" }
+
+-- The two listings a completed teardown leaves.
+local WORKSPACES_CLEAR = {
+  code = 0, stdout = "default\t/p/demo\nmain\t/p/demo/main\n", stderr = "",
+}
+local WORKTREES_CLEAR = { code = 0,
+  stdout = '{"items":[{"branch":"main","worktree":{"path":"/p/demo/main","main":true}}]}',
+  stderr = "" }
+
+-- The audit's hand-back: the five keys, as the float sends them back.
+local function removal(overrides)
+  local args = { project = "demo", root = "/p/demo", main = "/p/demo/main",
+    workspace = "feat/6c4", path = "/p/demo/feat-6c4" }
+  for key, value in pairs(overrides or {}) do args[key] = value end
+  return args
+end
+
+-- The three reads answer with the clear fixtures unless the case says otherwise,
+-- and json.decode answers the documents by the text it is handed -- a reply whose
+-- text is not in the table decodes to nothing, so a case has to say what it
+-- reads rather than let an unread document pass as an empty one.
+local function go_stub(by_command, documents)
+  local stub = fresh_rex()
+  stub.exec_replies[REMOVE] = reply(REMOVED)
+  stub.exec_replies[WORKSPACES] = WORKSPACES_CLEAR
+  stub.exec_replies[WORKTREES] = WORKTREES_CLEAR
+  for command, value in pairs(by_command or {}) do stub.exec_replies[command] = value end
+  stub.json_replies = {
+    [REMOVED] = { DELETED_ENTRY },
+    [RETAINED] = { RETAINED_ENTRY },
+    [DETACHED] = { DETACHED_ENTRY },
+    [WORKTREES_CLEAR.stdout] = { items = { { branch = "main",
+      worktree = { path = "/p/demo/main", main = true } } } },
+  }
+  for text, value in pairs(documents or {}) do stub.json_replies[text] = value end
+  stub.json.decode = function(text)
+    local value = stub.json_replies[text]
+    if value == nil then
+      return nil, "rex.json.decode: text is not valid JSON"
+    end
+    return value
+  end
+  return stub
+end
+
+-- How many times a command ran, so a wait can be shown to be a wait.
+local function runs(stub, name)
+  local count = 0
+  for _, call in ipairs(stub.exec_calls) do
+    if program(call) == name then count = count + 1 end
+  end
+  return count
+end
+
+-- The clean path: one removal, then the two verifications, and nothing else.
+do
+  local stub = go_stub()
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a complete removal succeeds", ok, true)
+  eq("a complete removal returns nothing", result, nil)
+  eq("the removal runs first, then the two verifications", stub.events,
+    { REMOVE, WORKSPACES, WORKTREES })
+  eq("the removal runs in the main worktree", exec_for(stub, REMOVE).cwd, "/p/demo/main")
+  -- Both verifications run there too: the pane's own directory is the one the
+  -- removal just unlinked, so a process started in it may not even exec.
+  eq("the jj read runs in the main worktree", exec_for(stub, WORKSPACES).cwd, "/p/demo/main")
+  eq("the worktree read runs in the main worktree", exec_for(stub, WORKTREES).cwd, "/p/demo/main")
+  -- The block that would be closed is the one whose script called this action, so
+  -- this action makes no rex.call at all: there is nothing it could close.
+  eq("a complete removal closes nothing", #stub.calls, 0)
+  -- A teardown that is already clean has nothing to wait for.
+  eq("a clean teardown never sleeps", runs(stub, "sleep"), 0)
+end
+
+-- A branch worktrunk kept is a failure, reported with the one command that would
+-- finish the job: -D is the person's to run, never the flow's. The command names
+-- the *branch*, because the worktree's path is gone by the time this line is read.
+do
+  local stub = go_stub({ [REMOVE] = reply(RETAINED) })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a kept branch fails", ok, false)
+  contains("the kept branch names the branch", said, "feat/x")
+  contains("the kept branch says what worktrunk did", said, "retained_unmerged")
+  contains("the kept branch names the command that would finish it", said,
+    "wt remove -D 'feat/x'")
+  eq("a kept branch verifies nothing", #stub.exec_calls, 1)
+end
+
+-- A detached worktree is the jj wrapper's normal case: `gws` adds workspaces with
+-- `jj workspace add` and nothing attaches a branch, so worktrunk has no branch to
+-- delete and says `not_attempted`. Nothing was left behind, so the teardown is
+-- complete -- and it still verifies both stores and closes nothing.
+do
+  local stub = go_stub({ [REMOVE] = reply(DETACHED) })
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a detached workspace is a complete teardown", ok, true)
+  eq("a detached teardown returns nothing", result, nil)
+  eq("a detached teardown still verifies both stores", stub.events,
+    { REMOVE, WORKSPACES, WORKTREES })
+  eq("a detached teardown closes nothing", #stub.calls, 0)
+end
+
+-- An entry with no branch_outcome at all is a failure, not a pass (Review Focus
+-- 3): worktrunk said nothing about the branch, and nothing is not deleted. With
+-- no branch named either, the report falls back to the workspace's own name.
+do
+  local bare = '[{"removed":true}]'
+  go_stub({ [REMOVE] = reply(bare) }, { [bare] = { { removed = true } } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a reply without branch_outcome fails", ok, false)
+  contains("the missing outcome is said out loud", said, "worktrunk said nothing")
+  contains("the missing outcome falls back to the workspace's name", said,
+    "wt remove -D 'feat/6c4'")
+end
+
+-- An empty reply is neither shape worktrunk documents. The removal happened and
+-- the answer about it did not, so there is no branch to report and none to name
+-- a command for: the kept-branch line would claim worktrunk kept something it
+-- never mentioned, so this has a line of its own (Review Focus: an empty array).
+do
+  local empty = '[]'
+  local stub = go_stub({ [REMOVE] = reply(empty) }, { [empty] = {} })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("an empty reply fails", ok, false)
+  contains("an empty reply says no removal was named", said, "named no removal")
+  contains("an empty reply names the listing to read", said, "wt list --format=json")
+  eq("an empty reply verifies nothing", #stub.exec_calls, 1)
+end
+
+-- A bare object is the single-entry shape read the same way as the array: it is
+-- what the reply has been seen to be, and reading it as no removal would fail a
+-- removal that finished.
+do
+  local bare = '{"branch_outcome":"deleted"}'
+  local stub = go_stub({ [REMOVE] = reply(bare) }, { [bare] = { branch_outcome = "deleted" } })
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a bare object with a deleted branch is a complete teardown", ok, true)
+  eq("a bare object returns nothing", result, nil)
+  eq("a bare object still verifies both stores", stub.events,
+    { REMOVE, WORKSPACES, WORKTREES })
+end
+
+-- `not_attempted` is complete only with no branch: with one named, worktrunk was
+-- asked to delete a branch and did not, which is the kept branch it is.
+do
+  go_stub({ [REMOVE] = reply(REMOVED) }, { [REMOVED] = {
+    { branch = "feat/x", branch_outcome = "not_attempted" } } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("not_attempted with a branch fails", ok, false)
+  contains("not_attempted with a branch names the branch", said, "wt remove -D 'feat/x'")
+  contains("not_attempted with a branch says what worktrunk did", said, "not_attempted")
+end
+
+-- The seeded hook ends in || true, so the jj row is verified rather than
+-- trusted -- and, because worktrunk's post-* hooks are background hooks, the
+-- first read can be too early on a healthy teardown. The wait is what the next
+-- cases turn on; the sleep is stubbed, so they cost nothing to run.
+
+do
+  local stub = go_stub({
+    [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
+  })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a surviving jj row fails", ok, false)
+  contains("the surviving row names the command", said,
+    "jj workspace forget 'feat/6c4'")
+  eq("the surviving row is read again before it is believed",
+    runs(stub, WORKSPACES) > 1, true)
+  eq("every read after the first waits first",
+    runs(stub, "sleep"), runs(stub, WORKSPACES) - 1)
+  eq("a surviving jj row stops before the worktrees are asked",
+    exec_for(stub, WORKTREES).argv, nil)
+end
+
+-- The background hook on a healthy run: the row is still there for the first
+-- read and gone by the next one. That is not a failure -- the wait is what
+-- keeps a false "still registered" off the screen -- and it closes nothing.
+do
+  local reads = 0
+  local stub = go_stub({ [WORKSPACES] = function()
+    reads = reads + 1
+    if reads == 1 then
+      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+    end
+    return WORKSPACES_CLEAR
+  end })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a row the hook clears a moment later is not a failure", ok, true)
+  eq("a row that cleared returns nothing", result, nil)
+  eq("the wait reads the list again after the sleep", stub.events,
+    { REMOVE, WORKSPACES, "sleep", WORKSPACES, WORKTREES })
+  eq("a row that cleared is read exactly twice", reads, 2)
+  eq("a row that cleared closes nothing", #stub.calls, 0)
+end
+
+-- A read that fails during the wait is a failure, not more waiting: jj's own
+-- line is the report, and a wait does not paper over it.
+do
+  local reads = 0
+  local stub = go_stub({ [WORKSPACES] = function()
+    reads = reads + 1
+    if reads == 1 then
+      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+    end
+    return { code = 1, stdout = "", stderr = "jj: workspace is locked\n" }
+  end })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a read that fails during the wait fails the teardown", ok, false)
+  contains("the mid-wait failure is named as the listing", said,
+    "could not list jj workspaces")
+  contains("the mid-wait failure carries jj's line", said, "workspace is locked")
+  eq("a failed read ends the wait", reads, 2)
+end
+
+-- And the worktree itself.
+do
+  local still = '{"items":[{"branch":"feat/6c4","worktree":{"path":"/p/demo/feat-6c4"}}]}'
+  go_stub({ [WORKTREES] = { code = 0, stdout = still, stderr = "" } },
+    { [still] = { items = { { branch = "feat/6c4",
+      worktree = { path = "/p/demo/feat-6c4" } } } } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a worktree still listed fails", ok, false)
+  contains("the surviving worktree is named", said, "/p/demo/feat-6c4")
+end
+
+-- Worktrunk refused outright: its own first line is the report, and the rest of
+-- its output is not.
+do
+  go_stub({ [REMOVE] = {
+    code = 1, stdout = "", stderr = "cannot remove: worktree is in use\nand another line\n",
+  } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a failed removal fails", ok, false)
+  contains("the failure carries worktrunk's line", said, "worktree is in use")
+  eq("only the first line is carried", tostring(said):find("another line", 1, true), nil)
+end
+
+-- A worktrunk that never ran is its own failure rather than an exit code: a login
+-- shell with nothing on PATH says so.
+do
+  local stub = go_stub()
+  stub.exec_replies[REMOVE] = nil
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a removal that could not run fails", ok, false)
+  contains("the failure says worktrunk could not be run", said, "could not run worktrunk")
+end
+
+-- A listing that cannot be read is a failure, not a proof of absence: a check
+-- that answered "nothing there" because it could not see the list would pass a
+-- removal that did not happen.
+do
+  go_stub({ [WORKSPACES] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a jj listing that failed fails the teardown", ok, false)
+  contains("the jj listing failure is named", said, "could not list jj workspaces")
+end
+
+do
+  local stub = go_stub()
+  stub.exec_replies[WORKTREES] = { code = 0, stdout = "not json", stderr = "" }
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("an unreadable worktrunk listing fails the teardown", ok, false)
+  contains("the unreadable listing is named", said, "could not read the worktrunk listing")
+end
+
+-- A path with a space and an apostrophe is one argument, not three (Review Focus
+-- 2): the word is single-quoted, and an apostrophe inside it is closed, escaped
+-- and reopened.
+do
+  eq("a quoted path keeps its apostrophe", M.shell_quote("/p/demo/it's here"),
+    "'/p/demo/it'\\''s here'")
+  eq("a plain path is one quoted word", M.shell_quote("/p/demo/feat-6c4"),
+    "'/p/demo/feat-6c4'")
+
+  local awkward = "wt remove '/p/demo/it'\\''s here' --foreground -y --format=json"
+  local stub = go_stub({ [awkward] = reply(REMOVED) })
+  local ok = pcall(M.work_done_go, {}, removal{ path = "/p/demo/it's here" })
+  eq("the removal quotes the path as one word", ok, true)
+  eq("the quoted path is what the login shell ran",
+    stub.exec_calls[1] and program(stub.exec_calls[1]), awkward)
+end
+
+-- The hand-back is also a `rex do` entry point, where an --args object is not
+-- filtered against the declaration, so a key it needs and does not have is
+-- refused before anything is removed.
+do
+  local stub = go_stub()
+  local ok, said = pcall(M.work_done_go, {}, removal{ path = "" })
+  eq("a hand-back with an empty path fails", ok, false)
+  contains("the failure says what the removal needs", said, "work_done_go needs")
+  contains("the failure names the key that is missing", said, "path")
+  eq("a hand-back with an empty path removes nothing", #stub.exec_calls, 0)
+end
+
+-- work_done_go()'s declaration ---------------------------------------------------
+
+-- The five keys are the float's whole contract, and a removal with one missing
+-- has nothing to remove -- so they are declared, and required.
+do
+  local go
+  for _, spec in ipairs(rex_stub.actions) do
+    if spec.name == "work_done_go" then go = spec end
+  end
+  eq("work_done_go is registered", type(go), "table")
+  eq("work_done_go declares the hand-back's five keys",
+    sorted_keys(go and go.args and go.args.properties),
+    { "main", "path", "project", "root", "workspace" })
+  eq("work_done_go requires every one of them", go and go.args.required,
+    { "project", "root", "main", "workspace", "path" })
+end
+
+-- new_tab_argv() --------------------------------------------------------------
 -- The tab does not run one program any more: it runs a fish wrapper that
 -- switches to, attaches or creates the worktree, starts the agent in it, and
 -- leaves a login shell behind when the agent exits. Everything the flow knows

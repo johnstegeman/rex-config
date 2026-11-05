@@ -263,6 +263,7 @@ Then, in `~/.config/rex/init.lua`:
 ```lua
 require("rex-config").setup{}
 rex.bind("ctrl+space>n", "work_new")
+rex.bind("ctrl+space>d", "work_done")
 ```
 
 Reload the configuration:
@@ -272,8 +273,9 @@ rex config check
 rex config reload
 ```
 
-The plugin finds `new-work.sh` beside its own `init.lua`, so there is nothing
-else to point at.
+One key each way: `ctrl+space>n` starts a branch, and `ctrl+space>d` tears one
+down ([Finishing: ctrl+space>d](#finishing-ctrlspaced)). The plugin finds
+`new-work.sh` beside its own `init.lua`, so there is nothing else to point at.
 
 ## Options
 
@@ -409,6 +411,155 @@ In the tab:
   the bead was already claimed before the tab — how to hand the claim back
   (`bd unclaim <id>`).
 
+## Finishing: ctrl+space>d
+
+`ctrl+space>d` is the same motion in reverse: one press tears down the worktree,
+the branch, the jj workspace and the tab the focused pane is in. It runs the
+action `work_done` — the other key in the `New work` category, beside
+`work_new` — which reads that pane's directory and the project it belongs to and
+opens a float: `new-work.sh done`, started in the main worktree, because the
+directory under audit is one it may remove. The tab is the one the pane is in,
+read from the session's own view rather than found by a label: nothing here is
+searched for, because the tab being torn down is the tab you are looking at.
+The audit then finds the workspace from the pane's own directory — the longest
+root in `jj workspace list` that is that directory or a directory of it,
+compared as whole path segments so that `feat-6c41` is never read as
+`feat-6c4`. The workspace gives the branch the tab is named after and the
+directory that is about to go. The main worktree and the wrapper root are
+refused before anything is read, and so is a workspace and a worktree that
+disagree — a jj row with no worktree at its root, or a worktree no row
+claims — because removing one half of that is the state nobody unpicks from a
+float.
+
+The audit removes nothing, and beyond the fetch its only writes are the two
+`main` moves below. It fetches once first — `jj git fetch`, capped at 30
+seconds when `timeout` or `gtimeout` is installed, with `GIT_TERMINAL_PROMPT=0`
+so a credential prompt cannot hang a terminal nobody can type into — because
+every comparison below is a comparison against what the remote has, and a stale
+base reports merged work as unmerged. A fetch that fails is itself a refusal,
+naming that nothing could be compared. Then:
+
+- **whether the branch is merged.** The base is the picker's own opening base —
+  the chain in [The base](#the-base), rendered as one jj revision:
+  `refs/remotes/origin/HEAD`'s branch as `<branch>@origin`, then `main@origin`,
+  then `master@origin`, then `@` — and what the branch has that base does not is
+  read as *content*: `jj diff --summary -r '<base>..@'`. Content rather than
+  ancestry, because a squash or a rebase merge leaves that diff empty while
+  leaving the change ids where they were; an ancestry test would refuse forever
+  after the merge this repo normally makes.
+- **the working copy's own changes**, `jj diff --summary -r @`, counted and not
+  listed, since you are looking at those files already.
+- **the programs still running in the tab.** Rex names them and passes them in;
+  the script cannot see the tab it was started from. A program Rex cannot name
+  at all counts as one, because a wrong pass here kills an agent.
+- **the bead the workspace belongs to.** The workspace's name carries the bead's
+  hash, so `feat/6c4` finds `rex-config-6c4` among the `in_progress` beads and
+  prints it. It is information on the refusal screen and nothing else: the flow
+  writes to no bead, and a `bd` that is absent, or a list that matches nothing,
+  is silence.
+
+Ignored files are not on that list. `.env` and `node_modules` go with the
+directory, and the project's own `post-start` hooks are what puts them back;
+refusing on `node_modules` would make the key useless in every repo that has
+one.
+
+`main` is the flow's one write beyond the fetch, and it only ever moves forward.
+Its bookmark is moved onto the base — `jj bookmark set main -r '<base>'` — when,
+and only when, every commit `main` has is already in that base, so the move
+cannot be backwards. Its working copy is moved — `jj new '<base>'`, in `main` —
+when, and only when, that working copy is provably empty: nothing between `@-`
+and `@`, and no description on `@`. Two tests rather than one, because `jj new`
+over a working copy with work in it strands that work, and the shared checkout
+is never moved backwards and never loses anything. A `main` that fails either
+test is a refusal rather than a silent skip: the point of the step is that the
+next `ctrl+space>n` opens on a base that is current, and a forgotten `main` is
+how it stops being. Both moves are made whether the rest of the audit refused
+or not, since neither of them removes anything.
+
+With nothing in the way the audit prints no block and asks no question. It hands
+five keys back to the action `work_done_go` — the project, the wrapper, the main
+worktree, the workspace's name and its directory — and the teardown itself is
+four steps. `wt remove '<path>' --foreground -y --format=json`, run from the
+main worktree, takes the worktree away — and, when the worktree has a branch,
+the branch with it. In a jj wrapper it usually has none: `gws` adds workspaces
+with `jj workspace add` and nothing attaches a branch to them, so there is
+nothing for worktrunk to delete and its reply's `branch_outcome` says
+`not_attempted`, which this flow reads as a completed teardown. `deleted` is
+the other complete answer; anything else — `retained_unmerged`, or a reply that
+says nothing — is reported. A bookmark or a branch ref that survives the
+removal is not a failure here and is not this flow's business: the finishing
+skill's Step 8 owns bookmarks, so the teardown neither deletes nor reports
+one. The project's own `post-remove` hook — the
+`jj workspace forget {{ branch }}` line `ginit` seeds into
+`main/.config/wt.toml` — is what forgets the jj workspace, and that is the step
+that can quietly not happen, so it is waited for rather than assumed. Then
+`wt list` has to stop showing the directory. The tab is closed by the script
+rather than by the action, and last of all: `cd` to the main worktree — the
+script's own directory is gone by now — then `rex window close -s <session>
+<window>`, as its final statement. `work_done_go` closes nothing, because the
+block that closing would kill is the one whose script asked for the close.
+
+Four flags are left off, and the reason is that order. `-f`, `-D` and `--reap`
+exist for the working copy with changes in it, the branch that is not merged and
+the program still running in the tab — the three the audit has already refused —
+and a refusal worktrunk makes on its own terms is the report. `--no-hooks` is
+the one flag with no counterpart in the audit: the hook *is* the step that
+forgets the workspace, so skipping it would skip the point of the flow.
+`--foreground` is passed for what it does do, which is make the removal itself
+block, so its exit code and its `branch_outcome` are final by the time they are
+read. What it does not do is wait for `post-remove`, because worktrunk runs its
+post-* hooks in the background — so the workspace listing is read, waited on and
+read again, up to ten reads over about two seconds, and only a row still there
+at the end of that is a leftover. The listing is read from the op log
+(`jj --ignore-working-copy workspace list`), not from the working copy, so the
+hook holding the working-copy lock cannot block the read.
+
+A refusal is a screen rather than a failure: one block naming everything in the
+way, in the order the audit asked, then `nothing was removed; press any key`,
+before it exits 4. The float is held open for that key, so the screen is there
+to be read; by the time it is, nothing has been removed. The title is `can't
+tear down <workspace>`, and the bead line comes after the blockers, in a
+paragraph of its own.
+
+- **Changes not merged into the base.** `changes not merged into <base>: 3
+  changes, 4 paths` — the base is the one resolved above, `main@origin` in a
+  clone whose default branch is `main` — and the paths are listed underneath,
+  four spaces in. Merging the work on the forge clears it; the audit fetches
+  for you, so a merge that has landed is enough.
+- **A dirty working copy.** `working copy has changes: 2 paths` — a count and no
+  list, because you are looking at those files already. Committing, squashing or
+  abandoning them clears it.
+- **A program still running in the tab.** `still running in this tab: pi, node`,
+  in the order the tab listed them. Rex does not kill it and the removal never
+  reaps: stop it, and press the key again.
+- **`main` carrying commits of its own.** `main was not moved: it has commits
+  <base> does not; the bookmark is yours to push or abandon` — that move would go
+  backwards, and no command clears it: the commits are on `main`'s own bookmark,
+  so pushing them or abandoning them is your decision, not the flow's.
+  (A `jj` that refuses the bookmark write itself has its own line, naming
+  `jj bookmark set main -r <base>`.)
+- **`main` whose working copy is not provably empty.** `main's working copy was
+  not moved: it is not empty; run jj new <base> in <main>`.
+
+A removal that has happened can still be followed by a report, on the float that
+stays up. These two are the flow's own cases; an unreadable `jj` listing, an
+unreadable worktrunk listing, and a path `wt list` still shows are reported here
+too, and the list is not meant to be exhaustive:
+
+- **A branch worktrunk kept.** `the branch feat/6c4 was kept (retained_unmerged):
+  run wt remove -D 'feat/6c4'`. The command names the branch rather than the
+  path, because the worktree is gone by the time this line is read. The flow
+  does not run `-D`: if worktrunk and the audit disagree about merged, that is
+  yours to settle.
+- **A jj row that survived the hook.** `the jj workspace feat/6c4 is still
+  registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends in
+  `|| true` and runs in the background, so this line is the verdict of the last
+  of those reads rather than the first — a row the hook cleared a moment later is
+  not reported at all.
+
+Neither of those closes the tab. The directory is gone either way, and the
+command on the screen is the last thing left to type.
+
 ## Converting a repo to jj workspaces
 
 Creating work needs a repo that is ginit'd: a jj directory repo at the wrapper,
@@ -493,8 +644,9 @@ worktrees — with nothing uncommitted in any of them.
 
 ```
 ~/.config/rex/rex-config/
-  init.lua        the module: options, the two actions, project and session logic
-  new-work.sh     the one screen behind ctrl+space>n; hands back to work_new_go
+  init.lua        the module: options, the four actions, project and session logic
+  new-work.sh     the screens behind ctrl+space>n and ctrl+space>d; hands back to
+                  work_new_go and work_done_go
   test/           lua and bash tests, run with `bash test/run.sh`
   docs/           the design this was built from
 ```

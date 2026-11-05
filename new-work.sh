@@ -52,6 +52,44 @@ commands:
       change them while the screen is up: rows and header print what fzf shows,
       cycle-agent, cycle-base and branch-field are what ctrl-a, ctrl-r and ctrl-b
       run, and branch-field prints nothing
+  done --cwd PATH --main DIR --root PATH --project NAME --session ID
+       --window ID [--running NAME]... [--workspaces FILE] [--wt-json FILE]
+       [--diff FILE] [--own-status FILE] [--changes FILE]
+       [--main-state FILE] [--bd-json FILE] [--base-bookmarks FILE]
+       [--origin-head REF] [--no-fetch] [--dry-run]
+      audit the workspace the focused pane is in and, when nothing would be
+      lost, hand it back to Rex as `rex do work_done_go` -- else print why not
+      and take nothing apart
+        --cwd            the directory the focused pane is in
+        --main           the project's main worktree
+        --root           the wrapper holding main and the branch workspaces
+        --project        the project's name, as Rex knows it
+        --session        the Rex session whose tab is closed last
+        --window         the Rex window whose tab is closed last
+        --running        a program still running in the tab; repeat for each
+        --workspaces     a saved `jj workspace list -T` rendering, one
+                         "name<TAB>root" row per line, instead of asking jj
+        --wt-json        a saved `wt list --format=json`, instead of worktrunk
+        --diff           a saved `jj diff --summary` of the branch against its base
+        --own-status     a saved `jj diff --summary` of the working copy
+        --changes        a saved list of the change ids the branch holds
+        --main-state     a saved answer on what main holds beyond its parent
+        --bd-json        a saved `bd list --status in_progress --json`, holding
+                         the bead the branch is on
+        --base-bookmarks a saved `jj bookmark list`, as bases reads it
+        --origin-head    what origin/HEAD names, where the branch's base comes from
+        --no-fetch       do not fetch before the audit
+        --dry-run        print the hand-back instead of running it; the audit
+                         still fetches and refreshes main
+
+done is the key behind rex's "I'm done" flow: one press tears down the
+worktree, the branch, the jj workspace and the tab the pane is in. It asks
+first whether anything would be lost -- the paths say what to look at and the
+fixture seams above say where to look, so a run given them never touches the
+repository -- and prints every reason it will not go ahead as one block, then
+waits for a key, with nothing removed: that answer is exit 4, shown and
+stopped rather than failed. A clean run prints nothing of its own, hands the
+five paths to Rex and lets the tab close itself.
 
 --bd-json, --wt-json, --refs and --base-bookmarks read saved tool output instead
 of asking the tools, which is how the tests and dry runs work: --bd-json stands
@@ -171,6 +209,13 @@ wait_for_key() {
 # heredoc cannot interpolate this one.
 cancelled=3
 
+# The status a refused done leaves with: an answer that is not a failure -- the
+# block was shown and the flow stopped, and nothing was removed. The float
+# stays up for the key the block asks for, so this is not a status that closes
+# it. As with cancelled, the usage text says the number in prose, because a
+# quoted heredoc cannot interpolate it.
+refused=4
+
 # The first row of the bead question: not a bead, but the way to write a prompt
 # when the text would match a bead or needs more than fzf's one line. It carries
 # no id -- a marker no bead id can be -- so field 1 alone tells it from every
@@ -189,6 +234,19 @@ hold_pick() {
     rm -rf "$composer_state"
   fi
   if [ "$status" -ne 0 ] && [ "$status" -ne "$cancelled" ] && [ "$held" -eq 0 ]; then
+    wait_for_key
+  fi
+  exit "$status"
+}
+
+# On the way out of done -- usage_error's 2, die's 1, a missing tool's 1, rex's
+# own status -- hold the float with what it printed still on screen, as
+# hold_pick does. A refusal has already taken its key inside done_refuse and
+# says so through `held`, so it is not waited on twice. done keeps no state
+# directory, so there is nothing to remove here.
+hold_done() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ "$held" -eq 0 ]; then
     wait_for_key
   fi
   exit "$status"
@@ -1926,6 +1984,587 @@ cmd_pick() {
   fi
 }
 
+# The shape of every block this command prints: a title, a blank line, the lines
+# of the block, a blank line, and the one sentence that says nothing was
+# removed. Written once because a refusal and a set of blockers are the same
+# screen -- a person reading it wants every reason at once. The bead paragraph
+# is part of that shape too, and belongs here for the same reason: one place
+# prints a block, so one place says where the bead goes in it.
+done_print_block() {
+  local title=$1 line bead
+  shift
+  printf '%s\n\n' "$title"
+  for line in "$@"; do printf '%s\n' "$line"; done
+  bead=$(done_bead_line) || bead=''
+  if [ -n "$bead" ]; then
+    printf '\n%s\n' "$bead"
+  fi
+  printf '\nnothing was removed; press any key\n'
+}
+
+# The bead this workspace belongs to, as information and never as a reason: a
+# workspace and its bead are torn down together, so a claimed bead only says
+# what the block above is about. The workspace name carries the bead's hash
+# (feat/6c4 <-> rex-config-6c4), so the match is the last dash-separated
+# segment of an in_progress id. Nothing here changes a bead -- the flow
+# reports, and closes no bead it did not open -- and a list that cannot be
+# read, or that matches nothing, is silence: the refusal is no less true for
+# the bead being unknown.
+done_bead_line() {
+  local listing id status
+  # A bead is only named for a workspace that was found, and a refusal before
+  # done_workspace -- the wrapper, main, a directory no workspace owns -- has
+  # no name to match, so those blocks stay the one-line refusals they are.
+  [ -n "$name" ] || return 0
+  if [ -n "$bd_json" ]; then
+    listing=$(cat "$bd_json" 2>/dev/null) || return 0
+  else
+    # The whole read is silenced, not just bd: a bead list that cannot be read
+    # is silence, and bd or the directory it was asked in may be what is
+    # missing. Nothing about that belongs on a screen that shows reasons.
+    listing=$( ( cd "$main" && bd list --status in_progress --json ) 2>/dev/null ) ||
+      return 0
+  fi
+  [ -n "$listing" ] || return 0
+  # A row has to carry a real id and a real status to be named: the block is
+  # prose, and a missing field would print as the word "null" while an empty
+  # one would leave the sentence hanging.
+  while IFS=$'\t' read -r id status; do
+    [ "${id##*-}" = "${name##*/}" ] || continue
+    # "still" and not the bare status: every row in this list is an in_progress
+    # bead, and the sentence is why this workspace is not going anywhere yet.
+    printf '  bead %s is still %s\n' "$id" "$status"
+    break
+  done < <(printf '%s' "$listing" |
+    jq -r '.[] | select((.id // "") != "" and (.status // "") != "")
+      | "\(.id)\t\(.status)"' 2>/dev/null)
+  return 0
+}
+
+# Refuse: print the block, take the key the float waits for, and leave with the
+# status that says this was an answer rather than a failure. The float closes
+# when this script exits, so the wait is what keeps the message readable.
+done_refuse() {
+  done_print_block "$@"
+  wait_for_key
+  exit "$refused"
+}
+
+# A reason the flow will not go ahead. Collected rather than printed: the audit
+# asks several questions, and a person wants every reason in one block, in the
+# order the steps asked them. Appends to `done_lines`, declared in cmd_done.
+done_blocker() {
+  done_lines+=("$@")
+}
+
+# Stop on the reasons collected so far: done_refuse under the workspace's own
+# name, which is the title every blocker belongs to.
+done_stop() {
+  done_refuse "can't tear down $name" ${done_lines[@]+"${done_lines[@]}"}
+}
+
+# Fetch before anything is compared, because every comparison below is about
+# what origin has: a stale origin would clear a branch that is not merged.
+# Bounded, and with no terminal to prompt on -- a credential prompt has to fail
+# rather than hang the float. A failed fetch stops the audit: a comparison
+# against state this run could not refresh is worse than none.
+# --no-fetch is the seam a test or a dry run uses.
+done_fetch() {
+  local cmd='jj git fetch' out
+  if command -v timeout >/dev/null 2>&1; then
+    cmd="timeout 30 $cmd"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    cmd="gtimeout 30 $cmd"
+  fi
+  if ! out=$(cd "$main" && GIT_TERMINAL_PROMPT=0 $cmd 2>&1); then
+    # jj's own first line when it ran, and the place when it did not: a `cd`
+    # that failed prints nothing, and a reason ending in a colon with nothing
+    # after it names no reason at all.
+    [ -n "$out" ] || out="could not run jj in $main"
+    done_blocker "  the fetch failed, so nothing was compared: $(printf '%s' "$out" | sed -n 1p)"
+    done_stop
+  fi
+}
+
+# The revision the branch is compared against: the opening row of the base
+# cycle, which is the "<branch>@origin" rendering of what this clone clones.
+# Never a hard-coded main@origin -- a wrapper whose default branch is develop
+# would then compare the branch against a revision it never started from.
+done_base() {
+  base_chain "$main" "$bookmarks" "$origin_head" '' '' 'done' | sed -n 1p
+}
+
+# The two answers the moves below are guarded by, in the shape --main-state
+# saves: whether main's bookmark is contained in the base -- so moving it is a
+# move forward and never back -- and whether main's working copy is provably
+# empty, so moving it strands nothing. Both are read in main, because both are
+# about that workspace. --main-state is the seam a test or a dry run uses; the
+# saved answers are read here rather than at the call site so the two guards
+# read the same shape either way.
+done_main_state() {
+  local ahead at desc contained at_empty
+  if [ -n "$main_state" ]; then
+    cat "$main_state" || return 1
+    return 0
+  fi
+  # main's own commits are the ones the base does not have, asked as a set
+  # difference: an empty answer means every commit main has, the base has too,
+  # so the bookmark can only move forward.
+  ahead=$(cd "$main" && jj log -r "main ~ ::$base" --no-graph \
+    -T 'change_id.short() ++ "\n"') || return 1
+  if [ -z "$ahead" ]; then contained=yes; else contained=no; fi
+  # Provably empty is two answers, not one: nothing between @- and @, and no
+  # description on @. Each alone can be true of a working copy with work in it,
+  # and jj new over that work is the one loss this flow must not cause.
+  at=$(cd "$main" && jj diff --from @- --to @ --name-only) || return 1
+  desc=$(cd "$main" && jj log -r @ --no-graph -T 'description') || return 1
+  if [ -z "$at" ] && [ -z "$desc" ]; then at_empty=yes; else at_empty=no; fi
+  printf 'contained %s\nat-empty %s\n' "$contained" "$at_empty"
+}
+
+# Keep main current, and only ever forward: the bookmark first, then the working
+# copy, each behind its own guard, because either write run on the wrong
+# repository loses work -- a bookmark set onto a base main is not an ancestor
+# of is a move back, and jj new over a working copy with work in it strands
+# that work. A guard that cannot be made out is a blocker rather than a skip,
+# and it names the command that would clear it: an untidy main is one command
+# away from being tidy, and a main moved when it should not have been is a
+# loss. This runs whether the rest of the audit refused or not -- keeping main
+# current removes nothing, and the next branch starting from a stale base is
+# the failure this step exists to prevent.
+done_main_move() {
+  local key value contained=no at_empty=no moved=no state where="jj in $main"
+  [ -z "$main_state" ] || where=$main_state
+  state=$(done_main_state) || die "done: could not read main's state from $where"
+  while read -r key value; do
+    case $key in
+      contained) contained=$value ;;
+      at-empty) at_empty=$value ;;
+    esac
+  done <<<"$state"
+
+  # Neither write is allowed to abort the screen: `done_main_move` is called
+  # bare under `set -e`, and the flow's exit codes are 0/2/4 with jj's own
+  # failure belonging to none of them. A write jj refuses is therefore a
+  # blocker -- the person is told main was not refreshed, and the audit still
+  # prints every other reason it found. jj's message itself stays on stderr.
+  if [ "$contained" = yes ]; then
+    if ( cd "$main" && jj bookmark set main -r "$base" ); then
+      moved=yes
+    else
+      done_blocker "  main was not moved: jj refused to move its bookmark; run jj bookmark set main -r $base in $main"
+    fi
+  else
+    # No command here, because there is none: the commits are on main's own
+    # bookmark, so the decision is whether to push them or abandon them, and
+    # either answer is the person's. The working-copy move below is a command
+    # that does clear its guard, and says so.
+    done_blocker "  main was not moved: it has commits $base does not; the bookmark is yours to push or abandon"
+  fi
+
+  # The working copy moves only onto a base its bookmark has reached: with main's
+  # own commits still on the bookmark, jj new would take the checkout off them
+  # and leave a main whose working copy is not its branch -- half a refresh, and
+  # the half that would push a stale main. A working copy that is not provably
+  # empty is reported either way, because it is a reason main was not moved.
+  if [ "$at_empty" = no ]; then
+    done_blocker "  main's working copy was not moved: it is not empty; run jj new $base in $main"
+  elif [ "$moved" = yes ]; then
+    ( cd "$main" && jj new "$base" ) ||
+      done_blocker "  main's working copy was not moved; run jj new $base in $main"
+  fi
+}
+
+# The worktrunk worktree list as JSON: --wt-json when one is given, else
+# `wt list` asked from the main worktree, which is the worktree every wt call
+# uses. Reads `main` and `wt_json` from cmd_done, its only caller.
+done_wt_list() {
+  if [ -n "$wt_json" ]; then
+    cat "$wt_json" ||
+      die "done: could not read the worktree list from $wt_json"
+  else
+    ( cd "$main" && wt list --format=json ) ||
+      die "done: could not read the worktrees of $main"
+  fi
+}
+
+# The worktrunk worktree path that is exactly $1, or nothing.
+done_wt_path() {
+  done_wt_list |
+    jq -r --arg path "$1" '
+      (.items // [])
+      | map(.worktree.path // "")
+      | map(select(. == $path))
+      | .[0] // ""
+    '
+}
+
+# The worktrunk worktree that owns $1, or nothing: the longest listed path
+# that is $1 or a directory of it, compared as whole path segments as jj's
+# roots are.
+done_wt_owner() {
+  done_wt_list |
+    jq -r --arg want "$1" '
+      (.items // [])
+      | map(.worktree.path // "")
+      | map(select(. as $path | $want == $path or ($want | startswith($path + "/"))))
+      | sort_by(length)
+      | .[-1] // ""
+    '
+}
+
+# The workspace the pane is in, left in the caller's `name` and `root_path`, or
+# a refusal. Reads `cwd`, `main`, `root` and `workspaces` from cmd_done, its
+# only caller -- and `wt_json` through done_wt_path -- and answers in those two
+# variables rather than on stdout, because a refusal printed inside a command
+# substitution would be caught by the capture instead of reaching the screen.
+#
+# Roots nest -- jj's default workspace is the wrapper itself, main is a
+# directory inside it, and a branch's workspace is another -- so the longest
+# listed root that owns cwd is the answer, compared as whole path segments so
+# that /p/demo/feat-6c41 is not read as /p/demo/feat-6c4.
+done_workspace() {
+  case $cwd in
+    "$main" | "$main"/* | "$root")
+      done_refuse "can't tear down the main worktree" \
+        "  $cwd is the main worktree, not a workspace this flow removes"
+      ;;
+  esac
+
+  local listed best_name='' best_root='' row_name row_path wt_path='' wt_owner=''
+  if [ -n "$workspaces" ]; then
+    listed=$(cat "$workspaces") ||
+      die "done: could not read the workspace list from $workspaces"
+  else
+    listed=$( cd "$cwd" && jj workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
+      die "done: could not read the jj workspaces of $cwd"
+  fi
+
+  while IFS=$'\t' read -r row_name row_path; do
+    [ -n "$row_name" ] || continue
+    # The wrapper is jj's default workspace -- the directory main and the
+    # branch workspaces sit in -- and it is refused above by name. Left in the
+    # scan it would claim every directory under the wrapper that no other
+    # workspace owns, and read one of those as "a jj row with no worktree" when
+    # it is not a workspace at all.
+    [ "$row_path" != "$root" ] || continue
+    case $cwd in
+      "$row_path" | "$row_path"/*)
+        if [ ${#row_path} -gt ${#best_root} ]; then
+          best_name=$row_name
+          best_root=$row_path
+        fi
+        ;;
+    esac
+  done <<<"$listed"
+
+  if [ -z "$best_root" ]; then
+    # A worktree jj has no row for is the other half of the same disagreement:
+    # worktrunk would be asked to remove a path jj does not believe is a
+    # workspace, so it is refused, naming the worktree and jj's silence both.
+    wt_owner=$(done_wt_owner "$cwd") || exit $?
+    if [ -n "$wt_owner" ]; then
+      done_refuse "can't tear down $wt_owner" \
+        "  worktrunk has a worktree at $wt_owner, but jj lists no workspace there"
+    fi
+    done_refuse "can't tear down $cwd" \
+      "  $cwd is not inside a jj workspace this wrapper knows about"
+  fi
+
+  # The two halves have to agree before anything is removed: a jj row with no
+  # worktree, or a worktree with no row, is the state that is hard to unpick --
+  # and the one a person cannot repair from the float.
+  wt_path=$(done_wt_path "$best_root") || exit $?
+  if [ -z "$wt_path" ]; then
+    done_refuse "can't tear down $best_name" \
+      "  jj lists this workspace at $best_root, but worktrunk has no worktree there"
+  fi
+
+  name=$best_name
+  root_path=$best_root
+}
+
+# `new-work.sh done --cwd PATH --main DIR --root PATH --project NAME
+#                 --session ID --window ID [...]`
+#
+# The audit behind rex's "I'm done" key, end to end: the workspace the focused
+# pane is in is found, the fetch and the two store questions are asked, the
+# tab's programs and main's own refresh are added to them, and the answer is one
+# of two things -- the block of every reason it found, in the order they were
+# asked (exit 4, nothing removed), or the hand-back that lets Rex do the removal.
+cmd_done() {
+  local cwd='' main='' root='' project='' session='' window=''
+  local name='' root_path=''
+  # Read by the steps this command grows into -- the fetch, the two store
+  # blockers, the programs still running in the tab, main's fast-forward and the
+  # hand-back. They are parsed here so a missing value is refused as a usage
+  # error now rather than surfacing as an empty answer later.
+  local workspaces='' wt_json='' diff='' own_status='' changes='' main_state=''
+  local bd_json='' bookmarks='' origin_head='' running=''
+  local no_fetch=0 dry_run=0
+  # The blockers collected so far, and what the two store questions leave
+  # behind: the base revision, the branch's diff against it, and the working
+  # copy's own diff -- each either jj's answer or the saved one above.
+  local done_lines=() base='' range='' own='' count=0 own_count=0 p=''
+  local paths=()
+
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --cwd)
+        [ $# -ge 2 ] || usage_error 'done: --cwd needs a directory'
+        cwd=$2
+        shift 2
+        ;;
+      --main)
+        [ $# -ge 2 ] || usage_error 'done: --main needs a directory'
+        main=$2
+        shift 2
+        ;;
+      --root)
+        [ $# -ge 2 ] || usage_error 'done: --root needs a path'
+        root=$2
+        shift 2
+        ;;
+      --project)
+        [ $# -ge 2 ] || usage_error 'done: --project needs a name'
+        project=$2
+        shift 2
+        ;;
+      --session)
+        [ $# -ge 2 ] || usage_error 'done: --session needs an id'
+        session=$2
+        shift 2
+        ;;
+      --window)
+        [ $# -ge 2 ] || usage_error 'done: --window needs an id'
+        window=$2
+        shift 2
+        ;;
+      # One --running per program, in the order they are listed: the block
+      # names them in one comma-separated line.
+      --running)
+        [ $# -ge 2 ] || usage_error 'done: --running needs a name'
+        # An empty name would erase the reason instead of naming it: the
+        # accumulation below would leave $running empty, and a tab with a
+        # program in it would look idle. Whitespace alone is the same defect
+        # in a different shape -- the block would read "still running in this
+        # tab: " and name nothing -- so the spaces come out before the guard
+        # reads the value.
+        [ -n "${2//[[:space:]]/}" ] || usage_error 'done: --running needs a name'
+        running=${running:+$running, }$2
+        shift 2
+        ;;
+      --workspaces)
+        [ $# -ge 2 ] || usage_error 'done: --workspaces needs a file'
+        workspaces=$2
+        shift 2
+        ;;
+      --wt-json)
+        [ $# -ge 2 ] || usage_error 'done: --wt-json needs a file'
+        wt_json=$2
+        shift 2
+        ;;
+      --diff)
+        [ $# -ge 2 ] || usage_error 'done: --diff needs a file'
+        diff=$2
+        shift 2
+        ;;
+      --own-status)
+        [ $# -ge 2 ] || usage_error 'done: --own-status needs a file'
+        own_status=$2
+        shift 2
+        ;;
+      --changes)
+        [ $# -ge 2 ] || usage_error 'done: --changes needs a file'
+        changes=$2
+        shift 2
+        ;;
+      --main-state)
+        [ $# -ge 2 ] || usage_error 'done: --main-state needs a file'
+        main_state=$2
+        shift 2
+        ;;
+      --bd-json)
+        [ $# -ge 2 ] || usage_error 'done: --bd-json needs a file'
+        bd_json=$2
+        shift 2
+        ;;
+      --base-bookmarks)
+        [ $# -ge 2 ] || usage_error 'done: --base-bookmarks needs a file'
+        bookmarks=$2
+        shift 2
+        ;;
+      --origin-head)
+        [ $# -ge 2 ] || usage_error 'done: --origin-head needs a ref'
+        origin_head=$2
+        shift 2
+        ;;
+      --no-fetch)
+        no_fetch=1
+        shift
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      *) usage_error "done: unknown option $1" ;;
+    esac
+  done
+
+  [ -n "$cwd" ] || usage_error 'done: need --cwd PATH'
+  [ -n "$main" ] || usage_error 'done: need --main DIR'
+  [ -n "$root" ] || usage_error 'done: need --root PATH'
+  [ -n "$project" ] || usage_error 'done: need --project NAME'
+  [ -n "$session" ] || usage_error 'done: need --session ID'
+  [ -n "$window" ] || usage_error 'done: need --window ID'
+
+  # Rex reads these paths against its own working directory, not this one, so
+  # each has to say where it is -- the same guard pick makes for its hand-back.
+  need_absolute 'done: --cwd' "$cwd"
+  need_absolute 'done: --main' "$main"
+  need_absolute 'done: --root' "$root"
+
+  # These two are compared as strings -- $cwd is "$main" or "$main"/... and
+  # "$root" or "$root"/..., and jj's rows are compared to "$root" -- so
+  # /p/demo/ and /p/demo would answer differently. A trailing slash on --main
+  # stops the main worktree being recognised as one, which is the one answer
+  # this flow must never give, and one on --root stops the wrapper row being
+  # recognised at all. One form for each, decided here: every slash goes, not
+  # just the last, and a bare / is left with its one.
+  while [ "$main" != / ] && [ "${main%/}" != "$main" ]; do main=${main%/}; done
+  while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root=${root%/}; done
+
+  # Every payload this command reads is JSON, read through jq like the rest of
+  # this file's, and worktrunk is the other tool that answers -- unless a saved
+  # list stands in for it, which is the seam a test or a dry run uses.
+  need jq
+  [ -n "$wt_json" ] || need wt
+
+  # jj is read from --cwd and worktrunk from --main, unless a saved answer
+  # stands in for one of them, so a directory that is not there is refused here
+  # by name: left to the `cd` in the subshell that reads it, the failure reads
+  # as a line number in this script rather than as a place that does not exist.
+  [ -n "$workspaces" ] || [ -d "$cwd" ] || die "done: no such directory: $cwd"
+  [ -n "$wt_json" ] || [ -d "$main" ] || die "done: no such directory: $main"
+
+  done_workspace
+
+  # The fetch comes before every comparison, because each one below is about what
+  # origin has.
+  if [ "$no_fetch" -eq 0 ]; then
+    done_fetch
+  fi
+
+  # What the branch has that its base does not, as content. Content rather than
+  # reachability: a change that was already merged is absent from this diff even
+  # when its change id is still in the range, which is what a squash merge
+  # leaves behind -- and refusing it would be refusing work that is not there.
+  # --diff and --changes are the two answers saved, and a run given them asks jj
+  # for neither.
+  base=$(done_base)
+  if [ -z "$base" ]; then
+    done_blocker "  no base revision could be resolved for this clone"
+    done_stop
+  fi
+
+  if [ -n "$diff" ]; then
+    range=$(cat "$diff") || die "done: could not read the diff from $diff"
+  else
+    range=$(cd "$root_path" && jj diff --summary -r "$base..@") ||
+      die "done: could not read the changes of $root_path"
+  fi
+  if [ -n "$range" ]; then
+    if [ -n "$changes" ]; then
+      [ -r "$changes" ] || die "done: could not read the change list from $changes"
+      count=$(grep -c . "$changes" || true)
+    else
+      count=$(cd "$root_path" && jj log -r "$base..@" --no-graph \
+        -T 'change_id.short() ++ "\n"' | grep -c . || true)
+    fi
+    paths=()
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      # "M path" and "A path" both carry a two-character status.
+      paths+=("${p#??}")
+    done <<<"$range"
+    done_blocker "  changes not merged into $base: $count change$([ "$count" -eq 1 ] || echo s), ${#paths[@]} path$([ ${#paths[@]} -eq 1 ] || echo s)"
+    for p in ${paths[@]+"${paths[@]}"}; do
+      done_blocker "    $p"
+    done
+  fi
+
+  # The working copy's own changes go with the workspace, so they stop it too.
+  # One line and no path list: the person is looking at those files already, and
+  # there can be a great many of them.
+  if [ -n "$own_status" ]; then
+    own=$(cat "$own_status") ||
+      die "done: could not read the working copy status from $own_status"
+  else
+    own=$(cd "$root_path" && jj diff --summary -r @) ||
+      die "done: could not read the working copy of $root_path"
+  fi
+  if [ -n "$own" ]; then
+    own_count=0
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      own_count=$((own_count + 1))
+    done <<<"$own"
+    done_blocker "  working copy has changes: $own_count path$([ "$own_count" -eq 1 ] || echo s)"
+  fi
+
+  # A program still running in the tab is the next question: it is the one
+  # blocker the person can clear without touching jj or worktrunk, so it
+  # belongs on the same screen rather than on one of its own. The names are
+  # already one comma-separated list, in the order the tab listed them.
+  [ -z "$running" ] || done_blocker "  still running in this tab: $running"
+
+  # Then main itself: the flow's only writes beyond the fetch, made here --
+  # before the block is printed rather than after it -- because keeping main
+  # current is desirable on its own. Neither move removes anything, and the
+  # next branch starting from a stale base is what this step exists to prevent.
+  # A move its guard refuses adds its own line instead, after the reasons above
+  # and before the bead.
+  done_main_move
+
+  # One screen for all of them, in the order they were asked: the reasons
+  # above, then main's two lines, then the bead the workspace belongs to.
+  if [ ${#done_lines[@]} -gt 0 ]; then
+    done_stop
+  fi
+
+  # Nothing is in the way, so the removal goes back to Rex: worktrunk's steps,
+  # the hook and the two verifications are the tab's work, and what this script
+  # has left to say is which workspace it means. The five keys are the whole
+  # contract -- `workspace` is the name the tab carries and `path` the worktree
+  # worktrunk removes -- and jq builds them so a path with a quote or a space in
+  # it cannot break the hand-back.
+  local payload
+  payload=$(jq -cn \
+    --arg project "$project" --arg root "$root" --arg main "$main" \
+    --arg workspace "$name" --arg path "$root_path" \
+    '{project: $project, root: $root, main: $main, workspace: $workspace, path: $path}')
+
+  if [ "$dry_run" -eq 1 ]; then
+    printf 'rex do work_done_go --args %s\n' "$(shell_quote "$payload")"
+    return 0
+  fi
+
+  # The hand-back is the last thing that can fail while the float still exists,
+  # so its failure is the one line this run prints: rex says why on this
+  # terminal, and this says that the hand-back did not finish.
+  local handed=0
+  rex do work_done_go --args "$payload" || handed=$?
+  if [ "$handed" -ne 0 ]; then
+    die "could not finish the hand-back: rex exited $handed"
+  fi
+
+  # The tab goes last, and nothing may follow it: closing a window kills the
+  # block that asked, which is this script. The cd comes first because the
+  # workspace under this script's own cwd has been removed by now.
+  cd "$main" || die "could not enter $main to close the tab"
+  rex window close -s "$session" "$window"
+}
+
 case ${1:-} in
   beads)
     shift
@@ -1961,6 +2600,13 @@ case ${1:-} in
     # pause that keeps its message on screen is taken in one place.
     trap hold_pick EXIT
     cmd_pick "$@"
+    ;;
+  done)
+    shift
+    # Every way the flow can stop passes through here on its way out, so the
+    # pause that keeps a message on screen is taken in one place.
+    trap hold_done EXIT
+    cmd_done "$@"
     ;;
   *)
     usage_error "unknown command ${1:-<none>}"

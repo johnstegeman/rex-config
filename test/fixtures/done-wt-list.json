@@ -1,0 +1,8 @@
+{
+  "schema": 2,
+  "repo": { "default_branch": "main", "forge": { "remote": "origin" } },
+  "items": [
+    { "branch": "main", "worktree": { "path": "/p/demo/main", "main": true } },
+    { "branch": "feat/6c4", "worktree": { "path": "/p/demo/feat-6c4", "main": false } }
+  ]
+}
