@@ -1985,13 +1985,54 @@ cmd_pick() {
 # The shape of every block this command prints: a title, a blank line, the lines
 # of the block, a blank line, and the one sentence that says nothing was
 # removed. Written once because a refusal and a set of blockers are the same
-# screen -- a person reading it wants every reason at once.
+# screen -- a person reading it wants every reason at once. The bead paragraph
+# is part of that shape too, and belongs here for the same reason: one place
+# prints a block, so one place says where the bead goes in it.
 done_print_block() {
-  local title=$1 line
+  local title=$1 line bead
   shift
   printf '%s\n\n' "$title"
   for line in "$@"; do printf '%s\n' "$line"; done
+  bead=$(done_bead_line) || bead=''
+  if [ -n "$bead" ]; then
+    printf '\n%s\n' "$bead"
+  fi
   printf '\nnothing was removed; press any key\n'
+}
+
+# The bead this workspace belongs to, as information and never as a reason: a
+# workspace and its bead are torn down together, so a claimed bead only says
+# what the block above is about. The workspace name carries the bead's hash
+# (feat/6c4 <-> rex-config-6c4), so the match is the last dash-separated
+# segment of an in_progress id. Nothing here changes a bead -- the flow
+# reports, and closes no bead it did not open -- and a list that cannot be
+# read, or that matches nothing, is silence: the refusal is no less true for
+# the bead being unknown.
+done_bead_line() {
+  local listing id status
+  [ -n "$name" ] || return 0
+  if [ -n "$bd_json" ]; then
+    listing=$(cat "$bd_json" 2>/dev/null) || return 0
+  else
+    # The whole read is silenced, not just bd: a bead list that cannot be read
+    # is silence, and bd or the directory it was asked in may be what is
+    # missing. Nothing about that belongs on a screen that shows reasons.
+    listing=$( ( cd "$main" && bd list --status in_progress --json ) 2>/dev/null ) ||
+      return 0
+  fi
+  [ -n "$listing" ] || return 0
+  # Only a row that carries both an id and a status can be named: the block is
+  # prose, and a missing field there would print as the word "null".
+  while IFS=$'\t' read -r id status; do
+    [ "${id##*-}" = "${name##*/}" ] || continue
+    # "still" and not the bare status: every row in this list is an in_progress
+    # bead, and the sentence is why this workspace is not going anywhere yet.
+    printf '  bead %s is still %s\n' "$id" "$status"
+    break
+  done < <(printf '%s' "$listing" |
+    jq -r '.[] | select(.id != null and .status != null)
+      | "\(.id)\t\(.status)"' 2>/dev/null)
+  return 0
 }
 
 # Refuse: print the block, take the key the float waits for, and leave with the
@@ -2373,16 +2414,22 @@ cmd_done() {
     done_blocker "  working copy has changes: $own_count path$([ "$own_count" -eq 1 ] || echo s)"
   fi
 
+  # A program still running in the tab is the next question, and the last of the
+  # reasons collected here: it is the one blocker the person can clear without
+  # touching jj or worktrunk, so it belongs on the same screen rather than on
+  # one of its own. The names are already one comma-separated list, in the order
+  # the tab listed them.
+  [ -z "$running" ] || done_blocker "  still running in this tab: $running"
+
   # One screen for all of them, in the order they were asked. The steps that
   # follow add their blockers above this line and stop here with them.
   if [ ${#done_lines[@]} -gt 0 ]; then
     done_stop
   fi
 
-  # What is left -- the programs still running in the tab, main's fast-forward,
-  # the hand-back and the close -- is the work of the steps that follow. A clean
-  # run prints nothing of its own and leaves 0, and `name` with `root_path` is
-  # what those steps read.
+  # What is left -- main's fast-forward, the hand-back and the close -- is the
+  # work of the steps that follow. A clean run prints nothing of its own and
+  # leaves 0, and `name` with `root_path` is what those steps read.
   return 0
 }
 

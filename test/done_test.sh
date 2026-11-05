@@ -345,6 +345,76 @@ ran=$((ran + 1))
 ! grep -q 'argv=diff' "$tmp/jj-args" ||
   fail "no comparison runs after a failed fetch" "$(cat "$tmp/jj-args")"
 
+# --- The programs still running, and the bead the workspace belongs to ---
+
+# A program still running in the tab is a reason not to tear it down, and the
+# names come in the order they were given, in one comma-separated line.
+run_done --running pi --running node
+want_status "a running program is a blocker" 4
+want_out "the running block" "can't tear down feat/6c4
+
+  still running in this tab: pi, node
+
+nothing was removed; press any key"
+
+# The bead is information, not a reason: on a clean run it prints nothing at
+# all, because a run that removes the workspace has no screen.
+run_done --bd-json test/fixtures/done-beads.json
+want_status "a claimed bead is not a blocker on its own" 0
+want_out "a claimed bead on a clean run prints nothing" ""
+
+# With a blocker it says which bead this workspace is, in a paragraph of its
+# own, after the reasons and before the footer.
+DONE_OWN=test/fixtures/done-own-status.txt run_done --bd-json test/fixtures/done-beads.json
+want_status "a claimed bead with a dirty copy is a refusal" 4
+want_out "the bead line sits after the blockers" "can't tear down feat/6c4
+
+  working copy has changes: 2 paths
+
+  bead rex-config-6c4 is still in_progress
+
+nothing was removed; press any key"
+
+# A bead list that matches nothing, and a bead read that fails, are both
+# silence rather than a failure: naming the bead is a courtesy, and a
+# workspace whose bead cannot be read is still a workspace.
+run_done --bd-json "$tmp/clean-changes"
+want_status "no matching bead is silence" 0
+run_done --bd-json /nonexistent
+want_status "an unreadable bead list is silence" 0
+
+# A row with no status is not a bead line: the block is prose, and a missing
+# field would reach it as the word "null".
+printf '[{"id":"rex-config-6c4"}]' >"$tmp/beads-no-status"
+DONE_OWN=test/fixtures/done-own-status.txt run_done --bd-json "$tmp/beads-no-status"
+want_status "a bead row with no status is still a refusal" 4
+want_out "the dirty block with no bead paragraph" "can't tear down feat/6c4
+
+  working copy has changes: 2 paths
+
+nothing was removed; press any key"
+
+# Everything at once (Review Focus 4): the pinned order, the bead paragraph
+# in its place, and exactly one "nothing was removed" line.
+printf 'aaa111\nbbb222\nccc333\n' >"$tmp/changes-3"
+DONE_DIFF=test/fixtures/done-diff.txt DONE_CHANGES=$tmp/changes-3 \
+  DONE_OWN=test/fixtures/done-own-status.txt run_done \
+  --running pi --running node --bd-json test/fixtures/done-beads.json
+want_status "every blocker at once is a refusal" 4
+want_out "the whole block" "can't tear down feat/6c4
+
+  changes not merged into main@origin: 3 changes, 4 paths
+    init.lua
+    new-work.sh
+    docs/plan.md
+    test/run.sh
+  working copy has changes: 2 paths
+  still running in this tab: pi, node
+
+  bead rex-config-6c4 is still in_progress
+
+nothing was removed; press any key"
+
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
   exit 1
