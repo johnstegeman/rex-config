@@ -390,20 +390,32 @@ confirmation: with nothing at risk, the tab going away is the feedback.
    prompt; `--format=json` so the reply can be read rather than guessed. No `-f`,
    `-D`, no `--reap`, no `--no-hooks`: if worktrunk refuses on its own terms,
    that refusal is the report.
-2. **The branch really went.** `branch_outcome` must be `deleted`. Anything else
-   — `retained_unmerged`, `retained_checked_out`, or a field that is not there —
-   is a **failure**, reported with the branch's name and
-   `wt remove <path> -D` as the command that would finish it. `-D` is not run by
-   the flow: if worktrunk and the audit disagree about merged, the person
-   decides.
+2. **The branch really went.** The reply is an array — one entry per removal,
+   and this flow removes one path — so the entry's `branch_outcome` is what is
+   read. `deleted` is complete. `not_attempted` with no `branch` is complete
+   too, and it is the *normal* answer here: a jj wrapper's workspaces are
+   detached (`gws` adds them with `jj workspace add`, and nothing attaches a
+   branch), so worktrunk has nothing to delete and leaves nothing behind.
+   Anything else — `retained_unmerged`, `retained_checked_out`,
+   `retained_raced`, `retained_failed`, a field that is not there, or a value
+   this flow does not know — is a **failure**, reported with the branch's name
+   and `wt remove -D <branch>` as the command that would finish it: the
+   worktree's path is gone by then, so the branch is the only thing left to
+   name. `-D` is not run by the flow: if worktrunk and the audit disagree about
+   merged, the person decides. A bookmark or a branch ref that survives the
+   removal is not this case at all: Step 8 owns bookmarks, and the flow neither
+   deletes nor reports one.
 3. **Verify the store, rather than trust the hook.** `jj workspace list` must no
-   longer list the name, and `wt list --format=json` must no longer show the
-   path. This is the check the bead's comment asked for, because the seeded hook
-   ends in `|| true` and a background hook can fail silently — and because it
-   runs after the removal has returned, the row is given a bounded moment (a few
-   reads totalling about two seconds) before it counts as left behind, so a row
-   a healthy hook clears a moment later is not a failure. A surviving jj row is
-   reported with the one command that would clear it.
+   longer list the name — read with `--ignore-working-copy`, because the
+   background hook is forgetting the workspace in this same repository and a
+   plain read would wait on the working-copy lock that hook holds — and
+   `wt list --format=json` must no longer show the path. This is the check the
+   bead's comment asked for, because the seeded hook ends in `|| true` and a
+   background hook can fail silently — and because it runs after the removal has
+   returned, the row is given a bounded moment (a few reads totalling about two
+   seconds) before it counts as left behind, so a row a healthy hook clears a
+   moment later is not a failure. A surviving jj row is reported with the one
+   command that would clear it.
 4. **Return.** Success returns nothing; every failure returns its line, which
    Rex prints on the float's terminal and which makes `rex do` exit non-zero.
 
@@ -491,8 +503,13 @@ part of this change that is not code in a worktree.
   finished, and the row is still there at the end of the wait. Reported with
   the exact command to finish by hand, on the float that stays.
 - **The removal succeeds, the branch is retained** — reported with
-  `wt remove <path> -D`, and the tab does **not** close (nothing is closed on any
-  failure), so the person can finish from where they are.
+  `wt remove -D <branch>` — the branch, not the path, because the worktree is
+  gone by the time the line is read — and the tab does **not** close (nothing is
+  closed on any failure), so the person can finish from where they are.
+- **The workspace is detached** — the jj wrapper's normal case, since `gws`
+  adds workspaces with `jj workspace add` and nothing attaches a branch. There
+  is no branch for worktrunk to delete, it says `not_attempted`, and that is a
+  completed teardown: nothing was left behind to report.
 - **The window will not close** — the last act failed and nothing is left running
   to say so. Accepted and documented: the directories and the workspace row are
   already gone by then, so the residue is a tab whose shell is in a deleted
@@ -538,9 +555,12 @@ Everything runs from `bash test/run.sh`, no pty.
   process, including a tab whose second block runs `node`, and none for a tab of
   bare shells); `block.process` failing to answer produces a `--running` entry
   rather than silence. `M.work_done_go` runs `wt remove <path> --foreground -y
-  --format=json` with `cwd = main`, and **never** closes a window: a stub reply
-  with `branch_outcome = "deleted"` returns success; `retained_unmerged` returns
-  the branch line; a surviving `jj workspace list` row returns the leftover-row
+  --format=json` with `cwd = main`, and **never** closes a window: the removal's
+  reply is read from `test/fixtures` as worktrunk writes it — an array, one entry
+  per removal — so a `deleted` entry returns success and so does the detached
+  `not_attempted` one, `retained_unmerged` returns the branch line naming
+  `wt remove -D <branch>`, and an entry with no `branch_outcome` fails; a
+  surviving `jj workspace list` row returns the leftover-row
   line only after the list has been read again within the wait, and a row the
   next read loses is a success; a `wt` that exits non-zero returns its stderr.
 - **`test/setup_test.lua`** — both actions are registered, `work_done` has

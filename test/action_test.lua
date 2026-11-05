@@ -513,16 +513,49 @@ end
 -- The audit's answer, carried out: one removal through the login shell in the main
 -- worktree, then the reads that decide whether it happened -- the branch worktrunk
 -- reported, the jj row the seeded hook may have left behind, and the worktree
--- listing. Each case gives the removal its own reply and says what the documents
--- decode to; a command the flow did not run has no reply at all, so a wrong argv
--- fails here instead of answering plausibly.
+-- listing. The removal's reply is read from test/fixtures, where each file holds
+-- worktrunk's own reply shape -- an array, one entry per removal -- as measured on
+-- the installed wt; the value rex.json.decode makes of that text is written beside
+-- it. Each case gives the removal its own reply and says what the documents decode
+-- to; a command the flow did not run has no reply at all, so a wrong argv fails
+-- here instead of answering plausibly.
 
 local REMOVE = "wt remove '/p/demo/feat-6c4' --foreground -y --format=json"
-local WORKSPACES = [[jj workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+-- Read from the op log rather than the working copy: the background post-remove
+-- hook is running `jj workspace forget` in the same repository, and a plain read
+-- waits on the working-copy lock that hook holds.
+local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
 local WORKTREES = "wt list --format=json"
 
--- A completed removal, and the two listings a completed teardown leaves.
-local REMOVED = { code = 0, stdout = '{"branch_outcome":"deleted"}', stderr = "" }
+-- One fixture, exactly as worktrunk wrote it.
+local function fixture(name)
+  local file = assert(io.open(here .. "/fixtures/" .. name, "rb"))
+  local text = file:read("*a")
+  file:close()
+  return text
+end
+
+-- A successful exit for the command whose text it is.
+local function reply(text)
+  return { code = 0, stdout = text, stderr = "" }
+end
+
+-- The three removals a worktree can have: an attached branch worktrunk deleted,
+-- one it kept because the work was unmerged, and the detached workspace a jj
+-- wrapper produces, which has no branch to delete. `branch` is null in the last
+-- one, which is nil here, because rex.json.decode turns null into nil.
+local REMOVED = fixture("wt-remove-deleted.json")
+local RETAINED = fixture("wt-remove-retained.json")
+local DETACHED = fixture("wt-remove-detached.json")
+
+local DELETED_ENTRY = { kind = "worktree", branch = "feat/x", path = "/p/demo/feat-x",
+  branch_outcome = "deleted" }
+local RETAINED_ENTRY = { kind = "worktree", branch = "feat/x", path = "/p/demo/feat-x",
+  branch_outcome = "retained_unmerged" }
+local DETACHED_ENTRY = { kind = "worktree", path = "/p/demo/feat-6c4",
+  branch_outcome = "not_attempted" }
+
+-- The two listings a completed teardown leaves.
 local WORKSPACES_CLEAR = {
   code = 0, stdout = "default\t/p/demo\nmain\t/p/demo/main\n", stderr = "",
 }
@@ -544,12 +577,14 @@ end
 -- reads rather than let an unread document pass as an empty one.
 local function go_stub(by_command, documents)
   local stub = fresh_rex()
-  stub.exec_replies[REMOVE] = REMOVED
+  stub.exec_replies[REMOVE] = reply(REMOVED)
   stub.exec_replies[WORKSPACES] = WORKSPACES_CLEAR
   stub.exec_replies[WORKTREES] = WORKTREES_CLEAR
-  for command, reply in pairs(by_command or {}) do stub.exec_replies[command] = reply end
+  for command, value in pairs(by_command or {}) do stub.exec_replies[command] = value end
   stub.json_replies = {
-    [REMOVED.stdout] = { branch_outcome = "deleted" },
+    [REMOVED] = { DELETED_ENTRY },
+    [RETAINED] = { RETAINED_ENTRY },
+    [DETACHED] = { DETACHED_ENTRY },
     [WORKTREES_CLEAR.stdout] = { items = { { branch = "main",
       worktree = { path = "/p/demo/main", main = true } } } },
   }
@@ -594,30 +629,44 @@ do
 end
 
 -- A branch worktrunk kept is a failure, reported with the one command that would
--- finish the job: -D is the person's to run, never the flow's.
+-- finish the job: -D is the person's to run, never the flow's. The command names
+-- the *branch*, because the worktree's path is gone by the time this line is read.
 do
-  local kept = '{"branch_outcome":"retained_unmerged"}'
-  local stub = go_stub({ [REMOVE] = { code = 0, stdout = kept, stderr = "" } },
-    { [kept] = { branch_outcome = "retained_unmerged" } })
+  local stub = go_stub({ [REMOVE] = reply(RETAINED) })
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a kept branch fails", ok, false)
-  contains("the kept branch is named", said, "feat/6c4")
+  contains("the kept branch names the branch", said, "feat/x")
+  contains("the kept branch says what worktrunk did", said, "retained_unmerged")
   contains("the kept branch names the command that would finish it", said,
-    "wt remove '/p/demo/feat-6c4' -D")
+    "wt remove -D 'feat/x'")
   eq("a kept branch verifies nothing", #stub.exec_calls, 1)
 end
 
--- A reply with no branch_outcome at all is a failure, not a pass (Review Focus
--- 3): worktrunk said nothing about the branch, and nothing is not deleted.
+-- A detached worktree is the jj wrapper's normal case: `gws` adds workspaces with
+-- `jj workspace add` and nothing attaches a branch, so worktrunk has no branch to
+-- delete and says `not_attempted`. Nothing was left behind, so the teardown is
+-- complete -- and it still verifies both stores and closes nothing.
 do
-  local bare = '{"removed":true}'
-  go_stub({ [REMOVE] = { code = 0, stdout = bare, stderr = "" } },
-    { [bare] = { removed = true } })
+  local stub = go_stub({ [REMOVE] = reply(DETACHED) })
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a detached workspace is a complete teardown", ok, true)
+  eq("a detached teardown returns nothing", result, nil)
+  eq("a detached teardown still verifies both stores", stub.events,
+    { REMOVE, WORKSPACES, WORKTREES })
+  eq("a detached teardown closes nothing", #stub.calls, 0)
+end
+
+-- An entry with no branch_outcome at all is a failure, not a pass (Review Focus
+-- 3): worktrunk said nothing about the branch, and nothing is not deleted. With
+-- no branch named either, the report falls back to the workspace's own name.
+do
+  local bare = '[{"removed":true}]'
+  go_stub({ [REMOVE] = reply(bare) }, { [bare] = { { removed = true } } })
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a reply without branch_outcome fails", ok, false)
   contains("the missing outcome is said out loud", said, "worktrunk said nothing")
-  contains("the missing outcome still names -D", said,
-    "wt remove '/p/demo/feat-6c4' -D")
+  contains("the missing outcome falls back to the workspace's name", said,
+    "wt remove -D 'feat/6c4'")
 end
 
 -- The seeded hook ends in || true, so the jj row is verified rather than
@@ -745,7 +794,7 @@ do
     "'/p/demo/feat-6c4'")
 
   local awkward = "wt remove '/p/demo/it'\\''s here' --foreground -y --format=json"
-  local stub = go_stub({ [awkward] = REMOVED })
+  local stub = go_stub({ [awkward] = reply(REMOVED) })
   local ok = pcall(M.work_done_go, {}, removal{ path = "/p/demo/it's here" })
   eq("the removal quotes the path as one word", ok, true)
   eq("the quoted path is what the login shell ran",

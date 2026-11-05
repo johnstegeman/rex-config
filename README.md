@@ -480,9 +480,17 @@ With nothing in the way the audit prints no block and asks no question. It hands
 five keys back to the action `work_done_go` — the project, the wrapper, the main
 worktree, the workspace's name and its directory — and the teardown itself is
 four steps. `wt remove '<path>' --foreground -y --format=json`, run from the
-main worktree, takes the worktree away and deletes the branch with it, and the
-reply's `branch_outcome` has to say `deleted`. The project's own `post-remove`
-hook — the `jj workspace forget {{ branch }}` line `ginit` seeds into
+main worktree, takes the worktree away — and, when the worktree has a branch,
+the branch with it. In a jj wrapper it usually has none: `gws` adds workspaces
+with `jj workspace add` and nothing attaches a branch to them, so there is
+nothing for worktrunk to delete and its reply's `branch_outcome` says
+`not_attempted`, which this flow reads as a completed teardown. `deleted` is
+the other complete answer; anything else — `retained_unmerged`, or a reply that
+says nothing — is reported. A bookmark or a branch ref that survives the
+removal is not a failure here and is not this flow's business: the finishing
+skill's Step 8 owns bookmarks, so the teardown neither deletes nor reports
+one. The project's own `post-remove` hook — the
+`jj workspace forget {{ branch }}` line `ginit` seeds into
 `main/.config/wt.toml` — is what forgets the jj workspace, and that is the step
 that can quietly not happen, so it is waited for rather than assumed. Then
 `wt list` has to stop showing the directory. The tab is closed by the script
@@ -533,8 +541,10 @@ Two things can also be reported after a removal has happened, on the float that
 stays up:
 
 - **A branch worktrunk kept.** `the branch feat/6c4 was kept (retained_unmerged):
-  run wt remove '<path>' -D`. The flow does not run `-D`: if worktrunk and the
-  audit disagree about merged, that is yours to settle.
+  run wt remove -D 'feat/6c4'`. The command names the branch rather than the
+  path, because the worktree is gone by the time this line is read. The flow
+  does not run `-D`: if worktrunk and the audit disagree about merged, that is
+  yours to settle.
 - **A jj row that survived the hook.** `the jj workspace feat/6c4 is still
   registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends in
   `|| true` and runs in the background, so this line is the verdict of the last

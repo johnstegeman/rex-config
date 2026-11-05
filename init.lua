@@ -1198,7 +1198,12 @@ function M.work_new_go(ctx, args)
 end
 
 -- The jj workspaces as name and root rows, in the order workspaces were added.
-local WORKSPACE_LIST = [[jj workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+-- Read from the op log rather than from the working copy: the background
+-- post-remove hook is running `jj workspace forget` in this same repository, and
+-- a plain read wants the working-copy lock that hook holds. The op log already
+-- carries the row the hook is removing, so a wait still sees it go.
+local WORKSPACE_LIST =
+  [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
 
 -- How long a background hook is given to clear the jj workspace row before the
 -- row is called a leftover: a read, then a short sleep and another read, until
@@ -1266,15 +1271,34 @@ function M.work_done_go(ctx, args)
     error("could not remove " .. path .. ": " .. first_line(removed.stderr), 0)
   end
 
-  -- A teardown is complete or it is not. A branch worktrunk kept -- and a reply
-  -- that says nothing about one, which is the same uncertainty -- is reported
-  -- with the one command that would finish the job. -D is the person's to run:
-  -- if worktrunk and the audit disagree about merged, that is theirs to settle.
+  -- worktrunk's --format=json reply is an array, one entry per removal; this flow
+  -- removes one path, so the entry that matters is the first. Reading it as an
+  -- object -- which an array is not -- is how a perfect removal came to be
+  -- reported as a failure after the worktree was already gone. A bare object is
+  -- tolerated as well, so a single-entry shape reads the same.
   local decoded = rex.json.decode(removed.stdout or "")
-  local outcome = type(decoded) == "table" and decoded.branch_outcome or nil
-  if outcome ~= "deleted" then
-    error("the branch " .. workspace .. " was kept (" .. tostring(outcome or "worktrunk said nothing")
-      .. "): run wt remove " .. M.shell_quote(path) .. " -D", 0)
+  local entry = type(decoded) == "table" and (decoded[1] or decoded) or nil
+  local outcome = type(entry) == "table" and entry.branch_outcome or nil
+  local branch = type(entry) == "table" and entry.branch or nil
+
+  -- A teardown is complete or it is not. `deleted` is worktrunk's word for a
+  -- branch it removed; `not_attempted` with no branch is the detached worktree a
+  -- jj wrapper produces -- `gws` adds workspaces with `jj workspace add` and
+  -- nothing attaches a branch, so there is nothing for worktrunk to delete and
+  -- nothing left behind. Everything else -- a retained branch, a reply that says
+  -- nothing about one, a value this flow does not know -- is reported with the one
+  -- command that would finish the job. A bookmark that survives is not that: a
+  -- bookmark belongs to the finishing skill's Step 8, and this flow neither
+  -- deletes nor reports one. -D is the person's to run: if worktrunk and the audit
+  -- disagree about merged, that is theirs to settle.
+  local complete = outcome == "deleted" or (outcome == "not_attempted" and branch == nil)
+  if not complete then
+    -- The command names the branch, not the path: by the time this line is read
+    -- the worktree is gone, and `wt remove <path> -D` has no path to work on.
+    -- The branch is what is left to remove, so that is what worktrunk is given.
+    local named = type(branch) == "string" and branch ~= "" and branch or workspace
+    error("the branch " .. named .. " was kept (" .. tostring(outcome or "worktrunk said nothing")
+      .. "): run wt remove -D " .. M.shell_quote(named), 0)
   end
 
   -- The seeded hook ends in || true, so the row is verified rather than trusted.
