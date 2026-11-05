@@ -431,21 +431,22 @@ disagree — a jj row with no worktree at its root, or a worktree no row
 claims — because removing one half of that is the state nobody unpicks from a
 float.
 
-The audit removes nothing at all, and its only writes are the two `main` moves
-below. It fetches once first — `jj git fetch`, capped at 30 seconds when
-`timeout` or `gtimeout` is installed, with `GIT_TERMINAL_PROMPT=0` so a
-credential prompt cannot hang a terminal nobody can type into — because every
-comparison below is a comparison against what the remote has, and a stale base
-reports merged work as unmerged. A fetch that fails is itself a refusal, naming
-that nothing could be compared. Then:
+The audit removes nothing, and beyond the fetch its only writes are the two
+`main` moves below. It fetches once first — `jj git fetch`, capped at 30
+seconds when `timeout` or `gtimeout` is installed, with `GIT_TERMINAL_PROMPT=0`
+so a credential prompt cannot hang a terminal nobody can type into — because
+every comparison below is a comparison against what the remote has, and a stale
+base reports merged work as unmerged. A fetch that fails is itself a refusal,
+naming that nothing could be compared. Then:
 
-- **whether the branch is merged.** The base is resolved the way `bases`
-  resolves it — `refs/remotes/origin/HEAD`'s branch rendered `<branch>@origin`,
-  then `main@origin`, then `master@origin`, then `@` — and what the branch has
-  that base does not is read as *content*: `jj diff --summary -r '<base>..@'`.
-  Content rather than ancestry, because a squash or a rebase merge leaves that
-  diff empty while leaving the change ids where they were; an ancestry test
-  would refuse forever after the merge this repo normally makes.
+- **whether the branch is merged.** The base is the picker's own opening base —
+  the chain in [The base](#the-base), rendered as one jj revision:
+  `refs/remotes/origin/HEAD`'s branch as `<branch>@origin`, then `main@origin`,
+  then `master@origin`, then `@` — and what the branch has that base does not is
+  read as *content*: `jj diff --summary -r '<base>..@'`. Content rather than
+  ancestry, because a squash or a rebase merge leaves that diff empty while
+  leaving the change ids where they were; an ancestry test would refuse forever
+  after the merge this repo normally makes.
 - **the working copy's own changes**, `jj diff --summary -r @`, counted and not
   listed, since you are looking at those files already.
 - **the programs still running in the tab.** Rex names them and passes them in;
@@ -477,21 +478,31 @@ or not, since neither of them removes anything.
 
 With nothing in the way the audit prints no block and asks no question. It hands
 five keys back to the action `work_done_go` — the project, the wrapper, the main
-worktree, the workspace's name and its directory — and that action runs
-`wt remove '<path>' --foreground -y --format=json` from the main worktree. It is
-given no `-f`, no `-D`, no `--reap` and no `--no-hooks`: the audit already
-refused the situations those flags exist for, and a refusal worktrunk makes on
-its own terms is the report. `--foreground` makes the removal itself block, so
-the reply is final; the `post-remove` hook is a *background* hook, so the jj row
-is not trusted — `jj workspace list` is read again for a bounded moment before a
-surviving row is called a leftover.
-Then three things have to hold, in this order: the reply's `branch_outcome` is
-`deleted`; `jj workspace list` no longer names the workspace; `wt list` no
-longer shows the directory. The tab is closed last, by the script and not by the
-action: `cd` to the main worktree — the script's own directory is gone by now —
-then `rex window close -s <session> <window>`, as its final statement.
-`work_done_go` closes nothing, because the block that closing would kill is the
-one whose script asked for the close.
+worktree, the workspace's name and its directory — and the teardown itself is
+four steps. `wt remove '<path>' --foreground -y --format=json`, run from the
+main worktree, takes the worktree away and deletes the branch with it, and the
+reply's `branch_outcome` has to say `deleted`. The project's own `post-remove`
+hook — the `jj workspace forget {{ branch }}` line `ginit` seeds into
+`main/.config/wt.toml` — is what forgets the jj workspace, and that is the step
+that can quietly not happen, so it is waited for rather than assumed. Then
+`wt list` has to stop showing the directory. The tab is closed by the script
+rather than by the action, and last of all: `cd` to the main worktree — the
+script's own directory is gone by now — then `rex window close -s <session>
+<window>`, as its final statement. `work_done_go` closes nothing, because the
+block that closing would kill is the one whose script asked for the close.
+
+Four flags are left off, and the reason is that order. `-f`, `-D` and `--reap`
+exist for the working copy with changes in it, the branch that is not merged and
+the program still running in the tab — the three the audit has already refused —
+and a refusal worktrunk makes on its own terms is the report. `--no-hooks` is
+the one flag with no counterpart in the audit: the hook *is* the step that
+forgets the workspace, so skipping it would skip the point of the flow.
+`--foreground` is passed for what it does do, which is make the removal itself
+block, so its exit code and its `branch_outcome` are final by the time they are
+read. What it does not do is wait for `post-remove`, because worktrunk runs its
+post-* hooks in the background — so `jj workspace list` is read, waited on and
+read again for about two seconds, and only a row still there at the end of that
+is a leftover.
 
 A refusal is a screen rather than a failure: one block naming everything in the
 way, in the order the audit asked, then `nothing was removed; press any key`,
@@ -512,11 +523,11 @@ paragraph of its own.
   in the order the tab listed them. Rex does not kill it and the removal never
   reaps: stop it, and press the key again.
 - **`main` carrying commits of its own.** `main was not moved: it has commits
-  main@origin does not; run jj new main@origin in <main>` — that move would go
-  backwards. (A `jj` that refuses the bookmark write itself has its own line,
-  naming `jj bookmark set main -r <base>`.)
+  <base> does not; run jj new <base> in <main>` — that move would go backwards.
+  (A `jj` that refuses the bookmark write itself has its own line, naming
+  `jj bookmark set main -r <base>`.)
 - **`main` whose working copy is not provably empty.** `main's working copy was
-  not moved: it is not empty; run jj new main@origin in <main>`.
+  not moved: it is not empty; run jj new <base> in <main>`.
 
 Two things can also be reported after a removal has happened, on the float that
 stays up:
@@ -526,9 +537,9 @@ stays up:
   audit disagree about merged, that is yours to settle.
 - **A jj row that survived the hook.** `the jj workspace feat/6c4 is still
   registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends in
-  `|| true` and runs in the background, so the row is read again for a moment
-  rather than assumed gone — and this line is that verification, at the end of
-  the wait, speaking.
+  `|| true` and runs in the background, so this line is the verdict of the last
+  of those reads rather than the first — a row the hook cleared a moment later is
+  not reported at all.
 
 Neither of those closes the tab. The directory is gone either way, and the
 command on the screen is the last thing left to type.
