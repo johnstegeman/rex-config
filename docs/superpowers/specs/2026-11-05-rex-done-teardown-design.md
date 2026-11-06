@@ -245,7 +245,7 @@ The workspace **name** is what the tab is called; the workspace **root path** is
 what `wt remove` is given, because a path cannot be a branch name and cannot
 collide with one.
 
-### The audit: fetch, then four facts and a bead
+### The audit: the hook, the fetch, then four facts and a bead
 
 The audit's reference base is resolved the way `bases` already resolves it —
 `refs/remotes/origin/HEAD`'s target, then `main`, then `master` — and rendered as
@@ -253,7 +253,21 @@ one jj revision, `<branch>@origin`. It is not hard-coded, because the wrapper
 root's default branch is a property of the remote, and a project whose default is
 not `main` would otherwise refuse forever.
 
-**The fetch comes first**, because every comparison below is a comparison against
+**Before the fetch, one question decides whether the teardown can finish at
+all**: will worktrunk actually run the hook that forgets the jj workspace?
+`wt hook show post-remove --format=json`, read from `main`, answers it. worktrunk
+gates a project hook on approval, and `wt remove -y` **skips the prompt rather
+than granting it**, so an unapproved hook does not run: the worktree goes, the
+jj row stays, and the flow would learn that only after the directory was gone —
+the one outcome this design forbids (*a teardown is complete or it is not*). So
+the audit refuses, before anything is fetched or moved, when no project hook's
+template mentions `jj workspace forget` (a repo that was never seeded — the
+refusal names `main/.config/wt.toml` and `ginit`), when that hook reports
+`needs_approval: true` (the one-time approval, `wt config approvals add` run in
+`main`, is the remedy), or when the listing cannot be read or parsed at all: a
+prerequisite that cannot be checked is not a prerequisite that holds.
+
+**Then the fetch**, because every comparison below is a comparison against
 `main@origin` and a stale `main@origin` makes the answer wrong in the direction
 that matters: it reports merged work as unmerged. One `jj git fetch`, bounded by
 `timeout`/`gtimeout` at 30 seconds when installed (the `gws` discipline, moved
@@ -472,6 +486,14 @@ part of this change that is not code in a worktree.
 - **jj lists the row, worktrunk does not** (or the reverse) — refused, naming
   both halves, because removing one of them is the state that is hard to unpick
   by hand.
+- **worktrunk will not run the `post-remove` hook** — no project hook that
+  forgets the jj workspace, or one that reports `needs_approval: true`, or a
+  listing that cannot be read. Refused **before the fetch**, naming the remedy
+  (`ginit`, or `wt config approvals add` in `main`), because the removal would
+  otherwise go through and leave the row behind: a teardown that cannot finish
+  must not start. A listing that cannot be read as one is refused the same way,
+  naming the read itself — the reply may be healthy JSON that simply is not a
+  hook listing.
 - **The fetch fails** (no network, no credentials, timeout) — refused, naming
   the fetch and that no comparison was possible. Nothing is removed, and
   `main@origin` is not silently believed.
@@ -531,25 +553,38 @@ Everything runs from `bash test/run.sh`, no pty.
 - **`test/done_test.sh`** (new) — the audit, the refresh and the screen, with
   every tool read replaced by a fixture: `--workspaces` (a saved
   `jj workspace list -T …`), `--wt-json` (a saved `wt list --format=json`),
-  `--diff` (a saved `jj diff --summary` for the base range), `--own-status` (a
-  saved `jj diff --summary -r @`), `--main-state` (a saved rendering of the two
-  `main` checks), `--bd-json` and `--running`. `--no-fetch` is passed by every
-  scripted run, so the suite never touches the network. Asserted: exit 4 and the
-  exact refusal block for each blocker alone and in combination; the paths listed
-  for a non-empty content diff, and **exit 0 for the squash case** where the base
+  `--hooks-json` (a saved `wt hook show post-remove --format=json`: approved,
+  `needs_approval: true`, empty, a project hook that forgets nothing, approved
+  beside an unapproved hook that forgets nothing, and a reply that is not a
+  listing), `--diff` (a saved `jj diff --summary` for the base range),
+  `--own-status` (a saved `jj diff --summary -r @`), `--main-state` (a saved
+  rendering of the two `main` checks), `--bd-json` and `--running`. Every
+  scripted run passes `--no-fetch` except three — the hook-ordering run and the
+  two fetch-failure runs — and each of those reaches jj through the stand-in
+  first on `PATH`, so no real jj and no network is touched. A `wt` stand-in
+  beside the `jj` and `rex` ones records its own argv, which is how the one live
+  `wt hook show post-remove` read is pinned: that case passes `--wt-json` and no
+  `--hooks-json`, and asserts the recorded `cwd` is `--main`, because worktrunk
+  reads project hooks from there and a read made anywhere else would answer
+  about another repository. Asserted: exit 4 and the exact refusal block for
+  each blocker alone and in combination, including each of the three hook
+  refusals; exit 0 for an approved hook, for a list whose only unapproved hook
+  forgets nothing, and for the live read itself; the paths listed for a
+  non-empty content diff, and **exit 0 for the squash case** where the base
   range has changes but an empty diff; the bead line printed for a matching id,
-  absent for no match and for no `bd`; exit 4 for a `--cwd` equal to `--main`, to
-  the wrapper, and for a `--cwd` under a workspace **inside another workspace**
-  (the longest-prefix rule, with a `default`-plus-`feat/6c4` fixture); exit 4 when
-  the jj row and the worktree disagree; exit 4 naming the fetch when a stand-in
-  `jj` on `PATH` fails it (every other scripted run passes `--no-fetch`, so the
-  suite never reaches the network); the `main` refresh running `jj new main@origin` for a
-  provably empty `main` and **not** running it for a `main` with a description or
-  a non-empty diff; the bookmark move skipped when `main` is not contained in
-  `main@origin`; exit 2 for a relative `--cwd`; and — for a clean workspace — exit
-  0 with exactly one line, the `rex do work_done_go --args '<json>'` hand-back
-  (`payload_of`, as `pick_test.sh` compares it), the json carrying `path` for the
-  removal and `workspace` for the tab.
+  absent for no match and for no `bd`; exit 4 for a `--cwd` equal to `--main`,
+  to the wrapper, and for a `--cwd` under a workspace **inside another
+  workspace** (the longest-prefix rule, with a `default`-plus-`feat/6c4`
+  fixture); exit 4 when the jj row and the worktree disagree; exit 4 naming the
+  fetch when a stand-in `jj` on `PATH` fails it; the hook refusal coming before
+  the fetch, proved by the stand-in `jj` recording **no argv at all** on a run
+  given no `--no-fetch`; the `main` refresh running `jj new main@origin` for a
+  provably empty `main` and **not** running it for a `main` with a description
+  or a non-empty diff; the bookmark move skipped when `main` is not contained in
+  `main@origin`; exit 2 for a relative `--cwd`; and — for a clean workspace —
+  exit 0 with exactly one line, the `rex do work_done_go --args '<json>'`
+  hand-back (`payload_of`, as `pick_test.sh` compares it), the json carrying
+  `path` for the removal and `workspace` for the tab.
 - **`test/action_test.lua`** — `M.work_done` opens one layer with the expected
   argv (`--session`/`--window` from ctx, one `--running` per non-shell foreground
   process, including a tab whose second block runs `node`, and none for a tab of
