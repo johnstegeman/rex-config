@@ -265,10 +265,10 @@ need() {
   exit 1
 }
 
-# Exit 1: the same for a fish function, which is not on PATH and cannot be: gws
+# Exit 1: the same for a fish function, which is not on PATH and cannot be: jws
 # is a function in ~/.config/fish/functions, and it is the one thing that knows
-# how to make a jj colocated workspace. fish itself missing is the plainer
-# failure need() already has a message for, so the two do not differ in shape.
+# how to make a jj workspace. fish itself missing is the plainer failure need()
+# already has a message for, so the two do not differ in shape.
 # The words to fish go through $argv rather than a string, so a name with a
 # space or a quote in it is still one name.
 need_fish_function() {
@@ -1700,11 +1700,13 @@ cmd_pick() {
     need fzf
     need gum
   fi
-  # worktrunk is not where the branch list comes from any more -- jj is -- and
-  # this check names the tool the tab still calls, so it goes when that tool
-  # does. What it buys meanwhile is a machine with nothing to build a workspace
-  # with refused before the screen opens rather than after the bead is claimed.
-  [ -n "$workspaces" ] || need wt
+  # djo is the workspace tool the tab's shim runs -- a new workspace's post-start
+  # hooks are dojjo's -- so it is named only where a tab will really be made: a
+  # --dry-run creates no workspace and hands its answers back, and a run holding
+  # the saved workspace listing is the same kind of scripted run. What the check
+  # buys is a machine with nothing to build a workspace with refused before the
+  # screen opens rather than after the bead is claimed.
+  [ "$dry_run" -eq 1 ] || [ -n "$workspaces" ] || need djo
   need jq
   [ -n "$bd_json" ] || need bd
   # jj is what reads the workspaces, the bookmarks and the base cycle, and each
@@ -1716,15 +1718,14 @@ cmd_pick() {
   # revision from it. A run holding both branch fixtures is therefore still asked
   # for jj, which is only ever a check spent on a machine that has it.
   [ -n "$base_bookmarks" ] || { [ "$no_base" -eq 1 ] && ! on_screen; } || need jj
-  # gws is the one thing that knows how to make a jj colocated workspace, and it
-  # is a fish function rather than a program. Nothing on a --dry-run creates a
-  # workspace, so the check belongs where a tab will really be made -- and the
-  # pair comes last of the tools, so a run missing several names the first one it
-  # needed. A branch that turns out to have a worktree already is switched rather
-  # than created and calls gws not at all, so this can refuse a run that would
-  # have been fine: refusing before the screen is worth more than that accuracy,
-  # because the other order is a bead in progress and a pane with nothing in it.
-  [ "$dry_run" -eq 1 ] || need_fish_function gws
+  # jws is the one thing that knows how to make a jj workspace, and it is a fish
+  # function rather than a program. Nothing on a --dry-run creates a workspace,
+  # so the check belongs where a tab will really be made -- and it comes last of
+  # the tools, so a run missing several names the first one it needed. Every tab
+  # calls jws, whichever of switch, attach and create it is, so this never refuses
+  # a run that would have been fine: the refusal is only ever a pane that could
+  # not have been made.
+  [ "$dry_run" -eq 1 ] || need_fish_function jws
 
   local ready rows
   if ! ready=$(ready_json "$main" "$bd_json"); then

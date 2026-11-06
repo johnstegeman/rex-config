@@ -286,7 +286,7 @@ leave_shell
 -- typed there, the bead's, or -- with neither -- the configured no-bead prompt.
 -- An empty agent is the picker's "none": the wrapper starts nothing and hands
 -- the pane to a login shell. An empty base is "no base revision at all", which
--- is what leaves gws to start the branch at main.
+-- is what leaves jws to start the branch at main.
 --
 -- The prompt is not always there: a blank answer sends no prompt parameter at
 -- all, so the argv ends after the agent and its arguments, and a prompt whose
@@ -355,7 +355,7 @@ function M.new_tab_argv(project, args)
   -- The base a new branch starts from. The picker resolves it -- no ref is read
   -- here -- so this only carries the answer, and it is three-valued: a string is
   -- the revision to create from, false is the picker's "start from nothing" (and
-  -- travels as the empty parameter, which is gws's own default), and absent
+  -- travels as the empty parameter, which is jws's own default), and absent
   -- means the picker never answered -- a hand-run `rex do` -- so the configured
   -- base is the fallback. The remote a base lives on is part of the revision's
   -- own name (`main@origin`), so there is no word of its own for it.
@@ -415,9 +415,9 @@ end
 -- Mac -- which knows nothing of mise or Homebrew installs, while the design puts
 -- fish, wt, jq, jj and bd on the login shell's PATH. wt and bd therefore run in
 -- that shell, which is also where mise keeps the environment its shims need.
--- The new tab is a fish program for the same reason: gws exists only as a fish
+-- The new tab is a fish program for the same reason: jws exists only as a fish
 -- function, so the flow has to reach it from fish -- which is also what the
--- picker's own check asks for (`fish -c 'functions -q gws'`). Nothing is
+-- picker's own check asks for (`fish -c 'functions -q jws'`). Nothing is
 -- interpolated into the command text: a directory travels as rex.exec's cwd
 -- option, never inside the command.
 local function login_shell()
@@ -531,7 +531,7 @@ end
 -- The directory form is what makes the walk work: a branch workspace, main
 -- included, has a `.jj/repo` of its own, but as a *file* holding the path of
 -- the store it borrows. So the walk passes every workspace and stops at the
--- directory that holds them, which is also the directory gws adds to and the
+-- directory that holds them, which is also the directory jws adds to and the
 -- one whose basename is the project's name.
 function M.wrapper_root(cwd)
   if type(cwd) ~= "string" then

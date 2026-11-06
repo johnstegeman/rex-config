@@ -201,12 +201,15 @@ workspace sits on `main`'s working copy.
 
 ## Requirements
 
-Creating a workspace is `gws`'s job, and `gws` is not a program on your `PATH`: it
-is a fish function in `~/.config/fish/functions/gws.fish`, and it is the one
-thing that knows how to make a jj colocated workspace. The tab's wrapper is a
-fish script for that reason. Before the screen opens, the picker refuses a repo
-that is not yet [ginit'd](#converting-a-repo-to-jj-workspaces), a machine without
-`jj`, and a fish without `gws`: a claimed bead in a pane that could not create
+Creating a workspace is `jws`'s job, and `jws` is not a program on your `PATH`: it
+is a fish function in `~/.config/fish/functions/jws.fish`, and it is the one
+seam between this flow and [dojjo](https://github.com/tjarvstrand/dojjo). The
+workspace is jj's (`jj workspace add`); `jws` is what sequences it — the
+wrapper walk, the fetch, the workspace, `djo hook post-start` inside it, and the
+path the tab is handed — so the tab's wrapper is a fish script for that reason.
+Before the screen opens, the picker refuses a repo that is not yet
+[ginit'd](#converting-a-repo-to-jj-workspaces), a machine without `jj` or `djo`,
+and a fish without `jws`: a claimed bead in a pane that could not create
 anything is worse than a refusal.
 
 On the login shell's `PATH` (Rex actions run with a minimal `PATH`, so these are
@@ -214,32 +217,29 @@ looked up through your shell):
 
 | Tool | Why |
 |---|---|
-| `wt` | [worktrunk](https://worktrunk.dev), for switching to a worktree that already exists, and for the hooks a jj-made workspace needs |
-| `jj` | the base cycle, and the workspace itself |
-| `fish` | `gws` is a fish function, and the tab's wrapper is fish |
-| `jq` | the picker's JSON hand-back, the tab's worktree path, and bead filtering |
+| `jj` | the workspaces, the bookmarks, the base cycle, and the workspace itself |
+| `djo` | [dojjo](https://github.com/tjarvstrand/dojjo) (0.2.2), for the post-start hooks a new workspace runs |
+| `fish` | `jws` is a fish function, and the tab's wrapper is fish |
+| `jq` | the picker's JSON hand-back and its bead filtering |
 | `fzf` | the one screen: the ready list, the preview, the typed prompt and the keys (tested against 0.74.5) |
 | `gum` | every field the screen opens: the `✎` row's, `ctrl-b`'s and the bead-less branch field (tested against 2.0.2) |
 | `bd` | beads, for `bd ready` and claiming the picked bead |
 | your agent | default `pi`; anything that takes a prompt argument works |
 | `bat` | optional, for the bead preview |
 
-`git` and `bash` are the exceptions to that: they run under Rex's own `PATH` —
-the picker is started by its `#!/usr/bin/env bash` shebang — so they only need
-to be where Rex can find them.
-
-| Tool | Why |
-|---|---|
-| `git` | project resolution, branch-name checks, the branch candidate list and the base cycle |
-| `bash` | `new-work.sh` is a bash script (`pipefail`, process substitution) |
+`bash` is the exception to that: it runs under Rex's own `PATH` — the picker is
+started by its `#!/usr/bin/env bash` shebang, and `new-work.sh` is a bash script
+(`pipefail`, process substitution) — so it only needs to be where Rex can find
+it. Nothing in the flow asks for `git`, and a machine without it runs the flow
+as it is.
 
 Also needed:
 
 - **beads in the project.** Beads is a hard requirement: a repository with no
   beads database is refused rather than run without one, because the whole flow
   is bead-driven.
-- **a ginit'd repo.** `gws` needs the layout `ginit` makes: a wrapper with
-  `.jj/repo` as a directory **beside** its `main` worktree, because `gws` runs
+- **a ginit'd repo.** `jws` needs the layout `ginit` makes: a wrapper with
+  `.jj/repo` as a directory **beside** its `main` worktree, because `jws` runs
   `jj workspace add` from `main` so the new workspace inherits its sparse
   patterns. A repo without one — including a clone `jj git init`ed where it
   stands, whose `.jj/repo` is inside the worktree rather than beside a `main` —

@@ -36,13 +36,13 @@ fail() {
 # writes a directory of its own and names it in front of run_pick.
 export XDG_STATE_HOME=$tmp/state
 
-# gws is the fish function that knows how to make one jj colocated workspace,
-# and it lives in the developer's ~/.config/fish/functions, which is not here.
-# The picker asks fish whether the name is a function, so fish's search path is
+# jws is the fish function the flow makes its jj workspaces through, and it
+# lives in the developer's ~/.config/fish/functions, which is not here. The
+# picker asks fish whether the name is a function, so fish's search path is
 # pointed at a directory of its own with a stand-in in it: a case that wants
 # the refusal points it at an empty one instead.
 mkdir -p "$tmp/fish-functions"
-printf 'function gws\nend\n' >"$tmp/fish-functions/gws.fish"
+printf 'function jws\nend\n' >"$tmp/fish-functions/jws.fish"
 export fish_function_path=$tmp/fish-functions
 
 # Stand-ins for the tools that would otherwise talk to the outside world. rex
@@ -179,7 +179,7 @@ assert_json() {
 }
 
 # The host has to have these two, and neither can be stood in for: jj is a
-# program the picker runs, and fish is what answers whether gws is a function.
+# program the picker runs, and fish is what answers whether jws is a function.
 # A host missing one cannot build the restricted PATHs below, so it says so
 # once, here, rather than through a case failing on a PATH nobody could build.
 for tool in fish jj; do
@@ -830,10 +830,10 @@ fi
 
 # Every tool the run needs except fzf and gum: with no terminal nothing is asked,
 # so the run must reach the empty-branch exit instead of complaining about the
-# two tools only the screen calls. jj and fish are on this PATH because gws is
+# two tools only the screen calls. jj and fish are on this PATH because jws is
 # the only thing that makes the workspace and this machine has it (a stand-in,
 # as the fish function path at the top of the file says).
-restricted_path "$tmp/no-fzf-bin" bash cat cut grep sed awk tr git bd wt jq jj fish
+restricted_path "$tmp/no-fzf-bin" bash cat cut grep sed awk tr git bd djo jq jj fish
 ran=$((ran + 1))
 PATH="$tmp/no-fzf-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
@@ -876,13 +876,13 @@ fi
 
 # (g2) A machine or a repo that cannot make a jj workspace is refused before the
 # screen opens and before anything is claimed: a bead picked for a pane that can
-# only fail is worse than a refusal. Four things can be missing, and each is
+# only fail is worse than a refusal. Five things can be missing, and each is
 # named -- the wrapper's .jj/repo (this repo was never ginit'd), jj on PATH (the
-# base cycle runs it), gws as a fish function (the one thing that knows the
-# order a workspace and a worktree are made in), and fish itself (which is what
-# answers for gws at all). Nothing has been asked, handed back or even started
-# when one of them is: stdout, the stand-in fzf and the stand-in rex are all
-# left untouched.
+# base cycle runs it), djo on PATH (which jws runs a new workspace's hooks with),
+# jws as a fish function (the one thing that knows the order a workspace and a
+# worktree are made in), and fish itself (which is what answers for jws at all).
+# Nothing has been asked, handed back or even started when one of them is:
+# stdout, the stand-in fzf and the stand-in rex are all left untouched.
 #
 # refused <name> <fragment stderr must hold> <command...>, the environment as
 # leading WORDS: what differs between the cases is only what each one lacks.
@@ -930,7 +930,7 @@ fi
 # hold .jj/repo itself, which the preflight finds with dirname.
 mkdir -p "$tmp/ginit/main" "$tmp/ginit/.jj/repo"
 restricted_path "$tmp/no-jj-bin" \
-  bash cat cut grep sed awk tr dirname mktemp rm git bd wt jq fish
+  bash cat cut grep sed awk tr dirname mktemp rm git bd djo jq fish
 refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
   PATH="$tmp/no-jj-bin" ./new-work.sh pick \
   --main "$tmp/ginit/main" --root /p/demo --project demo \
@@ -972,23 +972,39 @@ refused "a screen with no jj exits 1" 'jj not found on PATH — press any key' \
   --bookmarks test/fixtures/branch-bookmarks.txt \
   --no-base --bead '' --branch feat/no-jj-screen --dry-run
 
-# gws is a fish function rather than a program, and an empty function path is a
+# djo is what runs a new workspace's post-start hooks, so a machine without it
+# cannot finish the workspace jws makes. It is named only where a tab will
+# really be made, and this run is one: no --dry-run, and no --workspaces
+# fixture standing in for the branch list a scripted run is given. Everything
+# else the preflight asks for is on the PATH beside it, so djo is the one
+# thing missing.
+restricted_path "$tmp/no-djo-bin" \
+  bash cat cut grep sed awk tr dirname mktemp rm git bd jj jq fish
+refused "a missing djo exits 1" 'djo not found on PATH — press any key' \
+  PATH="$tmp/no-djo-bin" ./new-work.sh pick \
+  --main "$tmp/ginit/main" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --bookmarks test/fixtures/branch-bookmarks.txt \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-djo
+
+# jws is a fish function rather than a program, and an empty function path is a
 # machine that has none: the pane would open and then create nothing. No
 # --dry-run here, because that is exactly the run that makes no workspace and so
 # is not stopped for the tool.
 mkdir -p "$tmp/no-fish-functions"
-refused "a missing gws exits 1" 'gws is not a fish function' \
+refused "a missing jws exits 1" 'jws is not a fish function' \
   fish_function_path="$tmp/no-fish-functions" ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --workspaces test/fixtures/workspaces.txt \
   --bookmarks test/fixtures/branch-bookmarks.txt \
   --base-bookmarks "$tmp/base-bookmarks" \
-  --bead pmm-iris-a4l --branch feat/no-gws
+  --bead pmm-iris-a4l --branch feat/no-jws
 
 # A machine with no fish at all cannot even be asked, and is named the way every
 # other missing tool is -- by need, whose message this one inherits.
-restricted_path "$tmp/no-fish-bin" bash cat cut grep sed awk tr git bd wt jq jj
+restricted_path "$tmp/no-fish-bin" bash cat cut grep sed awk tr git bd djo jq jj
 refused "a missing fish exits 1" 'fish not found on PATH — press any key' \
   PATH="$tmp/no-fish-bin" ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
@@ -998,12 +1014,12 @@ refused "a missing fish exits 1" 'fish not found on PATH — press any key' \
   --base-bookmarks "$tmp/base-bookmarks" \
   --bead pmm-iris-a4l --branch feat/no-fish
 
-# (g3) The same two checks, seen from the other side: a preflight never stops a
+# (g3) The same checks, seen from the other side: a preflight never stops a
 # run for a tool that run would not call. A --dry-run hands its answers back
-# and creates no workspace, so gws is never asked for; and a bookmark fixture
-# stands in for the one thing jj is read for, so jj is never asked for either.
-# The payload is the proof: a run on a machine with neither still prints the
-# line that carries its branch.
+# and creates no workspace, so neither djo nor jws is ever asked for; and the
+# branch fixtures stand in for the two things jj is read for, so jj is never
+# asked for either. The payload is the proof: a run on a machine with none of
+# them still prints the branch it answered.
 ran=$((ran + 1))
 fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-jj-bin" \
   REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
@@ -1016,12 +1032,12 @@ fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-jj-bin" \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "a dry run needs neither jj nor gws" "exit $status: $(cat "$tmp/err")"
+  fail "a dry run needs neither jj nor jws" "exit $status: $(cat "$tmp/err")"
 elif ! json=$(payload_of "$(cat "$tmp/out")"); then
-  fail "a dry run needs neither jj nor gws: no payload" \
+  fail "a dry run needs neither jj nor jws: no payload" \
     "stdout: $(cat "$tmp/out")"
 else
-  assert_json "a dry run needs neither jj nor gws: the branch" "$json" \
+  assert_json "a dry run needs neither jj nor jws: the branch" "$json" \
     '.branch == "feat/no-jj" and .worktree == "create"'
 fi
 
@@ -1044,6 +1060,40 @@ elif ! json=$(payload_of "$(cat "$tmp/out")"); then
 else
   assert_json "--no-base needs no jj: no revision at all" "$json" \
     '.base == false'
+fi
+
+# djo's check is the tab's alone too, and this is the case that proves it: no
+# --workspaces here, so the pick is one that would ask djo for the workspace it
+# was about to make -- except that a --dry-run makes none. The branch list comes
+# from a jj stand-in that answers rows, and neither djo on PATH nor jws in a
+# function path is anywhere to be found.
+mkdir -p "$tmp/no-djo-dry-bin"
+restricted_path "$tmp/no-djo-dry-bin" \
+  bash cat cut grep sed awk tr dirname mktemp rm bd jq fish
+cat >"$tmp/no-djo-dry-bin/jj" <<'EOF'
+#!/bin/sh
+# `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`, answered as rows.
+printf 'main\t/p/demo/main\ndefault\t/p/demo\n'
+EOF
+chmod +x "$tmp/no-djo-dry-bin/jj"
+ran=$((ran + 1))
+fish_function_path="$tmp/no-fish-functions" PATH="$tmp/no-djo-dry-bin" \
+  REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
+  --main "$tmp/ginit/main" --root /p/demo --project demo \
+  --bd-json test/fixtures/ready.json \
+  --bookmarks test/fixtures/branch-bookmarks.txt \
+  --base-bookmarks "$tmp/base-bookmarks" \
+  --bead pmm-iris-a4l --branch feat/no-djo-dry --dry-run \
+  </dev/null >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail "a dry run needs neither djo nor jws" "exit $status: $(cat "$tmp/err")"
+elif ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail "a dry run needs neither djo nor jws: no payload" \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json "a dry run needs neither djo nor jws: the branch" "$json" \
+    '.branch == "feat/no-djo-dry" and .worktree == "create"'
 fi
 
 # (h) pick without the project it is working on. stdin is /dev/null so a run
@@ -1170,10 +1220,10 @@ fi
 # against its own working directory, not the float's, so `.` would build a tab
 # in the server's directory and fail there with nothing on screen to say why.
 # Nothing is looked up either: every tool here is a stand-in that leaves a mark
-# when it is run, so "no tool was asked anything" is a missing file -- wt
-# included, which the picker would otherwise need before it can list branches.
+# when it is run, so "no tool was asked anything" is a missing file -- djo
+# included, which the picker would otherwise need before it can make a workspace.
 mkdir -p "$tmp/watch-bin"
-for tool in rex wt bd jq git fzf; do
+for tool in rex djo bd jq git fzf; do
   cat >"$tmp/watch-bin/$tool" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$0" >>"$CALLED_FILE"
@@ -1978,7 +2028,7 @@ fi
 # terminal, which a test may not have. PICK_SCREEN=1 is the script's own answer
 # to that -- "this run has the float's terminal" -- so these runs are ./new-work.sh
 # itself, byte for byte, with that one answer given: the seam is in the script
-# next to the fixtures that stand in for bd and wt, not in a copy of the script
+# next to the fixtures that stand in for bd and jj, not in a copy of the script
 # patched here. fzf and gum are stand-ins that answer for the person who is not
 # there; gum records what it was asked and fzf records the lines it was given, so
 # "no field was opened", "the field opened empty" and "the header opened on this

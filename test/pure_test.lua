@@ -268,7 +268,7 @@ end
 -- slot, so the words start at argv[4] with nothing between: the mode (switch,
 -- create or attach), the branch, the base, the agent. The base is
 -- three-valued -- a string is the revision to create from, false is "start
--- from nothing" (the wrapper passes no base word to gws at all), and absent
+-- from nothing" (the wrapper passes no base word to jws at all), and absent
 -- means the picker never answered, so the configured base is the fallback.
 -- The remote a base lives on is part of the revision's own name
 -- (`main@origin`), so it travels with the base rather than as a word of its
