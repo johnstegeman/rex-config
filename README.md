@@ -155,7 +155,8 @@ and then the project's post-start hooks, run by `djo hook post-start` inside the
 new workspace because jj and not dojjo made it. Which workspaces exist is `jj
 workspace list`'s answer and nobody else's, so a switch and an attach are jj's
 answers too, never a tool's report. Both halves used to be worktrunk's — history
-now: nothing in the flow runs `wt`, and nothing in it needs `git`.
+now: nothing in the flow runs `wt`, and the only thing it asks git is the default
+branch, where a `.git` exists to ask.
 
 When the agent exits — quit, crash, or a brainstorming that finished — the tab
 drops into your login shell in that worktree: the hooks' output and the
@@ -219,10 +220,12 @@ seam between this flow and [dojjo](https://github.com/tjarvstrand/dojjo). The
 workspace is jj's (`jj workspace add`); `jws` is what sequences it — the
 wrapper walk, the fetch, the workspace, `djo hook post-start` inside it, and the
 path the tab is handed — so the tab's wrapper is a fish script for that reason.
+
 Before the screen opens, the picker refuses a repo that is not yet
-[ginit'd](#converting-a-repo-to-jj-workspaces), a machine without `jj` or `djo`,
-and a fish without `jws`: a claimed bead in a pane that could not create
-anything is worse than a refusal.
+[in the wrapper shape](#converting-a-repo-to-jj-workspaces) — the one `jinit`
+makes and `jclone` reproduces — a machine without `jj` or `djo`, and a fish
+without `jws`: a claimed bead in a pane that could not create anything is worse
+than a refusal.
 
 On the login shell's `PATH` (Rex actions run with a minimal `PATH`, so these are
 looked up through your shell):
@@ -251,10 +254,10 @@ Also needed:
 - **beads in the project.** Beads is a hard requirement: a repository with no
   beads database is refused rather than run without one, because the whole flow
   is bead-driven.
-- **a ginit'd repo.** `jws` needs the layout `ginit` makes: a wrapper with
-  `.jj/repo` as a directory **beside** its `main` worktree, because `jws` runs
-  `jj workspace add` from `main` so the new workspace inherits its sparse
-  patterns. A repo without one — including a clone `jj git init`ed where it
+- **a repo in the wrapper shape.** `jws` needs the layout `jinit` makes: a
+  wrapper with `.jj/repo` as a directory **beside** its `main` worktree, because
+  `jws` runs `jj workspace add` from `main` so the new workspace inherits its
+  sparse patterns. A repo without one — including a clone `jj git init`ed where it
   stands, whose `.jj/repo` is inside the worktree rather than beside a `main` —
   is refused rather than given an ordinary git worktree. [Converting a repo to
   jj workspaces](#converting-a-repo-to-jj-workspaces) is how it gets one.

@@ -203,7 +203,8 @@ and "unmerged" means content rather than ancestry.
 | tests | `test/done_test.sh`, `test/action_test.lua`, `test/setup_test.lua` | the refusal cases, the clean hand-back, the removal sequence |
 
 Nothing else moves. `pick`, the composer, `bases`, `branch-default`, the payload
-of the new-work flow, `jws`, and the finishing skill are untouched.
+of the new-work flow, `jws`, `jinit`/`jclone`, and the finishing skill are
+untouched.
 
 ### The shape: picker-shaped, like `work_new`
 
@@ -450,20 +451,10 @@ confirmation: with nothing at risk, the tab going away is the feedback.
    them has a counterpart here — and no `--no-hooks` either: dojjo runs its own
    remove hooks, and a refusal of its own is the report. In one command dojjo
    deletes the directory, forgets the workspace and deletes the bookmark, and it
-   has no merged check to second-guess, so the reads below are the only audit
-   this teardown gets.
-2. **The bookmark really went.** dojjo deletes the bookmark with the workspace,
-   so one that still resolves is the **only** "kept" case this flow has, and it
-   is a failure: reported with `jj bookmark delete '<name>'` as the command that
-   finishes the job. The read is a jj revset that names the bookmark exactly —
-   `jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"<name>")' -T
-   'commit_id ++ "\n"'` — and not a `jj bookmark list`, because deleting a
-   bookmark a remote tracks only tombstones it: the listing goes on printing the
-   name, so it cannot tell a deleted bookmark from a kept one. A revset can,
-   because it resolves to a commit only while the bookmark is really there. The
-   delete is not run by the flow: the one command that would finish the job is
-   named, and the person decides.
-3. **Verify the store, rather than trust the exit code.** `jj workspace list`
+   has no merged check to second-guess, so the three reads below are the only
+   audit this teardown gets. They are independent of each other and are run in
+   the order they are reported: row, directory, bookmark.
+2. **Verify the store, rather than trust the exit code.** `jj workspace list`
    must no longer list the name — read with `--ignore-working-copy`, because a
    post-start hook dojjo started may still hold the working-copy lock. A row
    still there is given a bounded moment (up to ten reads over about two
@@ -476,11 +467,22 @@ confirmation: with nothing at risk, the tab going away is the feedback.
    forget that fails is judged by the row that follows it rather than by its own
    exit status. This is history's check, kept: the seeded forget hook ended in
    `|| true`, so the row was never something to take on trust.
-4. **The directory itself.** `test ! -d <path>` — one argv, so a path with a
+3. **The directory itself.** `test ! -d <path>` — one argv, so a path with a
    space or a quote in it is never shell text — and a directory still there is
    reported with `djo list -f` as the command that says what dojjo thinks it
    removed. There is no `wt list` to read any more; the directory is the second
    half of "the workspace is gone".
+4. **The bookmark really went.** dojjo deletes the bookmark with the workspace,
+   so one that still resolves is the **only** "kept" case this flow has, and it
+   is a failure: reported with `jj bookmark delete '<name>'` as the command that
+   finishes the job. The read is a jj revset that names the bookmark exactly —
+   `jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"<name>")' -T
+   'commit_id ++ "\n"'` — and not a `jj bookmark list`, because deleting a
+   bookmark a remote tracks only tombstones it: the listing goes on printing the
+   name, so it cannot tell a deleted bookmark from a kept one. A revset can,
+   because it resolves to a commit only while the bookmark is really there. The
+   delete is not run by the flow: the one command that would finish the job is
+   named, and the person decides.
 5. **Return.** Success returns nothing; every failure returns its line, which
    Rex prints on the float's terminal and which makes `rex do` exit non-zero.
 

@@ -320,7 +320,7 @@ and under the same rule — they only run where the screen will really open, and
 saved fixture stands in for the tool it replaces:
 
 > the directory holding `--main` must contain `.jj/repo` as a **directory** — the
-> wrapper `init` makes, with `main` beside it — `jj` must be on the login
+> wrapper `jinit` makes, with `main` beside it — `jj` must be on the login
 > shell's PATH (the base cycle runs it), `djo` must be there too (a new
 > workspace's post-start hooks are dojjo's), and `jws` must be a fish function
 > (`fish -c 'functions -q jws'`), because the tab cannot create anything without
@@ -337,7 +337,8 @@ been asked yet, and the line says what is missing: the wrapper, with `.jj/repo`
 beside its `main` worktree.
 
 Without the first, `pick` prints one line saying this repo is not ginit'd yet and
-names the tool that makes one; without any of the others it names the missing
+names a tool that makes one (`ginit` is what the line says; `jinit` and `jclone`
+are what make this layout now); without any of the others it names the missing
 piece the way `need` does. All of them exit before any screen opens, so the first
 thing the person sees is the refusal rather than a claimed bead and a dead pane.
 The tab's own failure path stays as a second line of defence: `jws` refusing is a
