@@ -140,11 +140,44 @@ if [ ! -d "$tmp/w/main" ]; then
 fi
 # The reason the default workspace is not simply forgotten: a forgotten default
 # is resurrected by the next jj command run from a non-workspace directory, and
-# that resurrection junk-snapshots the wrapper. Inert is settled in the diff.
+# that resurrection junk-snapshots the wrapper. Inert is TWO things, and both are
+# checked, because each one alone looks fine while the other is missing -- the
+# empty diff below is true even in a wrapper where nothing was done at all, so
+# on its own it cannot fail.
 ran=$((ran + 1))
 inert=$(cd "$tmp/w" && jj --ignore-working-copy diff -r 'default@' --summary 2>&1)
 if [ -n "$inert" ]; then
-  fail "the default workspace is inert" "default@ holds: $inert"
+  fail "the default workspace holds no files" "default@ holds: $inert"
+fi
+# (a) sparse-cleared: the pattern set is empty, so a snapshot taken from the
+# wrapper sees nothing even if main/ and .beads/ are sitting right beside it.
+# `sparse list` with no pattern prints nothing at all -- main's prints `.`, the
+# match-anything root pattern, which is what makes this line discriminating.
+ran=$((ran + 1))
+default_sparse=$(cd "$tmp/w" && jj --ignore-working-copy sparse list 2>&1)
+if [ -n "$default_sparse" ]; then
+  fail "the default workspace is sparse-cleared" "sparse list holds: [$default_sparse]"
+fi
+# (b) parked on root(): its @ is a child of the root commit, so even a
+# resurrected default has nothing to reuse. The root id is all zeros in jj.
+ran=$((ran + 1))
+root_id=$(cd "$tmp/w" && jj --ignore-working-copy log -r 'root()' --no-graph -T 'commit_id' 2>&1)
+default_parent=$(cd "$tmp/w" && jj --ignore-working-copy log -r 'default@-' --no-graph -T 'commit_id' 2>&1)
+if [ "$default_parent" != "$root_id" ]; then
+  fail "the default workspace's @ is parked on root()" \
+    "default@-: $default_parent, root(): $root_id"
+fi
+# (c) and DESCRIBED as the design says. This is what separates a default that
+# was reparented by hand from one that was never touched: the commit jj hands a
+# fresh repo already sits on root(), so the parent check alone passes for a
+# function with no `jj new` in it at all -- the message is the only trace the
+# step leaves (`jj new 'root()'` creates a NEW empty commit, so even the id
+# would do, but the message is the one the design and ginit both name).
+ran=$((ran + 1))
+default_desc=$(cd "$tmp/w" && jj --ignore-working-copy log -r 'default@' --no-graph -T 'description' 2>&1)
+if [ "$default_desc" != 'default workspace: intentionally empty (see jinit)' ]; then
+  fail "the default workspace's @ is the intentionally-empty marker commit" \
+    "default@ says: [$default_desc]"
 fi
 
 # 3. The seed commit, on the remote. Asked of the REMOTE rather than of the
@@ -197,7 +230,6 @@ fi
 
 # 5. The bookmark tracks its remote counterpart, so a later fetch moves it: jj
 #    only updates a bookmark a fetch can see as tracked.
-ran=$((ran + 1))
 bookmarks=$( cd "$tmp/w" && jj --ignore-working-copy bookmark list -a \
   -T 'name ++ "@" ++ remote ++ " " ++ if(tracked, "tracked", "untracked") ++ "\n"' 2>/dev/null )
 ran=$((ran + 1))
@@ -249,6 +281,15 @@ ran=$((ran + 1))
 if [ ! -f "$tmp/w/feat-q/.config/wt.toml" ]; then
   fail "the created workspace inherited main's hook config" \
     "no $tmp/w/feat-q/.config/wt.toml"
+fi
+# ... and there is STILL no .git once a workspace has been made in it. The
+# design's claim is about the result of a create, and a create is the moment
+# something could put a git layer back: jj and dojjo are the two programs that
+# run here, and neither may leave one.
+ran=$((ran + 1))
+local_git=$(find "$tmp/w" -maxdepth 4 -name .git -print -quit 2>/dev/null)
+if [ -n "$local_git" ]; then
+  fail "a create in the wrapper leaves no .git behind" "found $local_git"
 fi
 
 # 8. The two refusals. The first is ginit's usage line; the second is ginit's
