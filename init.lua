@@ -83,16 +83,16 @@ M.options = {
 
 -- The program the new tab runs, as fish (the tab gets it through `fish -c`,
 -- see new_tab_argv below for the parameters). It exists because the pane has to
--- outlive the agent: switch to, attach or create the worktree, run the agent in
--- it, then leave a login shell there, so the hook output gws and worktrunk print
--- and the agent's own last lines stay readable above a prompt that works.
+-- outlive the agent: switch to, attach or create the workspace, run the agent
+-- in it, then leave a login shell there, so the hook output jws prints and the
+-- agent's own last lines stay readable above a prompt that works.
 -- Exiting that shell closes the tab.
 --
 -- Every value the flow knows arrives as a positional parameter, so no branch,
 -- base, agent name or prompt is ever written into this text: a branch with a
 -- slash, a prompt with quotes and an agent name with a space each stay one
 -- argument, because the shell hands them over as they were. The shell is fish
--- and not sh because gws is a fish function: a program on a PATH cannot be one.
+-- and not sh because jws is a fish function: a program on a PATH cannot be one.
 M.new_tab_script = [==[
 # $argv[1] = mode (switch, create or attach), $argv[2] = branch, $argv[3] = base
 # (empty when there is none), then the agent and the arguments it is started
@@ -123,7 +123,7 @@ set -l contract 'rex-config: the tab needs a mode, a branch and a base'
 # The three words come before the agent, and they are read before they are used:
 # the count here, and the mode word in the dispatch below. Reading them anyway
 # would be harmless -- fish answers a missing word with nothing where sh's
-# `shift` would end the shell -- but an empty branch would reach gws, and "could
+# `shift` would end the shell -- but an empty branch would reach jws, and "could
 # not enter ; not starting an agent" is a worse answer than naming the contract.
 # The message names all three, so a caller that sends two learns about the
 # third.
@@ -141,9 +141,10 @@ set -l base $argv[3]
 set -l agent $argv[4]
 set -l rest $argv[5..-1]
 
-# gws and worktrunk both run the project's hooks, and a hook that talks to git
-# in a pane nobody can type into must never stop on a credential prompt: it
-# would hang there invisibly. So git's terminal prompt is off before either.
+# jws runs jj and then the project's post-start hooks, and a hook that talks to
+# git in a pane nobody can type into must never stop on a credential prompt: it
+# would hang there invisibly. So git's terminal prompt is off before jws runs --
+# for a switch too, which reaches no hook but is the same pane.
 set -gx GIT_TERMINAL_PROMPT 0
 
 # Named once so the messages below can name what is not started even when no
@@ -153,103 +154,79 @@ if test -n "$agent"
   set what $agent
 end
 
-# The three modes are the three things a branch can want, and each is one
-# program's:
+# The three modes are the three things a branch can want, and all three are one
+# program's -- `jws`, which is the only workspace tool this wrapper names:
 #
-#   switch  an existing worktree, which is worktrunk's: `wt switch --no-cd`
-#           leaves this shell where it is, so the worktree's path is read from
-#           the JSON reply rather than arrived at by changing directory.
-#   create  a branch to make, which is gws's: jj has to make the workspace before
-#           wt can see the branch, so gws runs `jj workspace add` (from the
-#           wrapper's main workspace, fetching the revision first), attaches the
-#           branch and runs the post-start hooks.
-#   attach  a local branch with no worktree yet, which is also gws's: the
-#           workspace is made for the branch that is already there, so nothing is
-#           created from anything and no base is passed at all.
+#   switch  a workspace that already exists: `jws --existing` asks jj for its
+#           rows, refuses a name they do not list, and creates nothing.
+#   create  a branch to make: jws adds the workspace and its bookmark, fetches
+#           the base revision when there is one, and runs the post-start hooks.
+#   attach  a local branch with no workspace yet: jws makes the workspace for
+#           the bookmark that is already there, so no base is passed at all.
 #
-# A create and an attach are one program with two words, so they share the path
-# file: this program cannot follow the cd gws ends with, so gws is handed a file
-# and the new worktree's path is read out of it. The base is a revision, not a
-# flag: it is only passed to a create, and only when there is one, since an empty
-# word is a revision jj has no name for and a missing one means "start at main".
-# To an attach it is never passed -- the branch exists, so it was not made from
-# anything -- even when a caller sent one. gws and worktrunk say what they did on
-# this pane themselves, so none of it is captured -- and gws does the fetching,
-# which is why nothing here runs git at all.
+# The base is a revision, not a flag: it is only passed to a create, and only
+# when there is one, since an empty word is a revision jj has no name for and a
+# missing one means "start at main". To an attach it is never passed -- the
+# branch exists, so it was not made from anything -- even when a caller sent one.
+# jws says what it did on this pane itself, so none of it is captured; it is also
+# what fetches, which is why nothing here runs git at all.
 #
-# The worktree the answer named, and nothing else: the agent must never start in
-# the wrong directory, so a create, attach or switch that failed -- and its own
-# message is already on this pane -- or a path that cannot be read means the
-# agent is not started at all. The path file is read and removed either way: it
-# is this pane's litter, and an empty one is how "gws never wrote it" arrives
-# here.
+# The mode only decides which words jws is given. The path arrives the same way
+# for all three, because this program cannot follow the cd jws ends with: jws is
+# handed a file and writes the workspace's path into it as one line -- one
+# mktemp, one reading with head, removed here whichever mode ran.
+#
+# The workspace that answer named, and nothing else: the agent must never start
+# in the wrong directory, so a jws that failed -- and its own message is already
+# on this pane -- or a path file that cannot be read means the agent is not
+# started at all. The file is read and removed either way: it is this pane's
+# litter, and an empty first line is how "jws never wrote it" arrives here.
 #
 # The programs borrowed here are called through `command`, and the directory is
 # entered with `builtin cd`. fish's function namespace belongs to the user: on
 # this machine `rm` is a `trash` wrapper (so `rm -f` prints "Un-recognized
 # argument -f" and leaves the file) and `cd` is a directory jumper that lands
 # nowhere, so a plain `rm` or `cd` would put a line on every create and start the
-# agent in the wrong place. The two exceptions are `gws` and `wt`, which are
-# looked up as plain names because that is what they are: gws exists only as a
-# fish function, and the user's `wt` is how worktrunk's shell integration gets
-# in.
-# wt_path and not path: fish keeps $path as a mirror of PATH, so a local with that
-# name would shadow it -- harmless on the fish this was written against, a trap in
-# a later one.
-set -l wt_path
-if test "$mode" = switch
-  set -l listing (wt switch $branch --no-cd --format=json)
-  # The substitution's status is the switch's own, captured before anything else
-  # runs: a worktrunk that failed has already said why, on this pane's stderr.
-  set -l switched $status
-  if test $switched -eq 0
-    set wt_path (printf '%s\n' $listing | command jq -r '.path // empty')
-  end
-  if test -z "$wt_path"
-    # Two steps can leave no path: a switch that failed, whose own message is
-    # already on this pane, or a switch that worked and a reply whose path cannot
-    # be read (jq missing, or no path in it). Naming the step that went wrong is
-    # the point of the line, so neither case says "no path (exit 0)".
-    if test $switched -eq 0
-      printf 'rex-config: could not read the worktree path of %s from the switch reply (jq missing, or no path in it); not starting %s\n' "$branch" "$what" >&2
-    else
-      printf 'rex-config: wt switch %s failed (exit %s); not starting %s\n' "$branch" "$switched" "$what" >&2
-    end
-    leave_shell
-  end
-else if test "$mode" = create -o "$mode" = attach
+# agent in the wrong place. The one exception is `jws`, which is looked up as a
+# plain name because that is what it is: a fish function, and a program on a PATH
+# cannot be one.
+# ws_path and not path: fish keeps $path as a mirror of PATH, so a local with
+# that name would shadow it -- harmless on the fish this was written against, a
+# trap in a later one.
+set -l ws_path
+if test "$mode" = switch -o "$mode" = create -o "$mode" = attach
   set -l pf (command mktemp)
-  # One gws, two words: an attach names the branch that is already there and is
-  # given no base, and a create names the branch to make and the revision to make
-  # it from when the picker answered one.
-  if test "$mode" = attach
-    gws --attach $branch --path-file $pf
+  if test "$mode" = switch
+    jws --existing $branch --path-file $pf
+  else if test "$mode" = attach
+    jws --attach $branch --path-file $pf
   else if test -n "$base"
-    gws $branch $base --path-file $pf
+    jws $branch $base --path-file $pf
   else
-    gws $branch --path-file $pf
+    jws $branch --path-file $pf
   end
-  # The command's own status, captured before anything else runs.
-  set -l created $status
-  if test $created -eq 0
-    # the one line gws wrote, and not whatever else may have landed there
-    set wt_path (command head -n 1 $pf)
+  # jws's own status, captured before anything else runs: a jws that failed has
+  # already said why, on this pane's stderr.
+  set -l jws_status $status
+  if test $jws_status -eq 0
+    # the one line jws wrote, and not whatever else may have landed there
+    set ws_path (command head -n 1 $pf)
   end
   command rm -f $pf
-  if test $created -ne 0
-    printf 'rex-config: gws %s failed (exit %s); not starting %s\n' "$branch" "$created" "$what" >&2
+  if test $jws_status -ne 0
+    printf 'rex-config: jws %s failed (exit %s); not starting %s\n' "$branch" "$jws_status" "$what" >&2
     leave_shell
   end
-  if test -z "$wt_path"
-    printf 'rex-config: could not read the worktree path of %s from the gws path file; not starting %s\n' "$branch" "$what" >&2
+  if test -z "$ws_path"
+    printf 'rex-config: could not read the workspace path of %s from the jws path file; not starting %s\n' "$branch" "$what" >&2
     leave_shell
   end
 else
   # The first word is none of the three: a caller that does not know the
   # contract, or one still sending the old `1`/`0`. It is refused with the same
   # sentence too few words get, because it is the same mistake seen from the
-  # other side -- and before either program runs, since guessing what worktrunk
-  # or gws would make of the word happens on a pane nobody is watching.
+  # other side -- and before anything runs, since guessing what jws would make of
+  # the word happens on a pane nobody is watching.
   printf '%s\n' $contract >&2
   leave_shell
 end
@@ -257,16 +234,16 @@ end
 # A path that starts with a dash is a directory like any other, and fish's `cd`
 # reads one as an option: unlike sh's it has no `--` to end them with, so the
 # current-directory spelling is what keeps it a path. An absolute path, which is
-# what gws and worktrunk report, is left alone -- and `builtin`, because a plain
-# `cd` is the user's jumper (see above).
-set -l dir (string replace -r '^-' './-' -- $wt_path)
+# what jws reports, is left alone -- and `builtin`, because a plain `cd` is the
+# user's jumper (see above).
+set -l dir (string replace -r '^-' './-' -- $ws_path)
 builtin cd $dir
 or begin
-  printf 'rex-config: could not enter %s; not starting %s\n' "$wt_path" "$what" >&2
+  printf 'rex-config: could not enter %s; not starting %s\n' "$ws_path" "$what" >&2
   leave_shell
 end
 
-# No agent was asked for: the pane is the worktree and a login shell. The
+# No agent was asked for: the pane is the workspace and a login shell. The
 # prompt is the last word -- whatever else came with it belonged to an agent
 # that is not running -- and it has nowhere to go now, so it is printed above
 # the shell rather than disappearing with the float that collected it.

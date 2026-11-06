@@ -432,10 +432,9 @@ do
   M.options.agent_args, M.options.base = saved_args, saved_base
 end
 
--- The words the create and the switch are given are asserted where they are
--- executed: test/wrapper_test.sh runs the tab's wrapper with a stand-in `gws`
--- and a stand-in `wt` and reads the words each was given, for a create and for
--- an existing worktree.
+-- The words the create, the attach and the switch are given are asserted where
+-- they are executed: test/wrapper_test.sh runs the tab's wrapper with a stand-in
+-- `jws` and reads the words it was given, for all three modes.
 
 if fails > 0 then os.exit(1) end
 print("ok " .. count .. " assertions")
