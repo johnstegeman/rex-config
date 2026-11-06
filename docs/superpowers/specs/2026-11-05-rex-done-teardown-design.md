@@ -452,7 +452,7 @@ confirmation: with nothing at risk, the tab going away is the feedback.
    remove hooks, and a refusal of its own is the report. In one command dojjo
    deletes the directory, forgets the workspace and deletes the bookmark, and it
    has no merged check to second-guess, so the three reads below are the only
-   audit this teardown gets. They are independent of each other and are run in
+   audit this teardown gets. Each answers a different question, and they run in
    the order they are reported: row, directory, bookmark.
 2. **Verify the store, rather than trust the exit code.** `jj workspace list`
    must no longer list the name — read with `--ignore-working-copy`, because a
@@ -532,7 +532,7 @@ hook at all, because beads is found by upward detection.
 **There is no forget hook, in any form.** `djo remove` forgets the workspace
 itself, so a `[hooks.post-remove]` table would be a no-op and a top-level
 `[post-remove]` would be silently ignored. It was deleted rather than carried
-across. The row is still verified after the removal, as step 3 of the clean path
+across. The row is still verified after the removal, as step 2 of the clean path
 says, because the listing rather than a hook is the proof.
 
 The seed is `jinit`'s seed, in `jinit`'s file, so a repo seeded two ways does not
