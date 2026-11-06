@@ -216,27 +216,45 @@ passes it in as data.
 
 ### Finding the workspace, and the refusals that come before any question
 
-The script is handed `--cwd`, `--main` and `--root`, so it can refuse without
-asking anything of the repository:
+The script is handed `--cwd`, `--main` and `--root`. `--main` is worktrunk's
+answer to "which worktree is main", and it is not trusted on its own: in a
+bare-rooted wrapper every worktree is detached at the same commit, so worktrunk
+has flagged a leftover branch workspace as `main` and the real `main` worktree as
+not-main. jj names its own main row, and that is the answer the protection is
+built from — with `--main` kept as well, so the refusal below can never be the
+thing that lets a teardown through by being wrong on its own.
 
-1. **`--cwd` is `--main` or inside it, or is the wrapper root** → refuse: this
-   is the main worktree, or `default`, the empty workspace at the wrapper root,
-   and the flow never tears down either. Structural, by path — not by name, so a
-   repo whose main worktree is called something else is still protected.
-2. Otherwise, one read: `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`,
-   run in `--cwd`. **The longest listed root that is a prefix of, or equal to,
-   `--cwd` is this workspace** — its **name** (the tab label and the branch) and
-   its **root** (the directory to remove). Longest wins because roots nest:
+1. **Two answers to compare, before any refusal, from one read**:
+   `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`, run in `--cwd`. The
+   row named `main` is **jj's main worktree** (`jj_main`). Put in the same
+   one-slash form `--main` is put in, a trailing slash is not a disagreement.
+2. **`jj_main` and `--main` disagree** → refuse, naming both paths and saying
+   the two answers disagree about which worktree is main. Nothing is fetched,
+   moved or removed: this is precisely the repo the flow cannot tell how to act
+   in, and refusing is the only safe answer to it. A repo with no row named
+   `main` — a main workspace under another name — has one answer only, and
+   `--main` is it.
+3. **`--cwd` is `--main` or inside it, is `jj_main` or inside it, or is the
+   wrapper root** → refuse: this is the main worktree, or `default`, the empty
+   workspace at the wrapper root, and the flow never tears down either.
+   Structural, by path — not by name, so a repo whose main worktree is called
+   something else is still protected. The three are a union rather than a
+   choice: with the two answers agreeing, either one protects the same
+   directory, and with them disagreeing rule 2 has already refused.
+4. Otherwise the same one read answers the second question: **the longest listed
+   root that is a prefix of, or equal to, `--cwd` is this workspace** — its
+   **name** (the tab label and the branch) and its **root** (the directory to
+   remove). Longest wins because roots nest:
    measured on the live wrapper, `default` is `/…/rex-config`, `main` is
    `/…/rex-config/main` and `feat/6c4` is `/…/rex-config/feat-6c4`, so a
    subdirectory of a workspace matches two rows and only the deepest is the
    answer. `default` matching at all therefore means the cwd is at or under the
-   wrapper with no deeper workspace owning it — which is rule 1's refusal, from
+   wrapper with no deeper workspace owning it — which is rule 3's refusal, from
    the other direction.
-3. **No row matches** → refuse: this pane is not inside a jj workspace the
+5. **No row matches** → refuse: this pane is not inside a jj workspace the
    wrapper knows about (a stale directory, or a plain git worktree left over from
    before the conversion). Nothing is guessed.
-4. `wt list --format=json` must show a worktree at that root. If it does not,
+6. `wt list --format=json` must show a worktree at that root. If it does not,
    the directories have drifted apart — the jj row exists and the git worktree
    does not, or the reverse — and the screen says so instead of removing one
    half.
@@ -477,9 +495,15 @@ part of this change that is not code in a worktree.
 
 ## Edge cases and failure behaviour
 
-- **The pane is in `main` or at the wrapper root** — refused before anything is
-  read (`--cwd` is a path comparison). The screen is the same refusal, with one
-  line: the main worktree is not a workspace to tear down.
+- **The pane is in `main` or at the wrapper root** — refused before any question
+  is asked (`--cwd` is a path comparison, made against `--main`, the wrapper root
+  and jj's own `main` row). The screen is the same refusal, with one line: the
+  main worktree is not a workspace to tear down.
+- **jj's `main` row and `--main` disagree about which worktree is main** —
+  refused, naming both paths, before the fetch: nothing was fetched, moved or
+  removed. A bare-rooted wrapper of detached worktrees is where worktrunk's
+  `main` flag has been seen to name a leftover, and `jj workspace list` is the
+  other answer; the flow does not choose between them.
 - **The pane is in a directory jj does not list** — refused, naming the cwd. A
   stale directory from a half-done removal is the usual cause, and the message
   says which paths exist and which do not.

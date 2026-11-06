@@ -425,11 +425,15 @@ The audit then finds the workspace from the pane's own directory — the longest
 root in `jj workspace list` that is that directory or a directory of it,
 compared as whole path segments so that `feat-6c41` is never read as
 `feat-6c4`. The workspace gives the branch the tab is named after and the
-directory that is about to go. The main worktree and the wrapper root are
-refused before anything is read, and so is a workspace and a worktree that
-disagree — a jj row with no worktree at its root, or a worktree no row
-claims — because removing one half of that is the state nobody unpicks from a
-float.
+directory that is about to go. Which worktree is *main* comes from that same
+listing too — the row named `main` — and not from worktrunk's `main` flag,
+which arrives as `--main`: in a bare-rooted wrapper, where every worktree is
+detached at the same commit, worktrunk has flagged a leftover branch workspace
+and not the real `main`, so protecting its answer would protect the wrong
+directory. The main worktree, the wrapper root and jj's own `main` row are one
+protected set, and so is a workspace and a worktree that disagree — a jj row
+with no worktree at its root, or a worktree no row claims — because removing
+one half of that is the state nobody unpicks from a float.
 
 Then, before it fetches, one question decides whether the teardown can finish
 at all: whether worktrunk will actually run the project's `post-remove` hook —
@@ -531,16 +535,14 @@ to be read; by the time it is, nothing has been removed. The title is `can't
 tear down <workspace>`, and the bead line comes after the blockers, in a
 paragraph of its own.
 
-- **A `post-remove` hook worktrunk will not run.** `worktrunk will skip the
-  post-remove hook that forgets the jj workspace until it is approved: run wt
-  config approvals add in <main>` — the removal would go through and the jj row
-  would outlive the worktree, so this is asked before the fetch and nothing is
-  fetched or removed on it. A repo that was never seeded says the other line,
-  `worktrunk has no post-remove hook that forgets the jj workspace, so the row
-  would survive: run ginit to seed <main>/.config/wt.toml` — and a listing that
-  cannot be read as one, whether the read failed or the reply was not a hook
-  listing, refuses the same way and names the read itself, because a
-  prerequisite that cannot be checked is not a prerequisite that holds.
+- **The two answers disagree about which worktree is main.** `jj says the main
+  workspace is <path>, --main says <path>: the two answers disagree about which
+  worktree is main, so nothing was done` — jj's `main` row against the main
+  worktree worktrunk flagged. This one is refused before the fetch, so nothing
+  was fetched, moved or removed either: a repo whose two answers disagree is one
+  this flow cannot tell how to act in. Compare `jj workspace list` with
+  `wt list` and fix whichever of the two is wrong before pressing the key
+  again.
 - **Changes not merged into the base.** `changes not merged into <base>: 3
   changes, 4 paths` — the base is the one resolved above, `main@origin` in a
   clone whose default branch is `main` — and the paths are listed underneath,
