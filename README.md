@@ -350,6 +350,16 @@ the branch name exactly as typed (`bug/58h`).
 - The main worktree is never a target: every tab is created in the project's
   session with the main worktree as its starting directory, and `bd` is always
   run there, which is where the database is reachable.
+- Which directory that is comes from **jj's own workspace name**: the workspace
+  called `main` in `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'` is
+  the main worktree, and worktrunk's `main` flag in `wt list --format=json` is
+  only the fallback, for a repository with no workspace called `main`. worktrunk
+  can flag the wrong one — in a bare-rooted wrapper whose worktrees are all
+  detached (`pi-rex`) it called a branch workspace main — while `main` is the
+  name everything here already means by "main": `ginit` creates it, `gws` adds
+  workspaces beside it, and the refusals in [Finishing](#finishing-ctrlspaced)
+  compare against it. That one answer is the picker's starting directory, where
+  `bd` is asked, and the directory `work_done` hands over as `--main`.
 - Switching the key twice for the same branch selects the tab that is already
   there. One tab, one worktree, one claim.
 - A created or attached workspace sits beside `main`, in the repo's wrapper

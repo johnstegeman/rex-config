@@ -401,6 +401,83 @@ stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/ma
 eq("no main worktree message", select(2, M.project_for("/x/pmm-iris/main")),
   "no main worktree found for /x/pmm-iris")
 
+-- Where the main worktree comes from ---------------------------------------
+--
+-- jj's own workspace list, by name. A bare-rooted wrapper whose worktrees are all
+-- detached -- pi-rex -- is one worktrunk flags wrongly (it called a branch
+-- workspace main), while jj's `main` row is the name every part of this flow
+-- already assumes when it says "main". worktrunk's flag is the fallback, for a
+-- repository whose main workspace has another name or a jj that cannot be read.
+local JJ = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- jj's answer as the template above prints it: one name, one tab, the root, one
+-- newline per row. A non-zero code is jj refusing, which is not a main row.
+local function jj_rows(stdout, code)
+  code = code or 0
+  return { ok = code == 0, code = code, stdout = stdout, stderr = "" }
+end
+
+-- The pi-rex shape measured live: worktrunk flags the branch workspace, jj names
+-- main at the other one.
+stub = project_stub()
+stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pi-rex/.git\n", stderr = "" }
+stub.exec_replies[JJ] = jj_rows("default\t/x/pi-rex\nfeat/b9y\t/x/pi-rex/feat-b9y\nmain\t/x/pi-rex/main\n")
+stub.json_replies["wt list"] = {
+  items = {
+    { worktree = { path = "/x/pi-rex/feat-b9y", main = true } },
+    { worktree = { path = "/x/pi-rex/main", main = false } },
+  },
+}
+project = M.project_for("/x/pi-rex/feat-b9y")
+eq("jj's main workspace is the main worktree, not wt's flag",
+  project and project.main, "/x/pi-rex/main")
+eq("the project root is still git's", project and project.root, "/x/pi-rex")
+eq("jj is asked for its workspaces in the login shell", (call_for(stub, JJ) or {}).argv,
+  { shell(), "-lc", JJ })
+eq("jj is asked in the project root", (call_for(stub, JJ) or {}).cwd, "/x/pi-rex")
+eq("worktrunk is not asked when jj names main",
+  call_for(stub, "wt list --format=json"), nil)
+
+-- No row named main -- and a row whose name only starts with it, which is a
+-- different workspace and not the answer -- leaves worktrunk's flag to answer
+-- as it did before.
+stub = project_stub()
+stub.exec_replies[JJ] = jj_rows(
+  "default\t/x/pmm-iris\ntrunk\t/x/pmm-iris/trunk\nmaintenance\t/x/pmm-iris/elsewhere\n")
+stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
+project = M.project_for("/x/pmm-iris/feat-1")
+eq("without a main row the wt flag is the main worktree",
+  project and project.main, "/x/pmm-iris/feat-1")
+
+-- The jj read is optional: a jj that refuses, and one the login shell cannot
+-- find at all, both fall back to the flag rather than failing the project.
+stub = project_stub()
+stub.exec_replies[JJ] = jj_rows("Error: not a jj repository\n", 1)
+stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
+eq("a jj that fails falls back to the wt flag",
+  (M.project_for("/x/pmm-iris/feat-1") or {}).main, "/x/pmm-iris/feat-1")
+
+stub = project_stub()
+stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
+eq("a jj the login shell cannot find falls back to the wt flag",
+  (M.project_for("/x/pmm-iris/feat-1") or {}).main, "/x/pmm-iris/feat-1")
+
+-- Neither source naming a main worktree is still the same refusal.
+stub = project_stub()
+stub.exec_replies[JJ] = jj_rows("default\t/x/pmm-iris\ntrunk\t/x/pmm-iris/trunk\n")
+stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/main", main = false } } } }
+eq("no main worktree in either source message", select(2, M.project_for("/x/pmm-iris/main")),
+  "no main worktree found for /x/pmm-iris")
+
+-- jj's root is used as a path, so a trailing slash and a blank line are not
+-- allowed to hide the row or carry into the answer. The fallback here names a
+-- different directory, so a pass cannot come from worktrunk's flag.
+stub = project_stub()
+stub.exec_replies[JJ] = jj_rows("\nmaintenance\t/x/pmm-iris/elsewhere\nmain\t/x/pmm-iris/main/\n")
+stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
+eq("a trailing slash on jj's root is dropped",
+  (M.project_for("/x/pmm-iris/main") or {}).main, "/x/pmm-iris/main")
+
 stub = project_stub()
 stub.exec_replies["wt list --format=json"] = { ok = false, code = 1, stdout = "", stderr = "not a worktrunk repo\nsecond line\n" }
 eq("wt failure message", select(2, M.project_for("/x/pmm-iris/main")),
