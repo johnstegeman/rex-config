@@ -1223,17 +1223,20 @@ function M.work_new_go(ctx, args)
 end
 
 -- The jj workspaces as name and root rows, in the order workspaces were added.
--- Read from the op log rather than from the working copy: the background
--- post-remove hook is running `jj workspace forget` in this same repository, and
--- a plain read wants the working-copy lock that hook holds. The op log already
--- carries the row the hook is removing, so a wait still sees it go.
+-- Read from the op log rather than from the working copy: the op log is what
+-- carries the row, and a plain read would want a working-copy lock that another
+-- workspace's jj, or a hook dojjo started, may be holding.
 local WORKSPACE_LIST =
   [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
 
--- How long a background hook is given to clear the jj workspace row before the
--- row is called a leftover: a read, then a short sleep and another read, until
--- the reads are spent. The hook is one `jj workspace forget`, so about two
--- seconds is generous, and the wait cannot hang the audit's exit.
+-- A workspace's bookmark, as jj prints it: one name per line, nothing else.
+local BOOKMARK_LIST = [[jj bookmark list -T 'name ++ "\n"']]
+
+-- How long the jj workspace row is given to go before it is called a leftover: a
+-- read, then a short sleep and another read, until the reads are spent. dojjo's
+-- own remove is synchronous, so this is belt to its braces -- the row is what is
+-- verified, and an exit code is not -- and about two seconds is generous for a
+-- forget that has already been asked for. The wait cannot hang the audit's exit.
 local SETTLE_READS = 10
 local SETTLE_SECONDS = "0.2"
 
@@ -1248,9 +1251,10 @@ local function jj_workspace_list(main)
   return listed.stdout or ""
 end
 
--- Whether a jj workspace listing still names NAME: one row per workspace, a tab
--- between the name and the root.
-local function lists_workspace(stdout, name)
+-- Whether a jj listing still names NAME. Both listings this action reads are one
+-- row per name -- a workspace row is the name, a tab and its root, and a bookmark
+-- row is the name alone -- so the name is the first field of the line either way.
+local function lists_row(stdout, name)
   for line in tostring(stdout or ""):gmatch("[^\n]+") do
     if line:match("^([^\t]+)") == name then
       return true
@@ -1278,78 +1282,30 @@ function M.work_done_go(ctx, args)
   end
   local workspace, path, main = args.workspace, args.path, args.main
 
-  -- --foreground so the removal itself blocks: its exit code and its
-  -- branch_outcome are then final, where a background removal could still be
-  -- running when the tab closes. It does *not* wait for the post-remove hook --
-  -- worktrunk's post-* hooks run in the background -- which is what the wait
-  -- below is for.
-  -- -y because nobody is there to approve a prompt; --format=json so the
-  -- branch's fate is read rather than guessed. No -f, no -D, no --reap: if
-  -- worktrunk refuses on its own terms, that refusal is the report. It runs in
-  -- the main worktree, because the one being removed is the pane's own.
+  -- dojjo's remove is the teardown itself: it forgets the workspace, deletes its
+  -- directory and deletes the bookmark. -y because nobody is there to answer a
+  -- prompt, and no --keep-bookmark because the branch is merged and goes with
+  -- the workspace it was named for. It runs in the main worktree, because the one
+  -- being removed is the pane's own. dojjo has no merged check to second-guess,
+  -- so nothing here is reinterpreted: a refusal is dojjo's own line, and the
+  -- three reads below are the only audit this teardown gets.
   local removed, remove_reason = run_in_shell(
-    "wt remove " .. M.shell_quote(path) .. " --foreground -y --format=json", main)
+    "djo remove " .. M.shell_quote(workspace) .. " -y", main)
   if removed == nil then
-    error("could not run worktrunk: " .. tostring(remove_reason), 0)
+    error("could not run djo: " .. tostring(remove_reason), 0)
   end
   if removed.code ~= 0 then
     error("could not remove " .. path .. ": " .. first_line(removed.stderr), 0)
   end
 
-  -- worktrunk's --format=json reply is an array, one entry per removal; this flow
-  -- removes one path, so the entry that matters is the first. Reading it as an
-  -- object -- which an array is not -- is how a perfect removal came to be
-  -- reported as a failure after the worktree was already gone. A bare object is
-  -- tolerated as well, so a single-entry shape reads the same.
-  local decoded = rex.json.decode(removed.stdout or "")
-  -- An entry is an array's first, or a bare object's own self. An empty reply is
-  -- neither -- worktrunk exited 0 and then named no removal at all -- so there is
-  -- no branch to report and none to name a command for, and the kept-branch line
-  -- below would claim it kept something it never mentioned. A report that cannot
-  -- be made says so in its own words.
-  local entry = nil
-  if type(decoded) == "table" then
-    if decoded[1] ~= nil then
-      entry = decoded[1]
-    elseif next(decoded) ~= nil then
-      entry = decoded
-    end
-  end
-  if entry == nil then
-    error("worktrunk named no removal in its reply: run wt list --format=json in " .. main
-      .. " to see what is left", 0)
-  end
-  local outcome = type(entry) == "table" and entry.branch_outcome or nil
-  local branch = type(entry) == "table" and entry.branch or nil
-
-  -- A teardown is complete or it is not. `deleted` is worktrunk's word for a
-  -- branch it removed; `not_attempted` with no branch is the detached worktree a
-  -- jj wrapper produces -- `gws` adds workspaces with `jj workspace add` and
-  -- nothing attaches a branch, so there is nothing for worktrunk to delete and
-  -- nothing left behind. Everything else -- a retained branch, a reply that says
-  -- nothing about one, a value this flow does not know -- is reported with the one
-  -- command that would finish the job. A bookmark that survives is not that: a
-  -- bookmark belongs to the finishing skill's Step 8, and this flow neither
-  -- deletes nor reports one. -D is the person's to run: if worktrunk and the audit
-  -- disagree about merged, that is theirs to settle.
-  local complete = outcome == "deleted" or (outcome == "not_attempted" and branch == nil)
-  if not complete then
-    -- The command names the branch, not the path: by the time this line is read
-    -- the worktree is gone, and `wt remove <path> -D` has no path to work on.
-    -- The branch is what is left to remove, so that is what worktrunk is given.
-    local named = type(branch) == "string" and branch ~= "" and branch or workspace
-    error("the branch " .. named .. " was kept (" .. tostring(outcome or "worktrunk said nothing")
-      .. "): run wt remove -D " .. M.shell_quote(named), 0)
-  end
-
-  -- The seeded hook ends in || true, so the row is verified rather than trusted.
-  -- The hook is also a background hook: it starts after the removal has already
-  -- returned, so the first read can be too early on a teardown that is
-  -- perfectly healthy. The row is therefore given a bounded moment to go, and
-  -- only what is still there at the end of it is a leftover.
+  -- dojjo forgetting the workspace is trusted rather than believed, so the row is
+  -- read: an exit code says only that dojjo thought it had finished, and the row
+  -- is what is left to check -- and what a person checks when they doubt the exit
+  -- code. The row is given a bounded moment to go, and only what is still there
+  -- at the end of it is a leftover.
   local rows = jj_workspace_list(main)
   for _ = 2, SETTLE_READS do
-    if not lists_workspace(rows, workspace) then
+    if not lists_row(rows, workspace) then
       break
     end
     -- A sleep that cannot be run only makes the next read come sooner; the
@@ -1357,16 +1313,13 @@ function M.work_done_go(ctx, args)
     run({ "sleep", SETTLE_SECONDS })
     rows = jj_workspace_list(main)
   end
-  if lists_workspace(rows, workspace) then
-    -- The hook is worktrunk's fast path and not a guarantee: worktrunk cannot
-    -- even expand the seeded line for a detached worktree -- all `jj workspace
-    -- add`, and so `gws`, creates -- because there is no `branch` variable in it
-    -- to interpolate, and an unapproved hook never runs at all. A row left
-    -- behind for a directory this flow has just removed is therefore this
-    -- teardown finishing itself, once, rather than somebody else's leftover: the
-    -- same forget the hook would have run, from main, with the workspace's name
-    -- as one quoted word. The row is then read again, because the row is what
-    -- this verifies and an exit code is not.
+  if lists_row(rows, workspace) then
+    -- dojjo's forget is the fast path and not a guarantee, so a row left behind
+    -- for a directory this flow has just removed is this teardown finishing
+    -- itself, once, rather than somebody else's leftover: the same forget dojjo
+    -- would have run, from main, with the workspace's name as one quoted word. The
+    -- row is then read again, because the row is what this verifies and an exit
+    -- code is not.
     local forgotten = run_in_shell(
       "jj workspace forget " .. M.shell_quote(workspace), main)
     -- The row is read again whatever the forget said: the row is the thing being
@@ -1374,7 +1327,7 @@ function M.work_done_go(ctx, args)
     -- because otherwise the reader is invited to run by hand the exact command
     -- that just failed.
     rows = jj_workspace_list(main)
-    if lists_workspace(rows, workspace) then
+    if lists_row(rows, workspace) then
       local said = forgotten ~= nil and forgotten.code ~= 0 and first_line(forgotten.stderr) or nil
       error("the jj workspace " .. workspace
         .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace)
@@ -1382,23 +1335,31 @@ function M.work_done_go(ctx, args)
     end
   end
 
-  -- And the worktree itself. A listing that cannot be read is not a proof of
-  -- absence, so it is reported rather than read as an empty one.
-  local worktrees, worktree_reason = run_in_shell("wt list --format=json", main)
-  if worktrees == nil or worktrees.code ~= 0 then
-    error("could not list worktrees: "
-      .. first_line(worktrees and worktrees.stderr or worktree_reason), 0)
+  -- And the directory itself, which is what a person looks for when they doubt
+  -- the removal. `test ! -d` is one argv rather than a shell line, so the path is
+  -- one word whatever it holds -- and a check that could not be run is not a proof
+  -- of absence either, so it is reported rather than read as a directory that went.
+  local absent, absent_reason = run({ "test", "!", "-d", path }, main)
+  if absent == nil then
+    error("could not check whether " .. path .. " is still there: "
+      .. tostring(absent_reason), 0)
   end
-  local listing, listing_reason = rex.json.decode(worktrees.stdout or "")
-  if type(listing) ~= "table" then
-    error("could not read the worktrunk listing: "
-      .. tostring(listing_reason or ("it decoded to a " .. type(listing) .. ", not an object")), 0)
+  if absent.code ~= 0 then
+    error(path .. " is still there: run djo list -f in " .. main, 0)
   end
-  for _, item in ipairs(type(listing.items) == "table" and listing.items or {}) do
-    local worktree = type(item) == "table" and item.worktree or nil
-    if type(worktree) == "table" and worktree.path == path then
-      error(path .. " is still a worktree: run wt list to see why", 0)
-    end
+
+  -- And the bookmark. dojjo deletes it with the workspace, so a bookmark that
+  -- still names the workspace is the only "kept" case this flow has: it is not
+  -- this action's to delete, and the one command that would finish the job is
+  -- named rather than run.
+  local bookmarks, bookmark_reason = run_in_shell(BOOKMARK_LIST, main)
+  if bookmarks == nil or bookmarks.code ~= 0 then
+    error("could not list jj bookmarks: "
+      .. first_line(bookmarks and bookmarks.stderr or bookmark_reason), 0)
+  end
+  if lists_row(bookmarks.stdout, workspace) then
+    error("the bookmark " .. workspace .. " was kept: run jj bookmark delete "
+      .. M.shell_quote(workspace), 0)
   end
 end
 
