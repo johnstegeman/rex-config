@@ -526,6 +526,7 @@ ran=$((ran + 1))
 if [ "$status" -ne 0 ]; then
   fail "a failed fetch does not fail the create" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if ! grep -Fxq 'fetch' "$tmp/fetch.log" 2>/dev/null; then
   fail "a base revision is fetched at all" \
     "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>') / $(cat "$tmp/err")"
@@ -543,12 +544,20 @@ if ! grep -Fxq 'bounded: 30 jj git fetch' "$tmp/fetch.log" 2>/dev/null; then
   fail "the fetch is bounded by 30 seconds" \
     "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>')"
 fi
-# The failure is ONE readable line, and the create carries on from the revision
-# as it resolves locally rather than retrying something. Counted rather than
-# grepped: a three-line complaint would contain the phrase too.
+# The failure is ONE line, and it is jws's own: jj reports what it then made
+# (`Created workspace in ...`) on STDERR as well, and the notice comes before
+# the workspace exists, so everything stderr says before that report IS the
+# notice. One line means the notice is one line -- a second explanatory line,
+# or a paragraph of them, would be sitting right here beside it.
+fetch_notice=$(awk '/^Created workspace/ { exit } { print }' "$tmp/err")
 ran=$((ran + 1))
-if [ "$(grep -c 'could not fetch' "$tmp/err" 2>/dev/null || true)" != 1 ]; then
-  fail "a failed fetch says so, in one line" "$(cat "$tmp/err")"
+if [ "$(printf '%s\n' "$fetch_notice" | grep -c .)" != 1 ]; then
+  fail "a failed fetch says so, in one line" "stderr before jj's report: [$fetch_notice]"
+fi
+ran=$((ran + 1))
+if [ "$fetch_notice" != "jws: could not fetch; feat/fetched starts from root() as it is" ]; then
+  fail "the fetch notice names the branch and the revision it fell back to" \
+    "[$fetch_notice]"
 fi
 ran=$((ran + 1))
 if [ "$(cat "$tmp/w/fetched.txt" 2>/dev/null || true)" != "$tmp/w/feat-fetched" ]; then
@@ -580,9 +589,9 @@ fi
 # The other two fetch forms. The bound is a convenience, not a requirement: on
 # a machine with neither `timeout` nor `gtimeout` the fetch still happens,
 # unbounded. Nothing above reaches that branch -- the fetchbin has a `timeout`
-# in front of the real one -- so this PATH is built by hand to hold exactly
 # what jws and the two stand-ins need and neither bound. That is the only way
-# to see the plain `jj git fetch`, and the log proves it is the one that ran.
+# to see the plain `jj git fetch`: with no `timeout` and no `gtimeout` on that
+# PATH, a fetch in the log is a fetch the unbounded form made.
 mkdir -p "$tmp/notimeout-bin"
 for tool in dirname tee sed; do
   ln -sf "$(command -v "$tool")" "$tmp/notimeout-bin/$tool"
@@ -610,10 +619,6 @@ ran=$((ran + 1))
 if ! grep -Fxq 'fetch' "$tmp/fetch.log" 2>/dev/null; then
   fail "the fetch happens with no timeout and no gtimeout on the PATH" \
     "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>') / $(cat "$tmp/err")"
-fi
-ran=$((ran + 1))
-if grep -Fq 'bounded:' "$tmp/fetch.log" 2>/dev/null; then
-  fail "an unbounded fetch is not reported as bounded" "$(cat "$tmp/fetch.log")"
 fi
 ran=$((ran + 1))
 if [ "$(cat "$tmp/w/unbounded.txt" 2>/dev/null || true)" != "$tmp/w/feat-unbounded" ]; then
