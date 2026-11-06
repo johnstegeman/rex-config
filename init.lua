@@ -1229,8 +1229,14 @@ end
 local WORKSPACE_LIST =
   [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
 
--- A workspace's bookmark, as jj prints it: one name per line, nothing else.
-local BOOKMARK_LIST = [[jj bookmark list -T 'name ++ "\n"']]
+-- The workspace's bookmark, read as a live target rather than as a name in a
+-- listing. `jj bookmark delete` -- which is what dojjo's remove runs -- only marks
+-- a bookmark a remote tracks deleted: the tombstone goes on printing its name in
+-- `jj bookmark list`, so a listing cannot tell a deleted bookmark from a kept one.
+-- A revset can, because it resolves to a commit only while the bookmark is really
+-- there. Read from the op log for the same reason the row read is.
+local BOOKMARK_TARGET =
+  [[jj --ignore-working-copy log --no-graph -r %s -T 'commit_id ++ "\n"']]
 
 -- How long the jj workspace row is given to go before it is called a leftover: a
 -- read, then a short sleep and another read, until the reads are spent. dojjo's
@@ -1251,10 +1257,9 @@ local function jj_workspace_list(main)
   return listed.stdout or ""
 end
 
--- Whether a jj listing still names NAME. Both listings this action reads are one
--- row per name -- a workspace row is the name, a tab and its root, and a bookmark
--- row is the name alone -- so the name is the first field of the line either way.
-local function lists_row(stdout, name)
+-- Whether a jj workspace listing still names NAME: one row per workspace, a tab
+-- between the name and its root.
+local function lists_workspace(stdout, name)
   for line in tostring(stdout or ""):gmatch("[^\n]+") do
     if line:match("^([^\t]+)") == name then
       return true
@@ -1295,7 +1300,8 @@ function M.work_done_go(ctx, args)
     error("could not run djo: " .. tostring(remove_reason), 0)
   end
   if removed.code ~= 0 then
-    error("could not remove " .. path .. ": " .. first_line(removed.stderr), 0)
+    error("could not remove the workspace " .. workspace .. " (" .. path .. "): "
+      .. first_line(removed.stderr), 0)
   end
 
   -- dojjo forgetting the workspace is trusted rather than believed, so the row is
@@ -1305,7 +1311,7 @@ function M.work_done_go(ctx, args)
   -- at the end of it is a leftover.
   local rows = jj_workspace_list(main)
   for _ = 2, SETTLE_READS do
-    if not lists_row(rows, workspace) then
+    if not lists_workspace(rows, workspace) then
       break
     end
     -- A sleep that cannot be run only makes the next read come sooner; the
@@ -1313,7 +1319,7 @@ function M.work_done_go(ctx, args)
     run({ "sleep", SETTLE_SECONDS })
     rows = jj_workspace_list(main)
   end
-  if lists_row(rows, workspace) then
+  if lists_workspace(rows, workspace) then
     -- dojjo's forget is the fast path and not a guarantee, so a row left behind
     -- for a directory this flow has just removed is this teardown finishing
     -- itself, once, rather than somebody else's leftover: the same forget dojjo
@@ -1327,7 +1333,7 @@ function M.work_done_go(ctx, args)
     -- because otherwise the reader is invited to run by hand the exact command
     -- that just failed.
     rows = jj_workspace_list(main)
-    if lists_row(rows, workspace) then
+    if lists_workspace(rows, workspace) then
       local said = forgotten ~= nil and forgotten.code ~= 0 and first_line(forgotten.stderr) or nil
       error("the jj workspace " .. workspace
         .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace)
@@ -1348,16 +1354,21 @@ function M.work_done_go(ctx, args)
     error(path .. " is still there: run djo list -f in " .. main, 0)
   end
 
-  -- And the bookmark. dojjo deletes it with the workspace, so a bookmark that
-  -- still names the workspace is the only "kept" case this flow has: it is not
-  -- this action's to delete, and the one command that would finish the job is
-  -- named rather than run.
-  local bookmarks, bookmark_reason = run_in_shell(BOOKMARK_LIST, main)
-  if bookmarks == nil or bookmarks.code ~= 0 then
-    error("could not list jj bookmarks: "
-      .. first_line(bookmarks and bookmarks.stderr or bookmark_reason), 0)
+  -- And the bookmark, which dojjo deletes with the workspace -- so one that still
+  -- resolves is the only "kept" case this flow has. It is not this action's to
+  -- delete: the one command that would finish the job is named rather than run. A
+  -- name jj's own revset syntax cannot carry is jj's error, reported below rather
+  -- than read as a live bookmark.
+  local target = 'bookmarks(exact:"' .. workspace .. '")'
+  local live, live_reason = run_in_shell(
+    string.format(BOOKMARK_TARGET, M.shell_quote(target)), main)
+  if live == nil or live.code ~= 0 then
+    error("could not read the bookmark of " .. workspace .. ": "
+      .. first_line(live and live.stderr or live_reason), 0)
   end
-  if lists_row(bookmarks.stdout, workspace) then
+  -- A commit id means the bookmark is there; no output at all means it is not --
+  -- which is also what the tombstone of a deleted remote-tracked bookmark leaves.
+  if (live.stdout or ""):match("%S") ~= nil then
     error("the bookmark " .. workspace .. " was kept: run jj bookmark delete "
       .. M.shell_quote(workspace), 0)
   end

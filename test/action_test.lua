@@ -574,7 +574,7 @@ end
 -- The audit's answer, carried out: one removal through the login shell in the
 -- main worktree -- dojjo forgets the workspace, deletes its directory and
 -- deletes its bookmark -- and then the three reads that decide whether it
--- happened: the jj workspace row, the directory itself, and the bookmarks. Each
+-- happened: the jj workspace row, the directory itself, and the bookmark. Each
 -- is read rather than inferred from an exit code, and each has its own one line
 -- when it disagrees. A command the flow did not run has no reply at all, so a
 -- wrong argv fails here instead of answering plausibly.
@@ -586,9 +586,17 @@ end
 local REMOVE = "djo remove 'feat/6c4' -y"
 -- The workspace read is WORKSPACES, defined with the project fixture above: it
 -- reads the op log rather than the working copy, because another jj in the same
--- repository may hold that lock. The bookmark read is the other thing dojjo
--- deletes: one name per line, nothing else.
-local BOOKMARKS = [[jj bookmark list -T 'name ++ "\n"']]
+-- repository may hold that lock. The bookmark read is the same way round for the
+-- same reason.
+-- The bookmark itself is read as a live target rather than as a name in a
+-- listing: `jj bookmark delete` -- which is what dojjo's remove does -- only
+-- marks a remote-tracked bookmark deleted, so `jj bookmark list` goes on printing
+-- its name and a listing cannot tell a deleted bookmark from a kept one. A revset
+-- that resolves to no commit can.
+local BOOKMARK = [[jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"feat/6c4")' -T 'commit_id ++ "\n"']]
+-- The listing a tombstone still shows up in: a command this action must not read,
+-- kept here so a case can answer it and prove it was never asked.
+local BOOKMARKS_LIST = [[jj bookmark list -T 'name ++ "\n"']]
 -- What the flow runs itself when the wait still finds the row: one `jj
 -- workspace forget` for the workspace, its name quoted like every other word
 -- handed to the shell.
@@ -606,8 +614,13 @@ local MISSING = { code = 1, stdout = "", stderr = "" }
 local WORKSPACES_CLEAR = {
   code = 0, stdout = "default\t/p/demo\nmain\t/p/demo/main\n", stderr = "",
 }
-local BOOKMARKS_CLEAR = { code = 0, stdout = "main\n", stderr = "" }
-local BOOKMARKS_KEPT = { code = 0, stdout = "main\nfeat/6c4\n", stderr = "" }
+-- The bookmark read's two answers: a commit id while the bookmark is there, and
+-- nothing at all once it is gone -- which is also what a tombstone leaves, since
+-- a deleted bookmark resolves to no commit.
+local BOOKMARK_GONE = { code = 0, stdout = "", stderr = "" }
+local BOOKMARK_LIVE = {
+  code = 0, stdout = "7281e13e7df372cd62d2d6bc8286ef06091b0f82\n", stderr = "",
+}
 -- A workspace row the flow still sees: the removal exited 0 and the row is
 -- nevertheless there.
 local ROW_LEFT = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
@@ -628,7 +641,7 @@ local function go_stub(by_command)
   stub.exec_replies[REMOVE] = REMOVED
   stub.exec_replies[WORKSPACES] = WORKSPACES_CLEAR
   stub.exec_replies[DIRECTORY] = GONE
-  stub.exec_replies[BOOKMARKS] = BOOKMARKS_CLEAR
+  stub.exec_replies[BOOKMARK] = BOOKMARK_GONE
   for command, value in pairs(by_command or {}) do stub.exec_replies[command] = value end
   return stub
 end
@@ -649,9 +662,14 @@ do
   eq("a complete removal succeeds", ok, true)
   eq("a complete removal returns nothing", result, nil)
   eq("the removal runs first, then the three verifications", stub.events,
-    { REMOVE, WORKSPACES, DIRECTORY, BOOKMARKS })
-  eq("the removal is dojjo's own remove, -y and no --keep-bookmark",
-    command_for(stub, REMOVE), REMOVE)
+    { REMOVE, WORKSPACES, DIRECTORY, BOOKMARK })
+  -- The removal's three properties said out loud, rather than the stub's key
+  -- compared with itself: `-y` because nobody is there to answer, and no
+  -- --keep-bookmark because the merged branch goes with the workspace.
+  contains("the removal is dojjo's own remove", command_for(stub, REMOVE), "djo remove")
+  contains("the removal answers dojjo's prompt", command_for(stub, REMOVE), " -y")
+  eq("the removal does not ask dojjo to keep the bookmark",
+    tostring(command_for(stub, REMOVE)):find("keep-bookmark", 1, true), nil)
   eq("the removal runs in the main worktree", exec_for(stub, REMOVE).cwd, "/p/demo/main")
   -- The verifications run there too: the pane's own directory is the one the
   -- removal just unlinked, so a process started in it may not even exec.
@@ -659,7 +677,13 @@ do
   eq("the directory check is one test argv, path and all",
     exec_for(stub, DIRECTORY).argv, { "test", "!", "-d", "/p/demo/feat-6c4" })
   eq("the directory check runs in the main worktree", exec_for(stub, DIRECTORY).cwd, "/p/demo/main")
-  eq("the bookmark read runs in the main worktree", exec_for(stub, BOOKMARKS).cwd, "/p/demo/main")
+  eq("the bookmark read runs in the main worktree", exec_for(stub, BOOKMARK).cwd, "/p/demo/main")
+  contains("the bookmark read asks jj for a live target",
+    command_for(stub, BOOKMARK), [[bookmarks(exact:"feat/6c4")]])
+  -- Not the listing: a tombstone keeps printing its name there, so a listing
+  -- cannot tell a deleted bookmark from a kept one.
+  eq("the bookmark read is not a listing",
+    tostring(command_for(stub, BOOKMARK)):find("bookmark list", 1, true), nil)
   -- The block that would be closed is the one whose script called this action, so
   -- this action makes no rex.call at all: there is nothing it could close.
   eq("a complete removal closes nothing", #stub.calls, 0)
@@ -667,27 +691,36 @@ do
   eq("a clean teardown never sleeps", runs(stub, "sleep"), 0)
 end
 
--- Nothing in this action is worktrunk's any more: not one word of a command it
--- runs names the tool the flow used to shell out to.
+-- Nothing in this action is worktrunk's any more: no word of an argv it runs is
+-- the tool the flow used to shell out to. A word, not a substring of the joined
+-- line -- a workspace under a path with `wt` in it is nobody's worktrunk.
+local function names_worktrunk(call)
+  for _, word in ipairs(call.argv or {}) do
+    if word == "wt" or word:find("^wt ") or word:find("worktrunk", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
 do
   local stub = go_stub()
   pcall(M.work_done_go, {}, removal())
   local stray = {}
   for _, call in ipairs(stub.exec_calls) do
-    local ran = table.concat(call.argv, " ")
-    if ran:find("wt", 1, true) or ran:find("worktrunk", 1, true) then
-      stray[#stray + 1] = ran
+    if names_worktrunk(call) then
+      stray[#stray + 1] = table.concat(call.argv, " ")
     end
   end
   eq("nothing the action runs names worktrunk", stray, {})
 end
 
--- dojjo deletes the bookmark with the workspace, so a bookmark that still names
--- the workspace's branch is the one thing left to report: the flow does not
+-- dojjo deletes the bookmark with the workspace, so a bookmark that still
+-- resolves after the removal is the one thing left to report: the flow does not
 -- delete it, and the command that would is the person's to run. dojjo has no
 -- merged check, so a bookmark left behind is the only "kept" case there is.
 do
-  local stub = go_stub({ [BOOKMARKS] = BOOKMARKS_KEPT })
+  local stub = go_stub({ [BOOKMARK] = BOOKMARK_LIVE })
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a bookmark dojjo left behind fails", ok, false)
   contains("the kept bookmark is named", said, "the bookmark feat/6c4 was kept")
@@ -696,23 +729,37 @@ do
   eq("a kept bookmark closes nothing", #stub.calls, 0)
 end
 
--- A bookmark that only starts the same way is not the workspace's bookmark: the
--- name is compared whole, as every name this flow reads is.
+-- The tombstone a remote-tracked bookmark leaves behind, which is the case that
+-- makes the live-target read the only correct one: `jj bookmark delete` -- what
+-- dojjo's remove does -- only marks the bookmark deleted, and `jj bookmark list`
+-- goes on printing its name (twice: the deleted local one and the remote one). A
+-- listing therefore reports a perfectly finished teardown as a kept bookmark, in
+-- a line whose remedy cannot work -- `jj bookmark delete` answers "no matching
+-- bookmarks". Nothing resolves, so nothing was kept.
 do
-  go_stub({ [BOOKMARKS] = { code = 0, stdout = "main\nfeat/6c4-old\n", stderr = "" } })
-  local ok = pcall(M.work_done_go, {}, removal())
-  eq("a bookmark that only starts the same way is not the kept one", ok, true)
+  local stub = go_stub({
+    [BOOKMARK] = BOOKMARK_GONE,
+    -- What the tombstone leaves in the listing, answered only so that reading it
+    -- would be a failure of this case rather than a missing reply.
+    [BOOKMARKS_LIST] = { code = 0, stdout = "feat/6c4\nfeat/6c4\nmain\n", stderr = "" },
+  })
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a tombstone does not fail a finished teardown", ok, true)
+  eq("a torn-down branch returns nothing", result, nil)
+  eq("the tombstone's listing is never read",
+    exec_for(stub, BOOKMARKS_LIST).argv, nil)
 end
 
--- A bookmark listing that cannot be read is a failure, not a proof that nothing
--- is left: a check that answered "no bookmark" because it could not see the list
--- would pass a teardown that kept one.
+-- A bookmark read that cannot be run is a failure, not a proof that nothing is
+-- left: a check that answered "no bookmark" because it could not see the
+-- repository would pass a teardown that kept one.
 do
-  go_stub({ [BOOKMARKS] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
+  go_stub({ [BOOKMARK] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
   local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("a bookmark listing that failed fails the teardown", ok, false)
-  contains("the bookmark listing failure is named", said, "could not list jj bookmarks")
-  contains("the bookmark listing failure carries jj's line", said, "no jj repo here")
+  eq("a bookmark read that failed fails the teardown", ok, false)
+  contains("the bookmark read failure is named", said,
+    "could not read the bookmark of feat/6c4")
+  contains("the bookmark read failure carries jj's line", said, "no jj repo here")
 end
 
 -- And the directory itself, which is what a person looks for when they doubt the
@@ -725,8 +772,8 @@ do
   contains("the surviving directory is named", said, "/p/demo/feat-6c4 is still there")
   contains("the surviving directory names the listing to read", said,
     "run djo list -f in /p/demo/main")
-  eq("a surviving directory never reads the bookmarks",
-    exec_for(stub, BOOKMARKS).argv, nil)
+  eq("a surviving directory never reads the bookmark",
+    exec_for(stub, BOOKMARK).argv, nil)
 end
 
 -- A check that cannot be run is not a proof of absence either.
@@ -773,7 +820,7 @@ do
   eq("the row is re-read after the forget, then the directory and bookmarks asked",
     { stub.events[#stub.events - 3], stub.events[#stub.events - 2],
       stub.events[#stub.events - 1], stub.events[#stub.events] },
-    { FORGET, WORKSPACES, DIRECTORY, BOOKMARKS })
+    { FORGET, WORKSPACES, DIRECTORY, BOOKMARK })
   eq("a forgotten row closes nothing", #stub.calls, 0)
 end
 
@@ -861,7 +908,7 @@ do
   eq("a row cleared a moment later is not a failure", ok, true)
   eq("a row that cleared returns nothing", result, nil)
   eq("the wait reads the list again after the sleep", stub.events,
-    { REMOVE, WORKSPACES, "sleep", WORKSPACES, DIRECTORY, BOOKMARKS })
+    { REMOVE, WORKSPACES, "sleep", WORKSPACES, DIRECTORY, BOOKMARK })
   eq("a row that cleared is read exactly twice", reads, 2)
   eq("a row that cleared is never forgotten by the flow", runs(stub, FORGET), 0)
   eq("a row that cleared closes nothing", #stub.calls, 0)
@@ -905,6 +952,8 @@ do
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a failed removal fails", ok, false)
   contains("the failure carries dojjo's line", said, "no workspace named feat/6c4")
+  contains("the failure names the workspace and its directory",
+    said, "could not remove the workspace feat/6c4 (/p/demo/feat-6c4)")
   eq("only the first line is carried", tostring(said):find("another line", 1, true), nil)
   eq("a failed removal verifies nothing", #stub.exec_calls, 1)
 end
@@ -929,7 +978,11 @@ do
   eq("a plain name is one quoted word", M.shell_quote("feat/6c4"), "'feat/6c4'")
 
   local awkward = "djo remove 'feat/6c4-it'\\''s' -y"
-  local stub = go_stub({ [awkward] = REMOVED })
+  -- The bookmark read carries the same name inside a revset, so it is quoted the
+  -- same way: one shell word, apostrophe and all.
+  local awkward_bookmark = "jj --ignore-working-copy log --no-graph -r "
+    .. [['bookmarks(exact:"feat/6c4-it'\''s")' -T 'commit_id ++ "\n"']]
+  local stub = go_stub({ [awkward] = REMOVED, [awkward_bookmark] = BOOKMARK_GONE })
   local ok = pcall(M.work_done_go, {},
     removal{ workspace = "feat/6c4-it's", path = "/p/demo/it's here" })
   eq("the removal quotes the workspace as one word", ok, true)
