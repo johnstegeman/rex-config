@@ -1395,8 +1395,28 @@ function M.work_done_go(ctx, args)
     rows = jj_workspace_list(main)
   end
   if lists_workspace(rows, workspace) then
-    error("the jj workspace " .. workspace
-      .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace), 0)
+    -- The hook is worktrunk's fast path and not a guarantee: worktrunk cannot
+    -- even expand the seeded line for a detached worktree -- all `jj workspace
+    -- add`, and so `gws`, creates -- because there is no `branch` variable in it
+    -- to interpolate, and an unapproved hook never runs at all. A row left
+    -- behind for a directory this flow has just removed is therefore this
+    -- teardown finishing itself, once, rather than somebody else's leftover: the
+    -- same forget the hook would have run, from main, with the workspace's name
+    -- as one quoted word. The row is then read again, because the row is what
+    -- this verifies and an exit code is not.
+    local forgotten = run_in_shell(
+      "jj workspace forget " .. M.shell_quote(workspace), main)
+    -- The row is read again whatever the forget said: the row is the thing being
+    -- verified, and an exit code is not. jj's own reason still rides along,
+    -- because otherwise the reader is invited to run by hand the exact command
+    -- that just failed.
+    rows = jj_workspace_list(main)
+    if lists_workspace(rows, workspace) then
+      local said = forgotten ~= nil and forgotten.code ~= 0 and first_line(forgotten.stderr) or nil
+      error("the jj workspace " .. workspace
+        .. " is still registered: run jj workspace forget " .. M.shell_quote(workspace)
+        .. (said ~= nil and " (" .. said .. ")" or ""), 0)
+    end
   end
 
   -- And the worktree itself. A listing that cannot be read is not a proof of

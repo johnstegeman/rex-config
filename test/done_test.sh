@@ -78,9 +78,17 @@ agreed_workspaces() {
   printf '%s' "$file"
 }
 
+
 run_done() {
   ran=$((ran + 1))
   rm -f "$tmp/rex-args" "$tmp/jj-args" "$tmp/wt-args"
+  # The fetch is off for every scripted run unless a case asks for it, and the
+  # decision has to live in here: a case asks for it with a per-call prefix
+  # (`DONE_FETCH=1 run_done …`), which a file-scope assignment never sees. With
+  # it on, an empty jj argv file is evidence that the run refused before the
+  # fetch rather than a given because nothing could have fetched.
+  local fetch_opt=--no-fetch
+  [ -z "${DONE_FETCH:-}" ] || fetch_opt=''
   PATH="${DONE_PATH:-$tmp/bin:$PATH}" REX_ARGS_FILE=$tmp/rex-args \
     JJ_ARGS_FILE=$tmp/jj-args WT_ARGS_FILE=$tmp/wt-args \
     ./new-work.sh done \
@@ -215,7 +223,9 @@ nothing was removed; press any key"
 # The side that used to refuse with the wrong reason -- feat/b9y is the
 # workspace the flow exists to remove, and it is also what worktrunk calls
 # main, so --main is the directory the key was pressed in. DONE_FETCH=1 leaves
-# --no-fetch off, so an empty jj argv file is evidence rather than a given.
+# --no-fetch off so the ordering is real rather than given: the refusal screen
+# below is what proves it, and the empty jj argv corroborates it (--main here is
+# not a directory, so a fetch moved ahead would fail in its own cd).
 DONE_WS=test/fixtures/workspaces-main-elsewhere.txt DONE_FETCH=1 \
   DONE_CWD=/p/pi-rex/feat-b9y DONE_MAIN_DIR=/p/pi-rex/feat-b9y \
   run_done --root /p/pi-rex
@@ -428,7 +438,7 @@ rm -f "$tmp/jj-args"
 PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
   --project demo --session s1 --window w1 \
-  --workspaces test/fixtures/workspaces.txt \
+  --workspaces "$(agreed_workspaces "$tmp/real-main")" \
   --wt-json test/fixtures/done-wt-list.json \
   --hooks-json test/fixtures/done-hooks-unapproved.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \

@@ -515,26 +515,34 @@ removal is not a failure here and is not this flow's business: the finishing
 skill's Step 8 owns bookmarks, so the teardown neither deletes nor reports
 one. The project's own `post-remove` hook — the
 `jj workspace forget {{ branch }}` line `ginit` seeds into
-`main/.config/wt.toml` — is what forgets the jj workspace, and that is the step
-that can quietly not happen, so it is waited for rather than assumed. Then
-`wt list` has to stop showing the directory. The tab is closed by the script
-rather than by the action, and last of all: `cd` to the main worktree — the
-script's own directory is gone by now — then `rex window close -s <session>
-<window>`, as its final statement. `work_done_go` closes nothing, because the
-block that closing would kill is the one whose script asked for the close.
+`main/.config/wt.toml` — is the fast path that forgets the jj workspace, and it
+is not a guarantee: worktrunk cannot even expand that line for a detached
+worktree, which is all `jj workspace add` (and so `gws`) creates, because there
+is no `branch` variable to interpolate there — and an unapproved hook never runs
+at all. So the row is waited for rather than assumed, and a row the wait still
+finds is forgotten by the flow itself — the same `jj workspace forget
+'<workspace>'`, from the main worktree — before `wt list` has to stop showing
+the directory. The tab is closed by the script rather than by the action, and
+last of all: `cd` to the main worktree — the script's own directory is gone by
+now — then `rex window close -s <session> <window>`, as its final statement.
+`work_done_go` closes nothing, because the block that closing would kill is the
+one whose script asked for the close.
 
 Four flags are left off, and the reason is that order. `-f`, `-D` and `--reap`
 exist for the working copy with changes in it, the branch that is not merged and
 the program still running in the tab — the three the audit has already refused —
 and a refusal worktrunk makes on its own terms is the report. `--no-hooks` is
-the one flag with no counterpart in the audit: the hook *is* the step that
-forgets the workspace, so skipping it would skip the point of the flow.
+the one flag with no counterpart in the audit: the hook is the flow's fast path
+to the same forget it can make itself, so skipping it would only cost a command.
 `--foreground` is passed for what it does do, which is make the removal itself
 block, so its exit code and its `branch_outcome` are final by the time they are
 read. What it does not do is wait for `post-remove`, because worktrunk runs its
 post-* hooks in the background — so the workspace listing is read, waited on and
 read again, up to ten reads over about two seconds, and only a row still there
-at the end of that is a leftover. The listing is read from the op log
+at the end of that is worth forgetting: `jj workspace forget '<workspace>'`, run
+from the main worktree, then the listing is read once more, and only a row that
+survives the flow's own forget is reported as a leftover. A hook that did its
+job costs no extra command. The listing is read from the op log
 (`jj --ignore-working-copy workspace list`), not from the working copy, so the
 hook holding the working-copy lock cannot block the read.
 
@@ -583,11 +591,12 @@ too, and the list is not meant to be exhaustive:
   path, because the worktree is gone by the time this line is read. The flow
   does not run `-D`: if worktrunk and the audit disagree about merged, that is
   yours to settle.
-- **A jj row that survived the hook.** `the jj workspace feat/6c4 is still
-  registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends in
-  `|| true` and runs in the background, so this line is the verdict of the last
-  of those reads rather than the first — a row the hook cleared a moment later is
-  not reported at all.
+- **A jj row that survived the flow's own forget.** `the jj workspace feat/6c4
+  is still registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends
+  in `|| true` and runs in the background, so it is waited for first: a row it
+  cleared a moment later is not reported at all. A row the wait still finds is
+  forgotten by the flow itself and read again, so this line means the forget
+  failed or the row outlasted it.
 
 Neither of those closes the tab. The directory is gone either way, and the
 command on the screen is the last thing left to type.

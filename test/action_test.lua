@@ -545,6 +545,10 @@ local REMOVE = "wt remove '/p/demo/feat-6c4' --foreground -y --format=json"
 -- waits on the working-copy lock that hook holds.
 local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
 local WORKTREES = "wt list --format=json"
+-- What the flow runs itself when the wait still finds the row: one `jj
+-- workspace forget` for the workspace, its name quoted like every other word
+-- handed to the shell.
+local FORGET = "jj workspace forget 'feat/6c4'"
 
 -- One fixture, exactly as worktrunk wrote it.
 local function fixture(name)
@@ -731,20 +735,108 @@ end
 -- first read can be too early on a healthy teardown. The wait is what the next
 -- cases turn on; the sleep is stubbed, so they cost nothing to run.
 
+-- The hook is a fast path and not a guarantee, so a row the wait still names is
+-- forgotten by the flow itself: once, from the main worktree, with the name
+-- quoted like every other word the shell is handed.
+
+do
+  -- The row never goes on its own; only the flow's own forget ends it.
+  local forgot = false
+  local stub = go_stub({
+    [WORKSPACES] = function()
+      if forgot then return WORKSPACES_CLEAR end
+      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+    end,
+    [FORGET] = function()
+      forgot = true
+      return { code = 0, stdout = "", stderr = "" }
+    end,
+  })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a row no hook clears is forgotten by the flow", ok, true)
+  eq("a forgotten row returns nothing", result, nil)
+  local forget = exec_for(stub, FORGET)
+  eq("the forget names the workspace as one quoted word",
+    forget.argv and program(forget), FORGET)
+  eq("the forget is run once", runs(stub, FORGET), 1)
+  eq("the forget runs in the main worktree", forget.cwd, "/p/demo/main")
+  eq("the row is re-read after the forget, then the worktrees asked",
+    { stub.events[#stub.events - 2], stub.events[#stub.events - 1],
+      stub.events[#stub.events] },
+    { FORGET, WORKSPACES, WORKTREES })
+  eq("a forgotten row closes nothing", #stub.calls, 0)
+end
+
+-- And a forget of the flow's own that fails is the leftover it always was: the
+-- report names the command rather than the shell's line, and nothing below the
+-- jj row is asked.
 do
   local stub = go_stub({
     [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
+    [FORGET] = { code = 1, stdout = "", stderr = "jj: workspace is locked\n" },
   })
   stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
   local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("a surviving jj row fails", ok, false)
-  contains("the surviving row names the command", said,
+  eq("a forget that fails fails the teardown", ok, false)
+  contains("the failed forget names the command that would clear the row", said,
     "jj workspace forget 'feat/6c4'")
+  contains("the failed forget says the row is still registered", said,
+    "is still registered")
+  contains("the failed forget carries jj's own reason", said,
+    "jj: workspace is locked")
+  eq("the failed forget is tried once", runs(stub, FORGET), 1)
   eq("the surviving row is read again before it is believed",
     runs(stub, WORKSPACES) > 1, true)
-  eq("every read after the first waits first",
-    runs(stub, "sleep"), runs(stub, WORKSPACES) - 1)
+  -- Ten reads in the wait, each after the first preceded by a sleep, then one
+  -- immediate re-read after the forget: the re-read is what this believes, so
+  -- nothing is slept for it.
+  eq("the wait reads ten times", runs(stub, WORKSPACES), 11)
+  eq("every wait read after the first waits first", runs(stub, "sleep"), 9)
   eq("a surviving jj row stops before the worktrees are asked",
+    exec_for(stub, WORKTREES).argv, nil)
+end
+
+-- And the other way round, which is the narrower window this whole mechanism
+-- exists for: the background hook clears the row in the gap before the flow's
+-- own forget, so that forget fails against a workspace that is already gone.
+-- The row is what is believed, so this is a finished teardown, not a leftover.
+do
+  local forgot = false
+  local stub = go_stub({
+    [WORKSPACES] = function()
+      if forgot then return WORKSPACES_CLEAR end
+      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+    end,
+    [FORGET] = function()
+      forgot = true
+      return { code = 1, stdout = "", stderr = "jj: workspace is locked\n" }
+    end,
+  })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, result = pcall(M.work_done_go, {}, removal())
+  eq("a forget whose row is already gone is not a failure", ok, true)
+  eq("a row gone after a failed forget returns nothing", result, nil)
+  eq("that teardown closes nothing", #stub.calls, 0)
+  eq("the row is believed over the exit code, so nothing is reported",
+    runs(stub, FORGET), 1)
+end
+
+-- A forget that exits 0 and leaves the row is a leftover too: the row is what
+-- is checked, not the exit code of the command the flow ran to clear it.
+do
+  local stub = go_stub({
+    [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
+    [FORGET] = { code = 0, stdout = "", stderr = "" },
+  })
+  stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a row that survives the flow's own forget fails", ok, false)
+  contains("the row that survived names the command", said,
+    "jj workspace forget 'feat/6c4'")
+  eq("a row that survived is re-read after the forget",
+    runs(stub, "sleep"), runs(stub, WORKSPACES) - 2)
+  eq("a row that survived stops before the worktrees are asked",
     exec_for(stub, WORKTREES).argv, nil)
 end
 
@@ -767,6 +859,7 @@ do
   eq("the wait reads the list again after the sleep", stub.events,
     { REMOVE, WORKSPACES, "sleep", WORKSPACES, WORKTREES })
   eq("a row that cleared is read exactly twice", reads, 2)
+  eq("a row the hook cleared is never forgotten by the flow", runs(stub, FORGET), 0)
   eq("a row that cleared closes nothing", #stub.calls, 0)
 end
 
