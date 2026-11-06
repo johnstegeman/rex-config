@@ -269,6 +269,26 @@ ran=$((ran + 1))
 if ! grep -Fq "$tmp/nomain/main" "$tmp/err"; then
   fail "the refusal names the base workspace it wanted" "$(cat "$tmp/err")"
 fi
+# The check is mode-independent on purpose -- a wrapper's main workspace is the
+# layout's own precondition, not something a create happens to need -- so a
+# switch in a wrapper without main is refused by name instead of switching to
+# something this flow cannot place workspaces in.
+run_jws "$tmp/nomain" --existing main
+ran=$((ran + 1))
+if [ "$status" -ne 1 ]; then
+  fail "--existing in a wrapper without main is refused" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fq "$tmp/nomain/main" "$tmp/err"; then
+  fail "the switch refusal names the missing base workspace" "$(cat "$tmp/err")"
+fi
+# ... and says WHY, not just that something failed: a cd that fell over on the
+# missing directory would also print the path, so the refusal's own words are
+# what distinguishes the layout check from an accident further down.
+ran=$((ran + 1))
+if ! grep -Fq 'the base workspace' "$tmp/err"; then
+  fail "the switch refusal says the base workspace is missing" "$(cat "$tmp/err")"
+fi
 
 # No dojjo on the PATH: refused before anything else, because a workspace whose
 # hooks never ran is a workspace the person has to finish by hand. fish is put
@@ -361,13 +381,47 @@ if ! djo_ran_in "$tmp/w/br"; then
   fail "an attach's hooks run inside the new workspace" "$(cat "$tmp/djo.log" 2>/dev/null)"
 fi
 
+# --attach where the bookmark is NOT there: jj refuses the revision, and jws has
+# nothing to fall back on -- it does not quietly create the workspace beside the
+# branch instead. jj leaves no half-made workspace, so the assertion is that
+# the refusal is non-zero, nothing is on disk, and no path is handed over.
+run_jws "$tmp/w" --attach --path-file "$tmp/nobr.txt" nobr
+ran=$((ran + 1))
+if [ "$status" -ne 1 ]; then
+  fail "--attach refuses a bookmark that does not exist" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -d "$tmp/w/nobr" ]; then
+  fail "a refused --attach leaves no workspace behind" "$tmp/w/nobr exists"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/nobr.txt" ]; then
+  fail "a refused --attach writes no path file" "$(cat "$tmp/nobr.txt")"
+fi
+
 # --existing: a workspace that is already there. The path comes back, and
 # NOTHING is made: no workspace, no bookmark, no hook -- it is the mode a
 # switch runs, not a mode that creates.
+# rows_now FILE -> the number of workspace rows, after writing the listing to
+# FILE. A listing jj could not produce is a broken test, not a zero: with
+# `$() | awk 'END { print NR }'` a jj that failed counts 0, and "--existing
+# creates no workspace" would then compare 0 with 0 and pass for the wrong
+# reason. The emptiness is checked by the caller (listing_read), because
+# anything counted inside a command substitution counts nowhere: `fails` and
+# `ran` would be incremented in the subshell and thrown away with it.
 rows_now() {
-  ( cd "$tmp/w" && jj --ignore-working-copy workspace list -T 'name ++ "\n"' ) | awk 'END { print NR }'
+  ( cd "$tmp/w" && jj --ignore-working-copy workspace list -T 'name ++ "\n"' ) >"$1"
+  awk 'END { print NR }' "$1"
 }
-rows_before=$(rows_now)
+
+# listing_read FILE -> one assertion that the listing can be read at all.
+listing_read() {
+  ran=$((ran + 1))
+  [ -s "$1" ] && return 0
+  fail "the workspace listing could be read" "jj wrote nothing to $1"
+}
+rows_before=$(rows_now "$tmp/rows-before.txt")
+listing_read "$tmp/rows-before.txt"
 rm -f "$tmp/w/feat-x/.hook-proof"
 run_jws "$tmp/w" --existing --path-file switch.txt feat/x
 ran=$((ran + 1))
@@ -388,7 +442,8 @@ if [ -f "$tmp/w/feat-x/.hook-proof" ]; then
   fail "--existing runs no hooks" "$tmp/w/feat-x/.hook-proof came back"
 fi
 ran=$((ran + 1))
-rows_after=$(rows_now)
+rows_after=$(rows_now "$tmp/rows-after.txt")
+listing_read "$tmp/rows-after.txt"
 if [ "$rows_after" != "$rows_before" ]; then
   fail "--existing creates no workspace" "rows were $rows_before, now $rows_after"
 fi
@@ -449,6 +504,10 @@ mkdir -p "$tmp/fetchbin"
 cat >"$tmp/fetchbin/jj" <<EOF
 #!/bin/sh
 if [ "\$1" = git ] && [ "\$2" = fetch ]; then
+  # Ordering as well as occurrence: a fetch that ran after the workspace was
+  # made is still a fetch, so the log also records whether the workspace was
+  # already on disk when the fetch was asked for.
+  [ -e "$tmp/w/feat-fetched" ] && printf 'fetch-after-the-workspace\n' >>"$tmp/fetch.log"
   printf 'fetch\n' >>"$tmp/fetch.log"
   exit 1
 fi
@@ -467,20 +526,28 @@ ran=$((ran + 1))
 if [ "$status" -ne 0 ]; then
   fail "a failed fetch does not fail the create" "exit $status: $(cat "$tmp/err")"
 fi
-ran=$((ran + 1))
 if ! grep -Fxq 'fetch' "$tmp/fetch.log" 2>/dev/null; then
-  fail "a base revision is fetched before the workspace is made" \
+  fail "a base revision is fetched at all" \
     "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>') / $(cat "$tmp/err")"
+fi
+# ... and BEFORE the workspace is made: being fetched at all is not the same
+# thing, and the stand-in noted whether the workspace was already on disk when
+# it was asked.
+ran=$((ran + 1))
+if grep -Fxq 'fetch-after-the-workspace' "$tmp/fetch.log" 2>/dev/null; then
+  fail "a base revision is fetched before the workspace is made" \
+    "$(cat "$tmp/fetch.log")"
 fi
 ran=$((ran + 1))
 if ! grep -Fxq 'bounded: 30 jj git fetch' "$tmp/fetch.log" 2>/dev/null; then
   fail "the fetch is bounded by 30 seconds" \
     "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>')"
 fi
-# The failure is one readable line, and the create carries on from the
-# revision as it resolves locally rather than retrying something.
+# The failure is ONE readable line, and the create carries on from the revision
+# as it resolves locally rather than retrying something. Counted rather than
+# grepped: a three-line complaint would contain the phrase too.
 ran=$((ran + 1))
-if ! grep -Fq 'could not fetch' "$tmp/err"; then
+if [ "$(grep -c 'could not fetch' "$tmp/err" 2>/dev/null || true)" != 1 ]; then
   fail "a failed fetch says so, in one line" "$(cat "$tmp/err")"
 fi
 ran=$((ran + 1))
@@ -508,6 +575,50 @@ fi
 ran=$((ran + 1))
 if [ -e "$tmp/fetch.log" ]; then
   fail "a create with no base revision does not fetch" "$(cat "$tmp/fetch.log")"
+fi
+
+# The other two fetch forms. The bound is a convenience, not a requirement: on
+# a machine with neither `timeout` nor `gtimeout` the fetch still happens,
+# unbounded. Nothing above reaches that branch -- the fetchbin has a `timeout`
+# in front of the real one -- so this PATH is built by hand to hold exactly
+# what jws and the two stand-ins need and neither bound. That is the only way
+# to see the plain `jj git fetch`, and the log proves it is the one that ran.
+mkdir -p "$tmp/notimeout-bin"
+for tool in dirname tee sed; do
+  ln -sf "$(command -v "$tool")" "$tmp/notimeout-bin/$tool"
+done
+ln -sf "$(command -v fish)" "$tmp/notimeout-bin/fish"
+# Its own copy, not the fetchbin one: that one also records whether
+# feat-fetched is on disk, which is another case's question.
+cat >"$tmp/notimeout-bin/jj" <<EOF
+#!/bin/sh
+if [ "\$1" = git ] && [ "\$2" = fetch ]; then
+  printf 'fetch\n' >>"$tmp/fetch.log"
+  exit 1
+fi
+exec "$real_jj" "\$@"
+EOF
+chmod +x "$tmp/notimeout-bin/jj"
+ln -sf "$tmp/bin/djo" "$tmp/notimeout-bin/djo"
+rm -f "$tmp/fetch.log"
+JWS_PATH="$tmp/notimeout-bin" run_jws "$tmp/w" --path-file unbounded.txt feat/unbounded 'root()'
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "a create with no bound on the PATH still exits 0" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fxq 'fetch' "$tmp/fetch.log" 2>/dev/null; then
+  fail "the fetch happens with no timeout and no gtimeout on the PATH" \
+    "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>') / $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if grep -Fq 'bounded:' "$tmp/fetch.log" 2>/dev/null; then
+  fail "an unbounded fetch is not reported as bounded" "$(cat "$tmp/fetch.log")"
+fi
+ran=$((ran + 1))
+if [ "$(cat "$tmp/w/unbounded.txt" 2>/dev/null || true)" != "$tmp/w/feat-unbounded" ]; then
+  fail "the unbounded create reports its path" \
+    "wanted $tmp/w/feat-unbounded, got: $(cat "$tmp/w/unbounded.txt" 2>/dev/null || echo '<no file>')"
 fi
 
 if [ "$fails" -ne 0 ]; then
