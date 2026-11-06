@@ -607,6 +607,30 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
     'output differs from the expected cycle'
 fi
 
+# And the guard from the other side: the `.git` that is not in the base
+# directory but in the wrapper above it. <wrapper>/main is how a ginit'd wrapper
+# is laid out, so this is the shape the flow really meets, and the symref is a
+# question git can answer there.
+mkdir -p "$tmp/gitwrap"
+git init -q "$tmp/gitwrap" && git -C "$tmp/gitwrap" \
+  -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init &&
+  git -C "$tmp/gitwrap" update-ref refs/remotes/origin/trunk HEAD &&
+  git -C "$tmp/gitwrap" symbolic-ref refs/remotes/origin/HEAD \
+    refs/remotes/origin/trunk
+mkdir -p "$tmp/gitwrap/main"
+ran=$((ran + 1))
+printf 'trunk@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/gitwrap/main" \
+  >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a .git beside main is a question for git' \
+    "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a .git beside main is a question for git' \
+    'output differs from the expected cycle'
+fi
+
 # The branch-name rule, applied where a person's typed name actually meets it:
 # `pick` refuses a name it could not create while the float is still on screen.
 # Every name in the refused table below is one `git check-ref-format --branch`
@@ -654,16 +678,19 @@ pick_name() {
 }
 
 for name in '@' '-x' 'a..b' 'a.' 'a/b/' 'a b' 'a~b' 'a^b' 'a:b' 'a?b' 'a*b' \
-  'a[b' 'a\b' 'a//b' 'feat/x..y' 'feat/x.' '-feat/x'; do
+  'a[b' 'a\b' 'a//b' 'feat/x..y' 'feat/x.' '-feat/x' $'a\001b'; do
   pick_name "$name"
+  # Quoted for the message: one of these holds a byte no terminal draws, and a
+  # failure on it has to say which name it was.
+  shown=$(printf '%q' "$name")
   if [ "$status" -ne 2 ]; then
-    fail "the name '$name' is refused" "exit $status: $(cat "$tmp/err")"
+    fail "the name $shown is refused" "exit $status: $(cat "$tmp/err")"
   elif ! grep -qxF "new-work.sh: not a valid branch name: $name" "$tmp/err"; then
-    fail "the name '$name' says why" "stderr: $(cat "$tmp/err")"
+    fail "the name $shown says why" "stderr: $(cat "$tmp/err")"
   elif [ -s "$tmp/out" ]; then
-    fail "the name '$name' starts nothing" "stdout: $(cat "$tmp/out")"
+    fail "the name $shown starts nothing" "stdout: $(cat "$tmp/out")"
   elif [ -e "$tmp/git-asked" ]; then
-    fail "the name '$name' is refused without git" 'git was asked'
+    fail "the name $shown is refused without git" 'git was asked'
   fi
 done
 
@@ -675,11 +702,12 @@ elif [ "$(cat "$tmp/err")" != 'new-work.sh: no branch given, nothing to start' ]
 fi
 
 # And the names that do get through: `feat/xxx` is what a bead derives and the
-# rest are the shapes a hand types. Each is a create, so each reaches the rule.
-# A refusal among these is the regression this table exists to catch, and a mark
-# left by the stand-in is the same regression seen from the other side: it is a
-# question a git-free wrapper could never have had answered.
-for name in 'feat/x' 'feat-x' 'v1.2' 'feat/x-1_2' 'fix-it' 'aeiou' 'feat/2ow'; do
+# rest are the shapes a hand types -- a backtick among them, which git never had
+# a quarrel with and this rule refused once. Each is a create, so each reaches the
+# rule. A refusal among these is the regression this table exists to catch, and a
+# mark left by the stand-in is the same regression seen from the other side: it is
+# a question a git-free wrapper could never have had answered.
+for name in 'feat/x' 'feat-x' 'v1.2' 'feat/x-1_2' 'fix-it' 'aeiou' 'feat/2ow' 'a`b'; do
   pick_name "$name"
   if [ "$status" -ne 0 ]; then
     fail "the name '$name' is a branch to create" \

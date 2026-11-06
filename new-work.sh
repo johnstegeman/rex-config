@@ -1449,21 +1449,26 @@ cmd_fzf_answer() {
 # The rule is git's, re-expressed here in the shell: `git check-ref-format
 # --branch` used to answer it, and a wrapper made with `jj git init --no-colocate`
 # has no git to ask -- while a name that worked yesterday must not stop working
-# today, so what is refused below is what git refused: nothing, `@` on its own,
-# anything starting with `-`, whitespace, a `~`, `^`, `:`, `?`, `*`, `[`, `\`, a
-# `@{`, a `..`, a `//`, or a trailing `/` or `.`. Everything else is a name --
-# letters, digits, `.`, `_`, `-` and `/` in the places git allows them.
+# today, so nothing git accepted is refused here. What git refused, and what this
+# refuses with it: nothing at all (the empty name), anything starting with `-`, a
+# `~`, `^`, `:`, `?`, `*`, `[`, `\`, a control character, whitespace, a `@{`, a
+# `..`, a `//`, or a trailing `/` or `.`. Everything else is a name -- letters,
+# digits, `.`, `_`, `-` and `/` in the places git allows them, and a backtick,
+# which git never had a quarrel with.
 #
-# Two of those need a word of their own. `@` is git's working-copy shorthand,
-# and it is jj's: every revision this picker hands to a workspace is spoken in
-# jj's language, where `@` is the working copy, so a bookmark called `@` would be
-# read as an answer to a different question everywhere a revision is read. It is
-# not a name to make, however willing git is. `@{` is the reflog form: git
-# refuses it, and the reason it has to be refused by this rule rather than by a
-# comparison with git's answer is that git *expands* such a name -- `@{-1}` came
-# back as some earlier branch, and the old check, which only compared git's
-# answer with the input, was what kept that literal from being created. There is
-# no answer to compare against any more, so the name is refused outright.
+# `@` is refused *in addition*, and that is this flow's reading rather than
+# git's: git accepts `@`. It is git's working-copy shorthand and it is jj's too,
+# and every revision this picker hands to a workspace is spoken in jj's language,
+# where `@` is the working copy. A bookmark called `@` would be read as an answer
+# to a different question everywhere a revision is read, so it is not a name to
+# make, however willing git is.
+#
+# `@{` needs a word of its own for the same kind of reason. git refuses it, and
+# the reason it must be refused by this rule rather than by a comparison with
+# git's answer is that git *expands* such a name -- `@{-1}` came back as some
+# earlier branch, and the old check, which only compared git's answer with the
+# input, was what kept that literal from being created. There is no answer to
+# compare against any more, so the reflog form is refused outright.
 #
 # git also refused a few names this rule lets through -- a leading `/` or `.` on
 # a path component, the reserved `HEAD`, a `.lock` suffix. None of them is a name
@@ -1471,14 +1476,20 @@ cmd_fzf_answer() {
 # jj is what creates the bookmark, and it is asked next.
 valid_branch_name() {
   local name=$1
+  # Belt and braces: `pick` refuses an empty branch before this is reached, and a
+  # name rule that would pass "" as a bookmark name is wrong on its own terms.
   [ -n "$name" ] || return 1
   [ "$name" != '@' ] || return 1
   case $name in
     -*) return 1 ;;
   esac
   case $name in
-    *[[:space:]]*) return 1 ;;
-    *'`'* | *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *'\'*) return 1 ;;
+    # Whitespace and control characters. The whitespace is spelled out rather than
+    # written as [[:space:]], because under a UTF-8 locale that class also holds
+    # U+00A0 and its neighbours, which git accepts: the class is the locale's, and
+    # this rule may not come out narrower than git because of it.
+    *[$' \t\n\r\v\f']* | *[[:cntrl:]]*) return 1 ;;
+    *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *'\'*) return 1 ;;
     *'@{'*) return 1 ;;
     *..* | *//*) return 1 ;;
     */ | *.) return 1 ;;
