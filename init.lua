@@ -560,9 +560,38 @@ local function call(method, request)
   return reply
 end
 
+-- jj's own workspace listing, one `name<TAB>root` row per workspace: the same
+-- template new-work.sh's done uses, and the read that names main below. It goes
+-- through the login shell, where jj lives, and it skips the working-copy
+-- snapshot for the reason the flow's own wait does: a plain read wants the
+-- working-copy lock, which a background `jj workspace forget` hook can hold,
+-- and a read that fails here falls back to worktrunk's answer -- the wrong one
+-- in exactly the repo this fixes. The template's backslashes are escaped here
+-- because they are jj's own, handed to it through the shell as written.
+local JJ_WORKSPACES = "jj --ignore-working-copy workspace list -T 'name ++ \"\\t\" ++ root ++ \"\\n\"'"
+
+-- The root of the workspace named exactly `main` in that listing, or nil when
+-- the listing names no such workspace -- a row called `maintenance` is another
+-- workspace, not main. A trailing slash is dropped so the answer compares with
+-- the paths beside it, as new-work.sh's done normalises its own.
+local function main_workspace(listed)
+  for line in tostring(listed or ""):gmatch("[^\n]+") do
+    local name, path = line:match("^([^\t]*)\t(.+)$")
+    if name == "main" then
+      local root = path:gsub("/+$", "")
+      if root ~= "" then
+        return root
+      end
+    end
+  end
+  return nil
+end
+
 -- The project a directory belongs to: its root and name from git's common
--- directory, and the main worktree from worktrunk. Returns nil and a message
--- naming the reason when the directory is not in a repository this can use.
+-- directory, and the main worktree from jj's `main` workspace -- or, when jj
+-- names no such workspace, from worktrunk's own main flag. Returns nil and a
+-- message naming the reason when the directory is not in a repository this can
+-- use.
 function M.project_for(cwd)
   local git, git_reason = run({ "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" })
   if git == nil then
@@ -580,29 +609,43 @@ function M.project_for(cwd)
     return nil, "could not resolve the project root of " .. cwd
   end
 
-  local listed, list_reason = run_in_shell("wt list --format=json", project.root)
-  if listed == nil or listed.code ~= 0 then
-    return nil, "worktrunk could not list worktrees for " .. project.root .. ": "
-      .. first_line(listed and listed.stderr or list_reason)
+  -- The main worktree is jj's workspace named `main`, and only that. worktrunk's
+  -- own flag can name the wrong worktree -- in a bare-rooted wrapper whose
+  -- worktrees are all detached (pi-rex) it calls a branch workspace main -- while
+  -- jj's workspace name is the convention every part of this flow already assumes
+  -- when it says "main". A repository jj does not manage, or one whose main
+  -- workspace has another name, has no such row and falls through to the flag.
+  local jj_listed = run_in_shell(JJ_WORKSPACES, project.root)
+  local main
+  if jj_listed ~= nil and jj_listed.code == 0 then
+    main = main_workspace(jj_listed.stdout)
   end
 
-  -- main_worktree reads the decoded document, not raw text: raw JSON is never a
-  -- table. rex.json.decode reports bad text by returning nil and a reason rather
-  -- than raising, so the value decides -- and what it is, when it is not an
-  -- object, is what the message names.
-  local decoded, decode_reason = rex.json.decode(listed.stdout or "")
-  if type(decoded) ~= "table" then
-    local why
-    if decode_reason ~= nil then
-      why = tostring(decode_reason)
-    else
-      why = "the listing decoded to a " .. type(decoded) .. ", not an object"
-    end
-    return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. why
-  end
-  local main = M.main_worktree(decoded)
   if main == nil then
-    return nil, "no main worktree found for " .. project.root
+    local listed, list_reason = run_in_shell("wt list --format=json", project.root)
+    if listed == nil or listed.code ~= 0 then
+      return nil, "worktrunk could not list worktrees for " .. project.root .. ": "
+        .. first_line(listed and listed.stderr or list_reason)
+    end
+
+    -- main_worktree reads the decoded document, not raw text: raw JSON is never a
+    -- table. rex.json.decode reports bad text by returning nil and a reason rather
+    -- than raising, so the value decides -- and what it is, when it is not an
+    -- object, is what the message names.
+    local decoded, decode_reason = rex.json.decode(listed.stdout or "")
+    if type(decoded) ~= "table" then
+      local why
+      if decode_reason ~= nil then
+        why = tostring(decode_reason)
+      else
+        why = "the listing decoded to a " .. type(decoded) .. ", not an object"
+      end
+      return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. why
+    end
+    main = M.main_worktree(decoded)
+    if main == nil then
+      return nil, "no main worktree found for " .. project.root
+    end
   end
 
   return { root = project.root, name = project.name, main = main }

@@ -204,6 +204,22 @@ programs the tab is still running (`M.tab_processes`), and opens a float running
 cwd> --session <id> --window <id>` plus one `--running <name>` per program. The
 float is a layer in the current window, `bounds` as the picker uses them.
 
+The `main` in that hand-back is resolved by jj, not by worktrunk: `M.project_for`
+takes the wrapper root and the project name from git's common directory and the
+main worktree from **jj's own workspace named `main`** — `jj workspace list -T
+'name ++ "\t" ++ root ++ "\n"'`, read through the login shell, because jj lives
+on the login PATH and Rex's PATH does not have it. worktrunk's `main` flag in
+`wt list --format=json` is the fallback, for a repository with no workspace called
+`main` (or no jj at all), and it is only the fallback because it can be wrong: in
+a bare-rooted wrapper whose worktrees are all detached (`pi-rex`) worktrunk flags
+a *branch* workspace as main, which put the picker's float, `bd` and the
+teardown's two `main` moves in the wrong directory. jj's workspace name is what
+the rest of this flow already means by "main": `ginit` creates it, `gws` adds
+workspaces beside it, and the refusals below compare against it. When neither
+source names a main worktree the project is refused as before, and a jj read that
+fails falls back rather than failing the project — the flag is the floor, not the
+answer.
+
 The window and session ids come from the pane, not from a label lookup: `ctx`
 already carries `session_id` and `block_id` (that is how `block_cwd` works), so
 the tab being torn down is the tab the person is looking at. This is the one
