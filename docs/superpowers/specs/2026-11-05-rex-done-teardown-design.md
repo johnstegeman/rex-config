@@ -470,9 +470,10 @@ confirmation: with nothing at risk, the tab going away is the feedback.
    `jj workspace forget '<workspace>'`, run through the login shell with
    `cwd = main` — after which the listing is read once more. A row left behind
    for a directory the flow has just removed is the teardown it started,
-   finished; only a row that survives the flow's own forget, or a forget that
-   fails, is reported, with `jj workspace forget '<name>'` as the command that
-   would clear it. The hook doing its job runs no extra command.
+   finished; only a row that survives the flow's own forget is reported, with
+   `jj workspace forget '<name>'` as the command that would clear it, and a
+   forget that fails is judged by the row that follow it rather than by its own
+   exit status. The hook doing its job runs no extra command.
 4. **Return.** Success returns nothing; every failure returns its line, which
    Rex prints on the float's terminal and which makes `rex do` exit non-zero.
 
@@ -504,16 +505,17 @@ hand now. The file is created in `main` and committed on `main`, matching
 
 ```toml
 [post-remove]
-jj = "jj workspace forget {{ branch }} 2>/dev/null || true"
+jj = "jj workspace list -T 'name ++ \"|\" ++ root ++ \"\\n\"' | awk -F'|' -v p='{{ worktree_path }}' '$2==p{print $1}' | xargs jj workspace forget 2>/dev/null || true"
 ```
 
 Identical to `ginit.fish` on purpose: a repo seeded two ways is a repo where the
-next surprise is a difference nobody remembers choosing. `{{ branch }}` is
-worktrunk's template variable and resolves to the branch the tab and workspace
-are named after — the shape `ginit` already relies on, and the shape this repo's
-workspace names (`feat/6c4`, slashes and all) are built for. The trailing
-`|| true` is kept from the seed, and is exactly why step 3 of the clean path
-verifies the row is gone instead of assuming it.
+next surprise is a difference nobody remembers choosing. The seed resolves the
+workspace **by the path worktrunk removed**, because the obvious line —
+`jj workspace forget {{ branch }}` — does not work here: there is no `branch`
+variable for a detached worktree, so worktrunk cannot expand it
+(`Failed to expand project:jj: undefined variable branch @ line 1`) and the hook
+never runs at all. The trailing `|| true` is kept from the seed, and is exactly
+why step 3 of the clean path verifies the row is gone instead of assuming it.
 
 The seed is a **fast path, not a guarantee**. It cannot even be expanded for a
 detached worktree — all `jj workspace add`, and so `gws`, creates — because there
@@ -633,8 +635,10 @@ Everything runs from `bash test/run.sh`, no pty.
   workspace** (the longest-prefix rule, with a `default`-plus-`feat/6c4`
   fixture); exit 4 when the jj row and the worktree disagree; exit 4 naming the
   fetch when a stand-in `jj` on `PATH` fails it; the hook refusal coming before
-  the fetch, proved by the stand-in `jj` recording **no argv at all** on a run
-  given no `--no-fetch`; the `main` refresh running `jj new main@origin` for a
+  the fetch — the refusal screen is what proves the ordering, and the stand-in
+  `jj` recording **no argv at all** on a run given no `--no-fetch` corroborates
+  it (that run's `--main` is not a directory, so a fetch moved ahead of the
+  refusal would fail in its own `cd` without reaching jj); the `main` refresh running `jj new main@origin` for a
   provably empty `main` and **not** running it for a `main` with a description
   or a non-empty diff; the bookmark move skipped when `main` is not contained in
   `main@origin`; exit 2 for a relative `--cwd`; and — for a clean workspace —
