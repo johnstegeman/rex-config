@@ -523,6 +523,174 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
     'the fixture does not win the opening row'
 fi
 
+# A wrapper with no `.git` anywhere -- what `jj git init --no-colocate` makes, and
+# the state this cut is for -- still opens the base cycle on the branch the
+# project treats as its default. jj records no remote-HEAD symref of its own, so
+# with nothing for git to read the cycle answers from the fixed pair: main, then
+# master, then @.
+#
+# git is stood in for by a liar, not left off PATH: the point is that it is never
+# *asked*. A stand-in that answers `trunk` is an answer nobody should take (the
+# wrapper has no .git to have read it from), and the mark it leaves says whether
+# the question was put at all.
+mkdir -p "$tmp/git-bin"
+cat >"$tmp/git-bin/git" <<'EOF'
+#!/bin/sh
+touch "$GIT_MARKER"
+printf 'trunk\n'
+EOF
+chmod +x "$tmp/git-bin/git"
+mkdir -p "$tmp/nogit/main" "$tmp/nogit/.jj/repo"
+
+# Both fixed names present: the first of them opens the cycle.
+ran=$((ran + 1))
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/nogit/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a wrapper with no .git opens on main@origin' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'a wrapper with no .git is not a failure' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a wrapper with no .git opens on main@origin' \
+    'output differs from the expected cycle'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'a wrapper with no .git never asks git' 'git was run'
+fi
+
+# Only master, which is the whole of the fall-through: a project whose default
+# was never renamed answers master@origin.
+mkdir -p "$tmp/jj-master-bin"
+cat >"$tmp/jj-master-bin/jj" <<'EOF'
+#!/bin/sh
+printf 'master@\nmaster@origin\n'
+EOF
+chmod +x "$tmp/jj-master-bin/jj"
+ran=$((ran + 1))
+printf 'master@origin\n@\nmaster\n' >"$tmp/base.expected"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-master-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/nogit/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a wrapper with no .git and no main opens on master@origin' \
+    "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a wrapper with no .git and no main opens on master@origin' \
+    'output differs from the expected cycle'
+fi
+
+# Neither, and the run still succeeds: an unanswerable default is a
+# fall-through, not a failure, and the cycle is the working copy alone.
+mkdir -p "$tmp/jj-topic-bin"
+cat >"$tmp/jj-topic-bin/jj" <<'EOF'
+#!/bin/sh
+printf 'topic@\ntopic@origin\n'
+EOF
+chmod +x "$tmp/jj-topic-bin/jj"
+ran=$((ran + 1))
+printf '@\n' >"$tmp/base.expected"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-topic-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/nogit/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'no default branch at all still answers the cycle' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'no default branch at all says nothing' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'no default branch at all still answers the cycle' \
+    'output differs from the expected cycle'
+fi
+
+# The branch-name rule, applied where a person's typed name actually meets it:
+# `pick` refuses a name it could not create while the float is still on screen.
+# Every name in the refused table below is one `git check-ref-format --branch`
+# also refused, checked one by one against git while this rule was being written
+# -- the rule is git's, re-expressed in the shell now that the flow runs where
+# there may be no git to ask. `@` is the one name this flow refuses and git
+# accepts: in jj's language `@` is the working copy, so a bookmark named `@`
+# would be read as an answer to a different question -- it always has been.
+#
+# git is answered here by a stand-in that refuses every question and leaves a
+# mark when it was asked one. That is the whole point of the table: a name must
+# be accepted or refused by the rule in this script, and never by git. The mark
+# is how 'git was not asked' is proven rather than argued.
+#
+# An empty name never reaches the rule: a pick with no branch is no branch, and
+# it is refused a step earlier, with the one line that has always said so.
+mkdir -p "$tmp/gitless-bin"
+cat >"$tmp/gitless-bin/git" <<'EOF'
+#!/bin/sh
+touch "$GIT_MARKER"
+exit 1
+EOF
+chmod +x "$tmp/gitless-bin/git"
+printf 'main\t/p/demo/main\n' >"$tmp/name-ws"
+printf 'main\n' >"$tmp/name-br"
+printf 'main@origin\n' >"$tmp/name-base"
+printf '[]\n' >"$tmp/name-beads"
+mkdir -p "$tmp/name-state"
+
+# pick_name <name>: one dry pick whose branch answer is NAME, with every read
+# saved, so nothing here needs a repository or a terminal. Not on either list,
+# so NAME is always a branch to create -- the only mode the rule checks. The
+# state directory is one of its own, so no name is remembered for the next run.
+pick_name() {
+  ran=$((ran + 1))
+  rm -f "$tmp/git-asked"
+  GIT_MARKER=$tmp/git-asked PATH="$tmp/gitless-bin:$PATH" \
+    XDG_STATE_HOME=$tmp/name-state ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json "$tmp/name-beads" \
+    --workspaces "$tmp/name-ws" --bookmarks "$tmp/name-br" \
+    --base-bookmarks "$tmp/name-base" \
+    --bead '' --branch "$1" --dry-run >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+for name in '@' '-x' 'a..b' 'a.' 'a/b/' 'a b' 'a~b' 'a^b' 'a:b' 'a?b' 'a*b' \
+  'a[b' 'a\b' 'a//b' 'feat/x..y' 'feat/x.' '-feat/x'; do
+  pick_name "$name"
+  if [ "$status" -ne 2 ]; then
+    fail "the name '$name' is refused" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -qxF "new-work.sh: not a valid branch name: $name" "$tmp/err"; then
+    fail "the name '$name' says why" "stderr: $(cat "$tmp/err")"
+  elif [ -s "$tmp/out" ]; then
+    fail "the name '$name' starts nothing" "stdout: $(cat "$tmp/out")"
+  elif [ -e "$tmp/git-asked" ]; then
+    fail "the name '$name' is refused without git" 'git was asked'
+  fi
+done
+
+pick_name ''
+if [ "$status" -ne 3 ]; then
+  fail 'an empty name starts nothing' "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/err")" != 'new-work.sh: no branch given, nothing to start' ]; then
+  fail 'an empty name says why' "stderr: $(cat "$tmp/err")"
+fi
+
+# And the names that do get through: `feat/xxx` is what a bead derives and the
+# rest are the shapes a hand types. Each is a create, so each reaches the rule.
+# A refusal among these is the regression this table exists to catch, and a mark
+# left by the stand-in is the same regression seen from the other side: it is a
+# question a git-free wrapper could never have had answered.
+for name in 'feat/x' 'feat-x' 'v1.2' 'feat/x-1_2' 'fix-it' 'aeiou' 'feat/2ow'; do
+  pick_name "$name"
+  if [ "$status" -ne 0 ]; then
+    fail "the name '$name' is a branch to create" \
+      "exit $status: $(cat "$tmp/err")"
+  elif grep -q 'not a valid branch name' "$tmp/err"; then
+    fail "the name '$name' is not refused" "stderr: $(cat "$tmp/err")"
+  elif [ -e "$tmp/git-asked" ]; then
+    fail "the name '$name' is accepted without git" 'git was asked'
+  fi
+done
+
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
   exit 1

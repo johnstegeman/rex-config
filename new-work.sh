@@ -619,10 +619,26 @@ bookmark_records() {
 # outright, which is how a test or a dry run says it without a repository to ask;
 # empty output or a failed lookup means this clone names no such branch, which is
 # a fall-through rather than an error, because the fixed names answer for it.
+#
+# git is asked only where there is a `.git` beside the base to ask it from -- a
+# repository named directly, or the `<wrapper>/main` a ginit'd wrapper has. That
+# symref is a git fact and nothing else holds it: jj writes no remote-HEAD of its
+# own, so a wrapper made with `jj git init --no-colocate`, with no `.git`
+# anywhere, has no question here to answer. It answers nothing rather than
+# failing, and the cycle's fixed names -- main, then master -- are what a
+# git-free wrapper opens on by design, which is the same conventional answer git
+# would have given it in most repositories.
 origin_head_ref() {
   local main=$1 fixture=$2
   if [ -n "$fixture" ]; then
     printf '%s\n' "$fixture"
+    return 0
+  fi
+  # A .git in the base directory, or in the wrapper above it: the two shapes a
+  # repository is met in. Either is a question git can answer, and with neither
+  # there is nothing to ask -- so the answer is empty, which the cycle reads as
+  # "fall through to the fixed names".
+  if [ ! -e "$main/.git" ] && [ ! -e "$main/../.git" ]; then
     return 0
   fi
   # git exits non-zero where the symref is not there, and that status is an
@@ -1052,8 +1068,8 @@ composer_cycle_base() {
 #
 # Trimming is not cosmetic. A pasted name usually arrives with whitespace around
 # it, whitespace is part of no branch name, and a trimmed space-then-Enter is
-# Enter -- accepting the name already in the field rather than failing
-# `git check-ref-format` on one that looks perfectly valid on screen.
+# Enter -- accepting the name already in the field rather than refusing one
+# that looks perfectly valid on screen.
 ask_branch() {
   local prefill=$1 project=${2:-} answer=''
   if on_screen; then
@@ -1428,22 +1444,46 @@ cmd_fzf_answer() {
   fzf_answer "$1"
 }
 
-# Whether the flow could create a branch with this name.
-# `git check-ref-format --branch` is the test, with one twist: it *expands* a
-# name like @{-1} and prints what that resolved to, so only an answer equal to
-# the input means the input itself is a branch name. Without the comparison the
-# literal @{-1} would pass the check and be created as a branch so named.
+# Whether the flow could create a branch (a jj bookmark) with this name.
 #
-# `@` is refused before git is asked. Git is willing to accept it, but this flow
-# speaks jj's revision language -- the base it hands gws is a jj revision -- and
-# in that language `@` is the working copy. A bookmark called `@` would be read
-# as an answer to a different question everywhere a revision is read, so it is
-# not a name to make, however willing git is.
+# The rule is git's, re-expressed here in the shell: `git check-ref-format
+# --branch` used to answer it, and a wrapper made with `jj git init --no-colocate`
+# has no git to ask -- while a name that worked yesterday must not stop working
+# today, so what is refused below is what git refused: nothing, `@` on its own,
+# anything starting with `-`, whitespace, a `~`, `^`, `:`, `?`, `*`, `[`, `\`, a
+# `@{`, a `..`, a `//`, or a trailing `/` or `.`. Everything else is a name --
+# letters, digits, `.`, `_`, `-` and `/` in the places git allows them.
+#
+# Two of those need a word of their own. `@` is git's working-copy shorthand,
+# and it is jj's: every revision this picker hands to a workspace is spoken in
+# jj's language, where `@` is the working copy, so a bookmark called `@` would be
+# read as an answer to a different question everywhere a revision is read. It is
+# not a name to make, however willing git is. `@{` is the reflog form: git
+# refuses it, and the reason it has to be refused by this rule rather than by a
+# comparison with git's answer is that git *expands* such a name -- `@{-1}` came
+# back as some earlier branch, and the old check, which only compared git's
+# answer with the input, was what kept that literal from being created. There is
+# no answer to compare against any more, so the name is refused outright.
+#
+# git also refused a few names this rule lets through -- a leading `/` or `.` on
+# a path component, the reserved `HEAD`, a `.lock` suffix. None of them is a name
+# a bead derives or a hand here types, and being wider than git costs nothing:
+# jj is what creates the bookmark, and it is asked next.
 valid_branch_name() {
-  local resolved
-  [ "$1" != '@' ] || return 1
-  resolved=$(git check-ref-format --branch "$1" 2>/dev/null) || return 1
-  [ "$resolved" = "$1" ]
+  local name=$1
+  [ -n "$name" ] || return 1
+  [ "$name" != '@' ] || return 1
+  case $name in
+    -*) return 1 ;;
+  esac
+  case $name in
+    *[[:space:]]*) return 1 ;;
+    *'`'* | *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *'\'*) return 1 ;;
+    *'@{'*) return 1 ;;
+    *..* | *//*) return 1 ;;
+    */ | *.) return 1 ;;
+  esac
+  return 0
 }
 
 # The branch name READY's bead ID derives, or nothing: a bead the list did not
@@ -1656,10 +1696,6 @@ cmd_pick() {
   [ -n "$workspaces" ] || need wt
   need jq
   [ -n "$bd_json" ] || need bd
-  # check-ref-format keeps an uncreatable name out of the new tab, so git is not
-  # optional either: without it every name would come back "not a valid branch
-  # name". It is the one lookup a pick still makes that is not jj's.
-  need git
   # jj is what reads the workspaces, the bookmarks and the base cycle, and each
   # of the three has a fixture that stands in for it -- so a run needs jj unless
   # all three are answered without it. This check is the cycle's alone, and it is
@@ -1935,7 +1971,7 @@ cmd_pick() {
   # A name to create has to be one the flow can actually create: better to say
   # so here, where the float is still on screen, than in the new tab's output.
   # Only a create is checked -- a switch and an attach name a ref that exists,
-  # and `git check-ref-format` has nothing to say about a branch that is already
+  # and valid_branch_name has nothing to say about a branch that is already
   # there.
   if [ "$mode" = create ] && ! valid_branch_name "$branch"; then
     printf '%s: not a valid branch name: %s\n' "$PROG" "$branch" >&2

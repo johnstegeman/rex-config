@@ -797,11 +797,14 @@ elif ! grep -qx 'jq not found on PATH — press any key' "$tmp/err"; then
   fail "missing tool is named" "stderr: $(cat "$tmp/err")"
 fi
 
-# git is load-bearing on the create path -- check-ref-format decides whether a
-# name can be made -- so a missing one is named rather than every name coming
-# back "not a valid branch name". The branch list itself is jj's now.
+# git is not load-bearing on any of it any more: the name rule is this script's
+# own and the two lists are jj's, so a pick on a machine with no git at all is
+# an ordinary pick. This is that same create with git off PATH -- the name is
+# validated, the work handed back, and no line about a tool the flow no longer
+# calls.
 restricted_path "$tmp/no-git-bin" bash cat cut grep sed awk tr jq
 ran=$((ran + 1))
+rm -f "$tmp/rex-args"
 PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --main /p/demo/main --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
@@ -811,10 +814,18 @@ PATH="$tmp/no-git-bin" REX_ARGS_FILE=$tmp/rex-args ./new-work.sh pick \
   --bead pmm-iris-a4l --branch feat/needs-git --dry-run \
   </dev/null >"$tmp/out" 2>"$tmp/err"
 status=$?
-if [ "$status" -ne 1 ]; then
-  fail "a missing git exits 1" "exit $status: $(cat "$tmp/err")"
-elif ! grep -q 'git not found on PATH' "$tmp/err"; then
-  fail "a missing git is named" "stderr: $(cat "$tmp/err")"
+if [ "$status" -ne 0 ]; then
+  fail 'a pick needs no git' "exit $status: $(cat "$tmp/err")"
+elif grep -q 'not found on PATH' "$tmp/err"; then
+  fail 'a pick asks for no git' "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! json=$(payload_of "$(cat "$tmp/out")"); then
+  fail 'a pick with no git still hands a create back' \
+    "stdout: $(cat "$tmp/out")"
+else
+  assert_json 'a pick with no git still hands a create back' "$json" \
+    '.branch == "feat/needs-git" and .worktree == "create"'
 fi
 
 # Every tool the run needs except fzf and gum: with no terminal nothing is asked,
