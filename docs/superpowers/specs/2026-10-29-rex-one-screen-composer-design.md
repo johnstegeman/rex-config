@@ -206,6 +206,12 @@ resolves, in order, the first ref that exists:
 1. the target of `refs/remotes/origin/HEAD` (as `origin/main`),
 2. `origin/main`, 3. `origin/master`, 4. `main`, 5. `master`.
 
+*(History, from the 2026-11-06 dojjo cut: this is no longer how the base is
+chosen. The chain is now `main@origin`, then `master@origin`, then `@`, decided
+from `jj bookmark list --all-remotes` — no `origin/HEAD` read and no git at all;
+`--origin-head` is the fixture that names a remote default outright. See
+[The base](../../../README.md#the-base).)*
+
 The check is one `for-each-ref --format='%(refname)%00%(symref)'` over exactly
 those refs (the same trick orca uses: a character class, so `main/topic` cannot
 impersonate `main`), not `rev-parse` per candidate.
@@ -396,10 +402,11 @@ Everything below runs from `bash test/run.sh` with no pty:
   no `--branch` asks for one, takes the typed line, and an empty or cancelled
   answer exits 3 the way the branch question always did. `--branch` still
   short-circuits the ask, so every other fixture stays ask-free.
-- `test/branch_test.sh` — `base-default`'s chain: origin/HEAD's target wins,
-  then origin/main, origin/master, main, master; `main/topic` does not
-  impersonate `main`; nothing resolvable leaves `@`; the cycle dedupes and drops
-  unresolvable entries.
+- `test/branch_test.sh` — the base chain: today `main@origin`, then
+  `master@origin`, then `@`, from a saved bookmark listing (it was
+  `base-default`'s origin/HEAD-then-origin/main chain from git before the
+  2026-11-06 dojjo cut); nothing resolvable leaves `@`; the cycle dedupes and
+  drops unresolvable entries.
 - `test/wrapper_test.sh` — the stand-in `wt` sees `GIT_TERMINAL_PROMPT=0` in its
   environment; a fetch failure still lets the switch run and start the agent; the
   `--base` word reaches `wt switch` verbatim; a prompt starting with `-` and a

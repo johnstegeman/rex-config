@@ -76,7 +76,8 @@ commands:
         --bd-json        a saved `bd list --status in_progress --json`, holding
                          the bead the branch is on
         --base-bookmarks a saved `jj bookmark list`, as bases reads it
-        --origin-head    what origin/HEAD names, where the branch's base comes from
+        --origin-head    the branch this clone treats as origin's default, as
+                         `origin/main` or `main@origin`: the base the cycle opens on
         --no-fetch       do not fetch before the audit
         --dry-run        print the hand-back instead of running it; the audit
                          still fetches and refreshes main
@@ -438,7 +439,7 @@ workspace_rows() {
     listing=$(cat "$fixture")
   elif [ -n "$main" ]; then
     listing=$( cd "$main" &&
-      jj workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) || {
+      jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) || {
       printf '%s: could not read the workspaces of %s\n' "$PROG" "$main" >&2
       return 1
     }
@@ -471,7 +472,7 @@ bookmark_rows() {
     }
     cat "$fixture"
   elif [ -n "$main" ]; then
-    ( cd "$main" && jj bookmark list -T 'name ++ "\n"' ) || {
+    ( cd "$main" && jj --ignore-working-copy bookmark list -T 'name ++ "\n"' ) || {
       printf '%s: could not read the bookmarks of %s\n' "$PROG" "$main" >&2
       return 1
     }
@@ -617,7 +618,7 @@ bookmark_records() {
     [ -r "$fixture" ] || return 1
     cat "$fixture"
   else
-    ( cd "$main" && jj bookmark list --all-remotes \
+    ( cd "$main" && jj --ignore-working-copy bookmark list --all-remotes \
         -T 'name ++ "@" ++ remote ++ "\n"' )
   fi
 }
@@ -721,9 +722,14 @@ base_chain() {
         open = base
       } else if (head != "") {
         # origin/develop is develop@origin, and the suffix is the first cut: git
-        # puts the remote first in a remote-tracking ref, jj puts it last.
+        # puts the remote first in a remote-tracking ref, jj puts it last. An
+        # answer already written the jj way -- main@origin -- is the same branch
+        # said in the same vocabulary, so its own remote comes off before
+        # origin is appended: the two spellings are one answer, never one
+        # answer with two suffixes.
         open = head
         sub(/^origin\//, "", open)
+        sub(/@[^@]*$/, "", open)
         open = open "@origin"
       } else if ("main@origin" in known) {
         open = "main@origin"
@@ -1665,7 +1671,8 @@ cmd_pick() {
 
   # The hand-back's paths are read by the Rex server, whose working directory is
   # not this one, so they have to say where they are. The Lua side derives both
-  # from git and they are always absolute; this is the guard for a hand-run.
+  # from the wrapper walk and they are always absolute; this is the guard for a
+  # hand-run.
   need_absolute 'pick: --main' "$main"
   need_absolute 'pick: --root' "$root"
 
@@ -1678,18 +1685,19 @@ cmd_pick() {
     { [ -z "$base_bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
     # Being there is not enough: the new workspace is made by jws, so what this
-    # needs is the shape jws can build in -- the wrapper ginit makes, with .jj/repo
-    # as a *directory* beside the main worktree (main's own .jj/repo is a file
-    # there, and that file is how jws tells the two apart). A clone ginit'd where
+    # needs is the shape jws can build in -- the wrapper `jinit` makes, with
+    # .jj/repo as a *directory* beside the main worktree (main's own .jj/repo is a
+    # file there, and that file is how jws tells the two apart). A repo cut where
     # it stands is deliberately not accepted even though a loose ancestor walk
     # would find its repo: jws runs its add from <wrapper>/main to inherit that
     # workspace's sparse patterns, so it refuses a wrapper with no main -- after
     # the bead is claimed, which is the outcome this check exists to prevent. A
-    # repo that was never ginit'd has no fallback here either, by design: a plain
-    # git worktree would quietly recreate the problem jj is there to solve, so
-    # this refuses and names the thing to run.
+    # repo outside the wrapper shape has no fallback here either, by design: a
+    # plain git worktree would quietly recreate the problem jj is there to solve,
+    # so this refuses and names the tools that make one -- `jinit` for an empty
+    # remote, `jclone` for one that already has history.
     [ -d "$(dirname "$main")/.jj/repo" ] ||
-      die "pick: $(dirname "$main") is not ginit'd — jws needs a wrapper with .jj/repo as a directory beside the main worktree; run ginit first"
+      die "pick: $(dirname "$main") is not a wrapper — jws needs a wrapper with .jj/repo as a directory beside the main worktree; run jinit or jclone to make one"
   fi
 
   # The screen's own requirements, before any work, and only where the screen
@@ -2306,7 +2314,7 @@ done_workspace() {
     listed=$(cat "$workspaces") ||
       die "done: could not read the workspace list from $workspaces"
   else
-    listed=$( cd "$cwd" && jj workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
+    listed=$( cd "$cwd" && jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
       die "done: could not read the jj workspaces of $cwd"
   fi
 

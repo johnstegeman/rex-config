@@ -155,8 +155,9 @@ and then the project's post-start hooks, run by `djo hook post-start` inside the
 new workspace because jj and not dojjo made it. Which workspaces exist is `jj
 workspace list`'s answer and nobody else's, so a switch and an attach are jj's
 answers too, never a tool's report. Both halves used to be worktrunk's — history
-now: nothing in the flow runs `wt`, and the only thing it asks git is the default
-branch, where a `.git` exists to ask.
+now: nothing in the flow runs `wt`, and it asks git nothing at all. Not even the
+default branch: the base cycle opens on a conventional name, below, rather than
+on anything a `.git` could answer.
 
 When the agent exits — quit, crash, or a brainstorming that finished — the tab
 drops into your login shell in that worktree: the hooks' output and the
@@ -167,26 +168,30 @@ wrote can be run there. Exiting that shell closes the tab.
 
 A new branch starts from one **jj revision**, not from whatever this clone last
 checked out. Here that revision is `main@origin` — the remote's current state of
-the default branch, rather than this machine's copy of it. `origin/main` was the
-git spelling of the same thing; the `@remote` suffix says where a revision comes
-from now, so there is no second field that could disagree with it.
+the conventional default branch, rather than this machine's copy of it.
+`origin/main` was the git spelling of the same thing; the `@remote` suffix says
+where a revision comes from now, so there is no second field that could disagree
+with it.
 
-The screen opens on `<default-branch>@origin`. Here that branch is read from
-`origin/HEAD` — a git fact, asked of git only where a `.git` still sits beside
-the base, which a wrapper cut to jj alone does not have. When this clone names no
-`origin/HEAD`, or has no git to ask at all, it falls through to a fixed name —
-and to the working copy when the bookmarks do not have either:
+The screen opens on `main@origin` — the remote's state of the conventional
+default branch — and falls through to `master@origin`, then to the working copy,
+when the bookmarks do not render that one. Nothing is asked of git to learn the
+name: a wrapper cut to jj alone has no `.git` to ask, and a clone that still has
+one is the layer this flow is deleting. Whether a clone's default branch is
+`main` or `master` is a convention, jj keeps no record of it, and reading a
+symref out of a `.git` that happens to be lying around would make the opening
+revision depend on a layer nothing else in the flow uses. So the opening rule is
+a fixed name, checked against the bookmarks:
 
-1. the branch `refs/remotes/origin/HEAD` points at, as `<that branch>@origin`;
-2. `main@origin`, when the bookmarks render it;
-3. `master@origin`, when the bookmarks render that one;
-4. `@`, the working copy, which is always there.
+1. `main@origin`, when the bookmarks render it;
+2. `master@origin`, when the bookmarks render that one;
+3. `@`, the working copy, which is always there.
 
-The bookmarks are asked about those two fixed names and about nothing else, so
-the opening answer survives even where no bookmark renders it: a clone whose
-`origin/HEAD` is `develop` opens on `develop@origin` either way, and so does a
-base you name in configuration. The revision is made in the tab, where `jj`
-answers for it and a fetch has already had its chance.
+A base you name in configuration (`base = "main@origin"`, or any other revision)
+opens on that instead, and it is kept verbatim even where nothing here resolves
+it. The bookmarks are asked about `main@origin` and `master@origin` and about
+nothing else. The revision is made in the tab, where `jj` answers for it and a
+fetch has already had its chance.
 
 `ctrl-r` cycles a short list from there: that opening answer, then `@`, then
 `main` and `master`, offered only where the bookmarks say they exist.
@@ -245,9 +250,9 @@ looked up through your shell):
 `bash` is the exception to that: it runs under Rex's own `PATH` — the picker is
 started by its `#!/usr/bin/env bash` shebang, and `new-work.sh` is a bash script
 (`pipefail`, process substitution) — so it only needs to be where Rex can find
-it. `git` is not required: where a `.git` sits beside the base the picker asks
-it for `origin/HEAD`, and with no git, or no such symref, the cycle opens on
-`main` then `master`.
+it. `git` is not required and is not asked anything: the base cycle opens on
+`main@origin`, then `master@origin`, then `@`, decided from the bookmarks alone
+([The base](#the-base)).
 
 Also needed:
 
@@ -293,6 +298,14 @@ One key each way: `ctrl+space>n` starts a branch, and `ctrl+space>d` tears one
 down ([Finishing: ctrl+space>d](#finishing-ctrlspaced)). The plugin finds
 `new-work.sh` beside its own `init.lua`, so there is nothing else to point at.
 
+One thing is **not** in this repository, and a new machine has to be given it by
+hand: `jws`, `jinit` and `jclone` are fish functions that live in
+`~/.config/fish/functions` (`jws.fish`, `jinit.fish`, `jclone.fish`), unversioned
+like the `gws`/`ginit`/`gclone` they sit beside. Copy them across from the
+machine that has them. Without `jws` the picker refuses every launch (`jws is not
+a fish function`), and `bash test/run.sh` fails on `test/jws_test.sh` rather than
+skipping it — the suite is written for the machine that has them.
+
 ## Options
 
 Every option is optional; these are the defaults.
@@ -304,10 +317,10 @@ require("rex-config").setup{
   agent_args = {},                         -- extra arguments before the prompt
   bead_prompt = "/brainstorming for bead {id}",  -- {id}, {title}, {branch}, {project}
   no_bead_prompt = "/brainstorming",       -- used when the flow ran without a bead
-  base = nil,                              -- the base cycle's first entry: nil =
-                                           -- the clone's own default, resolved;
-                                           -- a string opens on that revision;
-                                           -- false opens on no revision at all
+  base = nil,                              -- nil = the conventional opening base
+                                           -- (main@origin, then master@origin,
+                                           -- then @); a string opens on that
+                                           -- revision; false opens on none
   bounds = { 0.15, 0.1, 0.7, 0.8 },        -- picker float, fractions of the window
   script = "/…/rex-config/new-work.sh",  -- new-work.sh beside init.lua (the default)
 }
@@ -391,10 +404,11 @@ Before the screen opens:
 
 - Not a jj wrapper, or no beads database: the picker never opens; the error
   names the directory.
-- The repo is not ginit'd — no `.jj/repo` as a directory in the directory above
-  the main worktree: the picker refuses in one line and names `ginit`, and no
-  bead is claimed: `pick: /… is not ginit'd — jws needs a wrapper with .jj/repo
-  as a directory beside the main worktree; run ginit first`.
+- The repo is not in the wrapper shape — no `.jj/repo` as a directory in the
+  directory above the main worktree: the picker refuses in one line and names
+  `jinit` and `jclone`, and no bead is claimed: `pick: /… is not a wrapper — jws
+  needs a wrapper with .jj/repo as a directory beside the main worktree; run
+  jinit or jclone to make one`.
 - A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `jq`, `jj`,
   `djo`, or a fish with no `jws`: the float names the missing piece and waits for
   a keypress instead of vanishing (`jj not found on PATH — press any key`,
@@ -480,8 +494,7 @@ reports merged work as unmerged. A fetch that fails is itself a refusal, naming
 that nothing could be compared. Then:
 
 - **whether the branch is merged.** The base is the picker's own opening base —
-  the chain in [The base](#the-base), rendered as one jj revision:
-  `refs/remotes/origin/HEAD`'s branch as `<branch>@origin`, then `main@origin`,
+  the chain in [The base](#the-base), rendered as one jj revision: `main@origin`,
   then `master@origin`, then `@` — and what the branch has that base does not is
   read as *content*: `jj diff --summary -r '<base>..@'`. Content rather than
   ancestry, because a squash or a rebase merge leaves that diff empty while
@@ -655,3 +668,9 @@ typing it at the prompt. The screen's own paths — the ones that exist only whe
 stdin is a terminal — are run with `PICK_SCREEN=1`, the script's answer for a run
 with no terminal to hand, so they are the script itself rather than a patched
 copy of it, with `fzf` and `gum` stand-ins answering for the person.
+
+`test/jws_test.sh`, `test/jinit_test.sh` and `test/jclone_test.sh` read the three
+fish functions from `~/.config/fish/functions` (override with `JWS_FILE`,
+`JINIT_FILE`, `JCLONE_FILE`), and fail — rather than skipping — on a machine
+that does not have them: they are the deliverable, and a suite that quietly
+skipped its own subject would be worse than one that is red.

@@ -119,7 +119,7 @@ design stands on.
   as `[hooks.post-remove]`.
 - **`djo switch` is not used**; `jws` creates workspaces with jj and runs `djo hook post-start` as a separate step, keeping dojjo for what it does correctly (hooks and `remove`).
 - **Hook logs at `<wrapper>/../.jj/djo/logs` are acceptable** — one shared, last-writer-wins log set per parent directory — rather than carrying a patched dojjo build.
-- **Every git-ignored path comes across** on a workspace create: `djo copy-ignored` has no include filter and does not read `.worktreeinclude`, so `node_modules` is copied along with `.env`. Accepted.
+- **Every git-ignored path comes across** on a workspace create: `djo copy-ignored` has no include filter and does not read `.worktreeinclude`, so `node_modules` is copied along with `.env`. Accepted. **Correction, measured on 0.2.2 after this was written: it *does* read `.worktreeinclude`**, applying each line as a literal include and turning the copy off when a line matches nothing — so a wrapper carrying worktrunk's `.env*` glob copies nothing, `jinit` seeds the file empty for that reason, and [the runbook](../../dojjo-conversion-runbook.md) carries the procedure for the repos that still hold one.
 - `gclone` / `ginit` / `gws` stay exactly as they are.
 - No hook approval gate is acceptable.
 - The owner is stripping git from pi-rex himself; the flow must work without it.
@@ -158,7 +158,7 @@ design stands on.
 | base default | `new-work.sh` (`origin_head_ref`) | no git at all: the `--origin-head` fixture or nothing, then bookmark `main`, then `master`, then `@` |
 | tab wrapper | `init.lua` (`M.new_tab_script`) | `switch` → `jws --existing`; `create`/`attach` → `jws`; `jq` and `wt` gone |
 | project | `init.lua` (`M.project_for`, `M.main_worktree`) | no `git rev-parse`; the wrapper walk; worktrunk's `main` flag fallback deleted |
-| done | `new-work.sh` (`done_wt_*`, `cmd_done`), `init.lua` (`M.work_done_go`) | `djo remove -y`; verification stays on `jj workspace list`; kept-bookmark from `jj bookmark list` |
+| done | `new-work.sh` (`done_wt_*`, `cmd_done`), `init.lua` (`M.work_done_go`) | `djo remove -y`; verification stays on `jj workspace list`; kept-bookmark from a `bookmarks(exact:…)` revset, not a `jj bookmark list` (see *The done flow*) |
 | requirements | `new-work.sh` (`pick` preflight), `init.lua` (`M.options` docs), `README.md` | `djo` and `jws` instead of `wt` and `gws`; `git` no longer required |
 | docs | `README.md`, `docs/superpowers/specs/2026-11-03-…`, `2026-11-05-…` | dojjo/jj vocabulary, no "worktrunk owns the switch" claims |
 | hooks | each repo's `main/.config/wt.toml` | out of this repo — the runbook |
@@ -416,7 +416,12 @@ worktrunk's. What changes is the two ends of it:
     removal, the report says `the bookmark <name> was kept: jj bookmark delete
     <name>`; otherwise the teardown deleted it and the branch is gone. dojjo
     has no merged check, so a bookmark left behind is the only "kept" case that
-    exists;
+    exists. **Deviated in the implementation, and for a reason the design did
+    not have:** a `jj bookmark list` cannot answer it, because `djo remove` only
+    tombstones a bookmark a remote tracks and a tombstone goes on printing its
+    name in a listing. So the read is `jj --ignore-working-copy log --no-graph
+    -r 'bookmarks(exact:"<name>")' -T 'commit_id ++ "\n"'`, a revset that
+    resolves only while the bookmark is really there;
   - `-D` disappears from the vocabulary: nothing in this flow runs worktrunk, so
     there is no command to name for a branch worktrunk refused.
 - The hand-back payload (`project`, `root`, `main`, `workspace`, `path`) is

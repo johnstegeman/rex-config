@@ -908,20 +908,21 @@ refused() {
   fi
 }
 
-# A repo that was never ginit'd -- no .jj/repo beside main -- while main itself is
-# there, so the refusal is about the workspace and not about a directory that
-# does not exist. No fixtures at all here: a run given all four never opens
-# --main, and this one has to.
+# A repo that is not in the wrapper shape -- no .jj/repo beside main -- while main
+# itself is there, so the refusal is about the workspace and not about a
+# directory that does not exist. No fixtures at all here: a run given all four
+# never opens --main, and this one has to.
 mkdir -p "$tmp/plain/main"
-refused "a repo that was never ginit'd exits 1" "not ginit'd" \
+refused "a repo outside the wrapper shape exits 1" "is not a wrapper" \
   ./new-work.sh pick --main "$tmp/plain/main" --root /p/demo --project demo \
   --bead '' --branch feat/x --dry-run
 ran=$((ran + 1))
-if ! grep -qF "$(dirname "$tmp/plain/main") is not ginit'd" "$tmp/err"; then
-  fail "the never-ginit'd refusal names the wrapper it looked in" \
+if ! grep -qF "$(dirname "$tmp/plain/main") is not a wrapper" "$tmp/err"; then
+  fail "the no-wrapper refusal names the directory it looked in" \
     "stderr: $(cat "$tmp/err")"
-elif ! grep -qF 'run ginit first' "$tmp/err"; then
-  fail "the never-ginit'd refusal names ginit" "stderr: $(cat "$tmp/err")"
+elif ! grep -qF 'run jinit or jclone' "$tmp/err"; then
+  fail "the no-wrapper refusal names the tools that make one" \
+    "stderr: $(cat "$tmp/err")"
 fi
 
 # jj reads the base cycle, so it is named only where that cycle is really read:
@@ -940,14 +941,14 @@ refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
   --bead pmm-iris-a4l --branch feat/no-jj
 
 # The shape that is deliberately NOT supported, pinned here so it is not
-# re-admitted by accident: a normal clone ginit'd where it stands, so .jj/repo
-# sits inside the worktree itself rather than in a wrapper beside a main
-# workspace. jws' ancestor walk would find that repo, but jws then runs its add
-# from <wrapper>/main to inherit that workspace's sparse patterns and refuses
-# without one -- after the bead is claimed, which is the outcome this preflight
-# exists to prevent. So the refusal happens here, before anything is asked.
+# re-admitted by accident: a normal clone cut where it stands, so .jj/repo sits
+# inside the worktree itself rather than in a wrapper beside a main workspace.
+# jws' ancestor walk would find that repo, but jws then runs its add from
+# <wrapper>/main to inherit that workspace's sparse patterns and refuses without
+# one -- after the bead is claimed, which is the outcome this preflight exists to
+# prevent. So the refusal happens here, before anything is asked.
 mkdir -p "$tmp/in-place/.jj/repo"
-refused "a repo ginit'd in place is refused for it" "not ginit'd" \
+refused "a repo cut in place is refused for it" "is not a wrapper" \
   ./new-work.sh pick --main "$tmp/in-place" --root /p/demo --project demo \
   --bd-json test/fixtures/ready.json \
   --workspaces test/fixtures/workspaces.txt \

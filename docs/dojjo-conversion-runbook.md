@@ -20,6 +20,19 @@ away) — but the eight repos in the inventory are all still in their pre-cut
 state, so the first real run is the first test.
 **`pi-rex` goes first**, and it is the one to watch.
 
+## Prerequisites
+
+`jws`, `jinit` and `jclone` are fish functions in `~/.config/fish/functions`,
+not repo files: they are unversioned, and nothing clones them onto a machine.
+Without them every `jws`/`jclone` line below answers `Unknown command`, and
+`bash test/run.sh` fails rather than skipping (`test/jws_test.sh`,
+`test/jinit_test.sh` and `test/jclone_test.sh` read the functions from that
+directory). So before step 5 — the first step that runs `jws` — check
+`fish -c 'functions -q jws; and functions -q jinit; and functions -q jclone'`,
+and copy the three files from the machine that has them if it says nothing.
+Everything else this runbook needs is on the login shell's `PATH`: `jj` 0.47.1,
+`djo` 0.2.2, `fish`, `bd`.
+
 ## What changes, and why
 
 `jws` makes the workspace with `jj workspace add` and then runs
@@ -375,6 +388,9 @@ No untracked files found in main.                       a pass on a repo whose m
                                                         change 1), which it skips
                                                         as it walks, so they never
                                                         count as untracked at all
+                                                        — AND ONLY IF the thing you
+                                                        expected to come across is
+                                                        really ignored: see below
 
 post-start(copy): djo copy-ignored --from main
 Copied 0 entries from main.                             NOT a pass on a first run:
@@ -413,6 +429,38 @@ and on `rex-config` and `pi-packages`, whose files have no hooks at all on
 purpose, that last line is the pass. A **`Failed to copy`** line under an entry
 the summary counted is neither: the copy ran and lost part of what it took, and
 the paragraph under the box is the repair.
+
+**`No untracked files found in main.` is only a pass if the path you expected is
+really ignored.** The message is the same whether `main` has nothing to bring
+across or the thing you touched is not a candidate at all — and an untracked path
+that no ignore rule covers is not a candidate, because jj auto-tracks it and
+`djo copy-ignored` only ever considers what `jj file list` does **not** track. So
+`touch .env` proves the copy on a repo whose `main/.gitignore` names `.env` (the
+`jinit` seed does) and proves nothing on one whose ignore file does not. Two
+cheap checks, either one enough, run in `<wrapper>/main` right after the touch:
+
+```bash
+jj file list | grep -x '\.env'   # must print NOTHING, or .env is tracked
+                                 # by jj and will never be copied
+jj diff --summary -r @           # must NOT name .env: `A .env` is the same
+                                 # answer — jj has it, so dojjo cannot
+```
+
+A repo that fails either check gets **two** fixes, in this order, and the second
+is the one that is easy to miss (verified on `jj` 0.47.1):
+
+```bash
+printf '.env\n' >>.gitignore         # make the path a candidate
+jj file untrack .env                # and stop jj tracking it
+jj file list | grep -x '\.env'      # now prints nothing
+jj diff --summary -r @              # now names only .gitignore
+```
+
+Ignoring is not enough on its own: jj snapshots the file the first time it sees
+it, so a `.env` that was already there is *tracked* and adding the ignore line
+leaves it tracked — `jj file untrack` is what puts it back in the candidate set.
+Both fixes go in with [step 6](#step-6-commit-the-change-in-that-repo)'s commit.
+This is the one way step 5 turns its own verification into a false pass.
 
 Then, where the repo has a redirect hook (`ci-platform`):
 
@@ -466,6 +514,23 @@ a pattern: it takes every **top-level** entry `jj file list` does not track, so
 **`node_modules` comes across with `.env`** where each sits at the top of the
 repo. The owner accepted this — a workspace's first minute is worth more than
 the disk — and it is the behaviour the copy hook above is written for.
+
+What "`jj file list` does not track" means in practice, because it is the rule
+the rest of this section turns on. jj **auto-tracks** everything no ignore rule
+covers, so an untracked-but-not-ignored path is not a copy candidate at all
+(measured on 0.2.2: `plain.txt` untracked with no ignore rule anywhere answers
+`No untracked files found in main.`, and `jj file list` in `main` lists it). An
+entry becomes a candidate only once an ignore rule covers it, and the rules are
+jj's, not dojjo's: the repo's own `main/.gitignore`, or a global ignore file jj
+honours — on this Mac `~/.config/git/ignore` (git's `core.excludesFile`
+default), which is where a bare `node_modules` comes from, not from dojjo.
+Verified both ways: with `XDG_CONFIG_HOME` pointed at an empty directory, jj
+tracks a `node_modules` and `djo copy-ignored` copies nothing; the same wrapper
+with the usual `XDG_CONFIG_HOME` copies it. dojjo has no candidate rules of its
+own — its only fixed list is the walk's exclusions (`.git`, `.jj`, `.worktrees`,
+`.pi` and their kin, Behaviour change 1's second bullet), which it skips as it
+walks rather than copying. So a repo whose `main/.gitignore` names `.env` — every
+one `jinit` seeds does — is the case the commands below work for.
 `pmm-iris` is where it is biggest and where the limit shows: once its
 `.worktreeinclude` is gone, its copy brings its **top-level** `node_modules`
 along with `.env`, `.env.docs`, `.env.integration`, `.env.prod` and their kin —
@@ -526,7 +591,7 @@ an entry already in place is skipped).
 | a hook that installs | `dev = "bun install"` | `dev = "bun install"` |
 | a redirect to the wrapper's beads | `{{ repo_path }}/.beads` | `{{ primary_workspace_path }}/.beads` |
 | forgetting the workspace | `[post-remove] jj = "jj workspace forget {{ branch }}"` | deleted — `djo remove` does it |
-| which ignored paths come across | `.worktreeinclude`'s globs, and only those | every **top-level** untracked entry — and a nested one only where its top directory does not already exist in the new workspace; `.worktreeinclude` read as literals, so delete it |
+| which ignored paths come across | `.worktreeinclude`'s globs, and only those | every **top-level** entry `jj file list` does not track — which, since jj auto-tracks what no rule ignores, means every top-level path an ignore rule covers (the repo's `.gitignore`, or a global one such as `~/.config/git/ignore`); a nested one only where its top directory does not already exist in the new workspace; `.worktreeinclude` read as literals, so delete it |
 | where a hook's output goes | worktrunk's own logs | `<wrapper>/../.jj/djo/logs/post-start-<hook>.log` |
 
 Variables that stay available inside a hook, checked in a scratch workspace:

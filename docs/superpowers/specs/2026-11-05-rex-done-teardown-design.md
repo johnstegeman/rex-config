@@ -308,10 +308,12 @@ name.
 ### The audit: the fetch, then four facts and a bead
 
 The audit's reference base is resolved the way `bases` already resolves it —
-`refs/remotes/origin/HEAD`'s target, then `main`, then `master` — and rendered as
-one jj revision, `<branch>@origin`. It is not hard-coded, because the wrapper
-root's default branch is a property of the remote, and a project whose default is
-not `main` would otherwise refuse forever.
+`main@origin`, then `master@origin`, then `@`, decided from the bookmarks: the
+`refs/remotes/origin/HEAD` read this used to name is gone (the 2026-11-06
+design) — and rendered as one jj revision, `<branch>@origin`. It is not
+hard-coded, because a project whose default branch is `master` must not be
+compared against a `main` it never had, and a base named in configuration is
+kept verbatim.
 
 **The fetch comes first**, because every comparison below is a comparison
 against `main@origin` and a stale `main@origin` makes the answer wrong in the

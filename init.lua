@@ -70,12 +70,13 @@ M.options = {
   no_bead_prompt = "/brainstorming",
   -- The base a new branch starts from when nobody answered for this tab. Unset
   -- -- nil rather than a value, so it reads as a default -- is auto-detect: the
-  -- picker resolves the remote's own default branch and the cycle that opens on
-  -- it. A string is that cycle's first entry, and false is "no revision at all"
-  -- -- the field opens on nothing, no revision is passed, and the new workspace
-  -- sits on main's working copy. Either way it is the create answer's base and no
-  -- word of its own: the revision travels as one positional parameter, and only a
-  -- create is given one (see new_tab_argv).
+  -- picker opens the cycle on the conventional default branch — main@origin,
+  -- then master@origin, then the working copy — decided from the bookmarks
+  -- alone (no git is asked). A string is that cycle's first entry, and false is
+  -- "no revision at all" -- the field opens on nothing, no revision is passed,
+  -- and the new workspace sits on main's working copy. Either way it is the
+  -- create answer's base and no word of its own: the revision travels as one
+  -- positional parameter, and only a create is given one (see new_tab_argv).
   base = nil,
   bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
@@ -413,8 +414,8 @@ end
 
 -- Rex runs an action with its own PATH -- /usr/bin:/bin:/usr/sbin:/sbin on this
 -- Mac -- which knows nothing of mise or Homebrew installs, while the design puts
--- fish, djo, jq, jj and bd on the login shell's PATH. djo and bd therefore run
--- in that shell, which is also where mise keeps the environment its shims need.
+-- fish, djo, jj and bd on the login shell's PATH. djo and bd therefore run in
+-- that shell, which is also where mise keeps the environment its shims need.
 -- The new tab is a fish program for the same reason: jws exists only as a fish
 -- function, so the flow has to reach it from fish -- which is also what the
 -- picker's own check asks for (`fish -c 'functions -q jws'`). Nothing is
@@ -619,9 +620,11 @@ end
 -- locked database -- and calling that "no database" would be a lie.
 local NO_DATABASE = "no beads database"
 
--- Whether the project has a beads database, asked from the main worktree: in
--- the ginit wrapper layout the root holds only .git, and main/.beads/redirect is
--- what resolves the database.
+-- Whether the project has a beads database, asked from the main worktree. Which
+-- layout that is costs nothing here: bd's own upward detection finds the
+-- database from any workspace in the wrapper, so a `jinit` wrapper -- which has
+-- no `.git` at its root and no `.beads/redirect` in `main` -- answers exactly as
+-- the older ginit one does.
 --
 -- Returns true, or false and the reason bd gave: nil when bd ran and reported no
 -- database itself, and a message when bd could not be started or failed.
@@ -777,9 +780,10 @@ end
 -- argv for new-work.sh's picker, every word of it built here and nowhere else.
 -- base = false means "no revision at all", so there is no ref to pass on --
 -- but the picker still has to be told, because a picker told nothing resolves
--- the remote's default branch itself and the screen would open on a base the
--- configuration opted out of. So false is --no-base: the cycle opens on the
--- "no revision at all" sentinel, and ctrl-r can still move off it.
+-- its own opening base (main@origin, then master@origin, then @) and the screen
+-- would open on one the configuration opted out of. So false is --no-base: the
+-- cycle opens on the "no revision at all" sentinel, and ctrl-r can still move
+-- off it.
 local function picker_command(project)
   local command = {
     M.options.script, "pick",

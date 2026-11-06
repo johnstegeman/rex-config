@@ -290,13 +290,14 @@ loudly rather than half-working; `fish` is the login shell here.
 mirror of the remote-tracking refs, not an answer anyone wants to start from).
 
 - **The opening answer stays "the remote's current state of the default
-  branch"**: `<branch>@origin`, where `<branch>` is resolved exactly as today —
-  `refs/remotes/origin/HEAD`'s symref target first, then `main`, then `master`.
-  That symref is a git fact, so it is read only where a `.git` still sits beside
-  the base (a repository named directly, or `<wrapper>/main`); a wrapper cut to
-  jj alone has no git to ask, answers nothing, and the fixed names are what it
-  opens on (the 2026-11-06 design). The fetch that makes it *current* now happens
-  in `jws`, in the tab, after the answer was given.
+  branch"**: `<branch>@origin`, where `<branch>` is a **conventional** name and
+  not a resolved one — `main`, then `master`, decided from the bookmarks. The
+  `refs/remotes/origin/HEAD` read this used to name is gone entirely (the
+  2026-11-06 design): it was a git fact, and a wrapper cut to jj alone has no
+  git to ask, so asking git only where a `.git` happened to survive would have
+  made the opening revision depend on the layer being deleted. `--origin-head`
+  is the fixture that stands in for a resolved answer. The fetch that makes it
+  *current* happens in `jws`, in the tab, after the answer was given.
 - **The cycle** stays `[default, "@", "main", "master"]` — all three of the
   others are valid jj revisions (`@` is the working copy, `main` and `master`
   local bookmarks) — deduplicated, with entries jj cannot resolve dropped and
@@ -336,11 +337,12 @@ the preflight exists to prevent, so the shape is refused here, where nothing has
 been asked yet, and the line says what is missing: the wrapper, with `.jj/repo`
 beside its `main` worktree.
 
-Without the first, `pick` prints one line saying this repo is not ginit'd yet and
-names a tool that makes one (`ginit` is what the line says; `jinit` and `jclone`
-are what make this layout now); without any of the others it names the missing
-piece the way `need` does. All of them exit before any screen opens, so the first
-thing the person sees is the refusal rather than a claimed bead and a dead pane.
+Without the first, `pick` prints one line saying this repo is not in the wrapper
+shape yet and names the tools that make one (`jinit` for an empty remote,
+`jclone` for an existing one — the line used to name `ginit` alone); without any
+of the others it names the missing piece the way `need` does. All of them exit
+before any screen opens, so the first thing the person sees is the refusal rather
+than a claimed bead and a dead pane.
 The tab's own failure path stays as a second line of defence: `jws` refusing is a
 line on the pane and no agent.
 
@@ -417,14 +419,15 @@ Everything below runs from `bash test/run.sh`, no pty:
   configured one, an old hand-run payload saying `create: true` still arriving as
   `create`, and the dash-prefixed prompt's leading space.
 - `test/branch_test.sh` — the base chain from a saved bookmark listing: the
-  default renders `main@origin` from `origin/HEAD`'s target, falls back through
-  `main` and `master`, drops `@git`, dedupes the cycle, and keeps an
+  default renders `main@origin` from the fixed names (`--origin-head` names it,
+  and git is never asked — a liar on `PATH` proves it), falls back through
+  `master@origin` and `@`, drops `@git`, dedupes the cycle, and keeps an
   unresolvable configured first entry.
 - `test/pick_test.sh` — the payload carries a revision string or `false` and
   never `base_remote`; `worktree` says `switch`, `attach` or `create` for a name
   with a worktree, a bare branch, and a name that is neither; a wrapper directory
-  with no `.jj/repo` is refused with the ginit line and opens no screen, and so
-  is a `.jj/repo` inside the worktree itself with no wrapper beside it; a
+  with no `.jj/repo` is refused with the not-a-wrapper line and opens no screen,
+  and so is a `.jj/repo` inside the worktree itself with no wrapper beside it; a
   missing `jj`, `djo`, or a fish with no `jws`, is refused the same way and
   names the missing piece; a saved-bookmarks run still works off a terminal.
 - **By hand, once, in the float**: a real `jws` create into a real wrapper, the
@@ -453,10 +456,10 @@ rather than adopted.
   one `<name>@<remote>` per line, and the saved fixture that stands in for it —
   including whether `@git` is filtered in the template or in the shell.
 - The default-branch resolution used to read `refs/remotes/origin/HEAD`
-  through git on the strength of the colocated wrapper having the ref. A wrapper
-  with no `.git` has nothing to ask, so the builder gated the read on a `.git`
-  being there and let the fixed names answer otherwise (see the 2026-11-06
-  design).
+  through git on the strength of the colocated wrapper having the ref. The
+  builder gated that read on a `.git` being there and let the fixed names answer
+  otherwise; the 2026-11-06 design then deleted the read outright, so the fixed
+  names are the whole rule and nothing asks git.
 - Where the temp path file lives and when it is removed: `mktemp` under
   `TMPDIR`, read, then deleted, or left for the pane's owner to see.
 - Whether `cmd_bases` and its subcommand keep their names once the rows are

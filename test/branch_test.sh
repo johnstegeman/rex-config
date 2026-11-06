@@ -37,8 +37,8 @@ branch_default() {
     fail "branch-default $type $id" "want $want, got $got"
     return
   fi
-  # The picker hands this straight to `wt switch --create`, so it has to be a
-  # ref git will accept.
+  # The picker hands this to `jws` as the branch it makes the workspace and its
+  # bookmark from, so it has to be a name both jj and git accept.
   if ! git check-ref-format "refs/heads/$got"; then
     fail "branch-default $type $id" "$got is not a valid git ref name"
   fi
@@ -321,19 +321,29 @@ run_bases 'both local branches are offered after @' \
   $'main@origin\n@\nmain\nmaster' \
   --base-bookmarks "$tmp/bookmarks.both" --origin-head origin/main
 
-# origin/HEAD is the branch this clone says it tracks, so it is asked before any
-# fixed name -- and the answer is that branch on origin, in jj's vocabulary: the
-# branch name and the remote it lives on, as one revision. This clone has no main
-# and no master, so the opening answer and @ are the whole cycle.
+# --origin-head is the branch this clone was told it tracks -- the fixture that
+# stands in for the `origin/HEAD` symref read this flow no longer makes -- so it
+# is asked before any fixed name, and the answer is that branch on origin in jj's
+# vocabulary: the branch name and the remote it lives on, as one revision. This
+# clone has no main and no master, so the opening answer and @ are the whole
+# cycle.
 bookmarks_file "$tmp/bookmarks.develop" develop@ develop@origin
-run_bases 'origin/HEAD decides the opening answer' \
+run_bases '--origin-head decides the opening answer' \
   $'develop@origin\n@' \
   --base-bookmarks "$tmp/bookmarks.develop" --origin-head origin/develop
 
-# With no origin/HEAD named -- a clone that has none, or a run standing in for
+# --origin-head is written in git's spelling by anything that had one to read,
+# and in jj's by anything that already speaks the cycle's vocabulary: both name
+# the same branch on origin, so an answer already carrying its remote must not
+# collect a second suffix.
+run_bases 'an --origin-head already in jj spelling is not suffixed twice' \
+  $'main@origin\n@\nmain' \
+  --base-bookmarks test/fixtures/bookmarks.txt --origin-head main@origin
+
+# With no --origin-head named -- a clone that has none, or a run standing in for
 # one -- the fixed names speak, in the order they always have.
 bookmarks_file "$tmp/bookmarks.main" main@ main@origin
-run_bases 'main@origin opens the cycle when there is no origin/HEAD' \
+run_bases 'main@origin opens the cycle when --origin-head says nothing' \
   $'main@origin\n@\nmain' --base-bookmarks "$tmp/bookmarks.main"
 
 bookmarks_file "$tmp/bookmarks.master" master@ master@origin
@@ -521,12 +531,12 @@ PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo-headless" \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail 'no origin/HEAD falls through to the bookmarks' \
+  fail 'a repo that names no origin/HEAD falls through to the bookmarks' \
     "exit $status: $(cat "$tmp/err")"
 elif [ -s "$tmp/err" ]; then
   fail 'no origin/HEAD is not a failure' "stderr: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
-  fail 'no origin/HEAD falls through to the bookmarks' \
+  fail 'a repo that names no origin/HEAD falls through to the bookmarks' \
     'output differs from the expected cycle'
 fi
 
@@ -626,8 +636,8 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
 fi
 
 # And the same guard from the other side: the `.git` that is not in the base
-# directory but in the wrapper above it. <wrapper>/main is how a ginit'd wrapper
-# is laid out, so this is the shape the flow really meets -- and the symref there
+# directory but in the wrapper above it. <wrapper>/main is how a wrapper is laid
+# out, so this is the shape the flow really meets -- and the symref there
 # points at trunk, which is exactly the answer a read that crept back in would
 # give. The fixed names answer instead, and the liar leaves no mark.
 mkdir -p "$tmp/gitwrap"

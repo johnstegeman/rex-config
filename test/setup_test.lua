@@ -592,11 +592,12 @@ eq("a bd that cannot be consulted is not called a missing database", broken_bd_m
   "bd failed in " .. MAIN .. ": mise ERROR bd is not a valid shim.")
 eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
 
--- base = false means "let worktrunk choose", so there is no ref to name -- and
--- the picker is told so, because a picker that is told nothing resolves the
--- remote's default branch and opens the screen on a base the configuration
--- opted out of. The screen then opens on "wt default" and ctrl-r can still move
--- off it: the opt-out sets the answer it starts on, it does not pin the field.
+-- base = false means "no revision at all", so there is no ref to name -- and
+-- the picker is told so, because a picker that is told nothing resolves its own
+-- opening base (main@origin, then master@origin, then @) and the screen would
+-- open on one the configuration opted out of. The screen then opens on the
+-- `base: none` header -- ctrl-r can still move off it: the opt-out sets the
+-- answer it starts on, it does not pin the field.
 stub = project_stub()
 M.setup{ base = false }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
