@@ -96,9 +96,10 @@ output instead of asking the tools, which is how the tests and dry runs work:
 lookups --main would be read for (`jj workspace list`, one "name<TAB>root" row
 per workspace, and `jj bookmark list`, one local name per line), --base-bookmarks
 for the bookmark list bases reads, so a run given all four never touches --main
-at all. --origin-head is the same seam for the one ref git is
-still asked about. PICK_SCREEN=1 in the environment says the run has the float's
-terminal, which is how the screen's own paths are driven without one.
+at all. --origin-head is the same seam for the remote default itself, which is
+no longer asked of anything: give it, or the fixed names answer. PICK_SCREEN=1
+in the environment says the run has the float's terminal, which is how the
+screen's own paths are driven without one.
 
 The one screen asks everything at once: the ready beads with "✎  write a prompt
 instead" pinned on top, and the agent, the branch and the base in its header, a
@@ -116,8 +117,8 @@ not deliver printed above that shell rather than dropped. The branch starts as
 the name derived from the bead and a bare Enter keeps it.
 
 The base field opens on the one --base names, or the one a new workspace would be
-created from (origin/HEAD's branch on origin, then main@origin, then
-master@origin, then @), or none at all with --no-base -- which reads "none",
+created from (main@origin, then master@origin, then @ -- no git is asked), or
+none at all with --no-base -- which reads "none",
 because it is a real answer rather than a missing one. It is one jj revision: the
 remote a base comes from is the @remote in its own name, so there is nothing for
 the tab to fetch by a second word. The rest of the cycle is @, then the local
@@ -489,6 +490,14 @@ bookmark_rows() {
 # the read that follows is not made at all, because half a list is a guess
 # dressed as an answer. That is the whole difference from branch_mode, which has
 # to refuse rather than answer from half the list.
+#
+# Neither half is filtered by the SHAPE of a name on the way out. A workspace or a
+# bookmark really called origin/HEAD is a branch like any other -- no name is
+# reserved, and jj answers for it when it is picked. The `/HEAD` row this used to
+# drop was git's `refs/remotes/*/HEAD` vocabulary, and this flow no longer reads
+# a git listing at all: dropping it here would hide a row that is really there,
+# which is the one thing the picker must not do. What the filter keeps is the
+# empty line between the halves, and the dedupe of a name both halves hold.
 candidate_rows() {
   local main=$1 workspaces=$2 bookmarks=$3
   local rows
@@ -507,7 +516,7 @@ candidate_rows() {
     rows=$rows$'\n'$(bookmark_rows "$main" "$bookmarks" || true)
   fi
 
-  printf '%s\n' "$rows" | awk 'NF && !/\/HEAD$/ && !seen[$0]++'
+  printf '%s\n' "$rows" | awk 'NF && !seen[$0]++'
 }
 
 # What a picked name means, as one word: switch to the workspace that already has
@@ -616,34 +625,27 @@ bookmark_records() {
 # The branch this clone calls origin's HEAD, short -- origin/main -- which is
 # the default branch the cycle opens on. --origin-head is the same answer given
 # outright, which is how a test or a dry run says it without a repository to ask;
-# empty output or a failed lookup means this clone names no such branch, which is
-# a fall-through rather than an error, because the fixed names answer for it.
+# an empty answer means this clone names no such branch, which is a fall-through
+# rather than an error, because the fixed names answer for it.
 #
-# git is asked only where there is a `.git` beside the base to ask it from -- a
-# repository named directly, or the `<wrapper>/main` a ginit'd wrapper has. That
-# symref is a git fact and nothing else holds it: jj writes no remote-HEAD of its
-# own, so a wrapper made with `jj git init --no-colocate`, with no `.git`
-# anywhere, has no question here to answer. It answers nothing rather than
-# failing, and the cycle's fixed names -- main, then master -- are what a
-# git-free wrapper opens on by design, which is the same conventional answer git
-# would have given it in most repositories.
+# And an empty answer is the only one this flow has: jj records no remote-HEAD
+# symref, and the whole cycle reads no git at all -- not even where a `.git`
+# happens to sit beside the base. The state this flow is built for is a wrapper
+# with `jj git init --no-colocate`, where there is no `.git` anywhere, and
+# reading a symref out of git only where one is lying around would make the
+# opening revision depend on a layer the owner is deleting. So the function
+# answers what it was told and nothing else, and the fixed-name fall-through --
+# main, then master, then @ -- is the DESIGN rather than a compromise: whether
+# a clone calls its default branch main or master is a convention, jj keeps no
+# answer of its own, and putting a git layer back to learn one is not a trade
+# this flow is willing to make.
 origin_head_ref() {
-  local main=$1 fixture=$2
-  if [ -n "$fixture" ]; then
-    printf '%s\n' "$fixture"
-    return 0
-  fi
-  # A .git in the base directory, or in the wrapper above it: the two shapes a
-  # repository is met in. Either is a question git can answer, and with neither
-  # there is nothing to ask -- so the answer is empty, which the cycle reads as
-  # "fall through to the fixed names".
-  if [ ! -e "$main/.git" ] && [ ! -e "$main/../.git" ]; then
-    return 0
-  fi
-  # git exits non-zero where the symref is not there, and that status is an
-  # empty answer here: a clone of nothing in particular is not a broken clone.
-  ( cd "$main" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null ) ||
-    true
+  # $1 is the base directory, and it is deliberately NOT read: the signature is
+  # kept because the callers and the fixtures are written to it, and because a
+  # future reader should find the question still named. $2 is --origin-head.
+  local fixture=${2:-}
+  [ -n "$fixture" ] || return 0
+  printf '%s\n' "$fixture"
 }
 
 # The base cycle for --main: one jj revision per line, the answer the screen
@@ -665,9 +667,10 @@ base_chain() {
     die "$label: could not read the bookmarks of ${bookmarks:-$main}"
   fi
 
-  # A saved bookmark list stands in for the repository as a whole, so the symref
-  # lookup is skipped rather than failed against a directory that need not
-  # exist: --origin-head is then the only way to say what this clone tracks.
+  # A saved bookmark list stands in for the repository as a whole, so the
+  # --origin-head lookup is skipped rather than failed against a directory that
+  # need not exist: --origin-head is then the only way to say what this clone
+  # tracks, and with neither it is simply empty and the fixed names speak.
   if [ -n "$origin_head" ]; then
     head=$(origin_head_ref "$main" "$origin_head")
   elif [ -z "$bookmarks" ]; then
@@ -704,9 +707,11 @@ base_chain() {
     END {
       # The answer the screen opens on. --no-base is the answer "no revision at
       # all" and --base names it outright, so neither asks the bookmarks for one;
-      # otherwise origin/HEAD -- the branch this clone says it is a clone of -- is
-      # asked before any fixed name -- and it is asked as that branch on origin,
-      # which is what the remote has rather than what this machine has.
+      # otherwise the branch this clone was told it comes from -- --origin-head,
+      # and empty when nobody said -- is asked before any fixed name, and it is
+      # asked as that branch on origin, which is what the remote has rather than
+      # what this machine has. Nothing here asks git, so with no answer given the
+      # fixed names below are the whole opening rule.
       if (no_base == "1") {
         open = ""
       } else if (base != "") {
@@ -754,8 +759,9 @@ base_chain() {
 #
 # The revisions the branch question cycles through, the one it opens on first,
 # one per line. --base-bookmarks reads a saved `jj bookmark list` rendering
-# instead of asking jj, and --origin-head says what origin/HEAD names instead of
-# asking git; between them a test or a dry run needs no repository at all.
+# instead of asking jj, and --origin-head says what origin/HEAD names outright
+# instead of leaving it to the fixed names; between them a test or a dry run
+# needs no repository at all. Nothing here asks git.
 cmd_bases() {
   local main='' bookmarks='' origin_head='' base='' no_base=''
 

@@ -119,21 +119,25 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
     "output differs from the expected branch list"
 fi
 
-# A row ending in /HEAD is dropped rather than offered: git's short refname
-# rendering and a detached worktree both used to put one in this list, and it is
-# no branch to switch to. The listing here holds nothing but the `default` row,
-# so the bookmarks are the whole answer.
-printf 'origin/HEAD\nfix/headless\n' >"$tmp/head-bookmarks"
-printf 'fix/headless\n' >"$tmp/head.expected"
+# A row ending in /HEAD is KEPT, and it is a branch like any other. git's short
+# refname rendering used to put `origin/HEAD` in this list and a detached
+# worktree put one there too, so the picker dropped the shape -- but that shape
+# was git's refs/remotes/*/HEAD vocabulary and this flow reads no git listing
+# any more. A workspace or a bookmark really called origin/HEAD is a name jj
+# answers for, and hiding a row that is there is the one thing the picker must
+# not do. The listing here holds nothing but the `default` row, so the bookmarks
+# are the whole answer -- in the order they came, once each.
+printf 'origin/HEAD\nfix/headless\norigin/HEAD\n' >"$tmp/head-bookmarks"
+printf 'origin/HEAD\nfix/headless\n' >"$tmp/head.expected"
 ran=$((ran + 1))
 ./new-work.sh candidates \
   --workspaces test/fixtures/workspaces-default-only.txt \
   --bookmarks "$tmp/head-bookmarks" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "a /HEAD row is dropped" "exit $status: $(cat "$tmp/err")"
+  fail "a /HEAD row is kept" "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/head.expected" "$tmp/out"; then
-  fail "a /HEAD row is dropped" "output: $(cat "$tmp/out")"
+  fail "a /HEAD row is kept" "output: $(cat "$tmp/out")"
 fi
 
 # Reading both lists out of a real repository: --main with no fixtures at all.
@@ -460,9 +464,23 @@ bases_refuses '--base with --no-base' \
 
 # Both reads out of a real place: --main with no fixture at all. jj is stood in
 # for -- the suite does not require it, and its rendering is the one thing this
-# script takes on trust -- while origin/HEAD is a real symref in a real
-# repository. That it points at trunk, and not at the main its bookmarks hold,
-# is what proves git was asked rather than guessed from the bookmark list.
+# script takes on trust -- while the `.git` here is a real one, with a real
+# origin/HEAD symref pointing at `trunk`. The cycle does NOT open on trunk: git
+# is not asked, whatever symref a repository happens to carry beside it. The
+# fixed names answer -- main, because the bookmarks hold it -- which is the
+# design and not a fallback a `.git` improves on.
+#
+# git is stood in for by a LIAR, not left off the PATH: the point is that it is
+# never *asked*. A stand-in that answers `trunk` is an answer nobody should take,
+# and the mark it leaves says whether the question was put at all. The same liar
+# stands in for every case below, including the ones with no `.git` to ask.
+mkdir -p "$tmp/git-bin"
+cat >"$tmp/git-bin/git" <<'EOF'
+#!/bin/sh
+touch "$GIT_MARKER"
+printf 'trunk\n'
+EOF
+chmod +x "$tmp/git-bin/git"
 mkdir -p "$tmp/jj-bin"
 cat >"$tmp/jj-bin/jj" <<'EOF'
 #!/bin/sh
@@ -475,21 +493,26 @@ git init -q "$tmp/base-repo" && git -C "$tmp/base-repo" \
   git -C "$tmp/base-repo" update-ref refs/remotes/origin/trunk HEAD &&
   git -C "$tmp/base-repo" symbolic-ref refs/remotes/origin/HEAD \
     refs/remotes/origin/trunk
-printf 'trunk@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
-PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
-  >"$tmp/out" 2>"$tmp/err"
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/base-repo" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
   fail 'bases from a repository' "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'bases from a repository' 'output differs from the expected cycle'
 fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'bases never asks git, even beside a real .git' \
+    'git was run for a cycle that is decided by the fixed names'
+fi
 
 # The same read in a repository that names no origin/HEAD at all -- a clone whose
-# remote was renamed, or one that never had a symref. git exits non-zero, and
-# that is an empty answer rather than a failure: the cycle falls through to the
-# bookmarks, the run still succeeds, and nothing is said about a lookup that is
-# allowed to miss.
+# remote was renamed, or one that never had a symref. It is not a question this
+# flow puts any more, so the answer is the same one the case above gives: the
+# fixed names, main first, with nothing said about a lookup nobody made.
 ran=$((ran + 1))
 git init -q "$tmp/base-repo-headless" && git -C "$tmp/base-repo-headless" \
   -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
@@ -508,12 +531,14 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
 fi
 
 # --base-bookmarks stands in for the repository as a whole, so a run that has
-# both reads the fixture for the bookmarks and never asks git for origin/HEAD:
-# this repository's symref points at trunk, and the fixture's main@origin is what
-# opens the cycle.
+# both reads the fixture for the bookmarks and asks nothing else: the fixture's
+# main@origin is what opens the cycle, and git is not asked even though this
+# repository carries a symref of its own.
 ran=$((ran + 1))
 printf 'main@origin\n@\nmain\n' >"$tmp/base.expected"
-PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/base-repo" \
   --base-bookmarks test/fixtures/bookmarks.txt >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -522,24 +547,17 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'a bookmark fixture beside a real --main' \
     'the fixture does not win the opening row'
 fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'a bookmark fixture beside a real --main asks no git' 'git was run'
+fi
 
 # A wrapper with no `.git` anywhere -- what `jj git init --no-colocate` makes, and
 # the state this cut is for -- still opens the base cycle on the branch the
 # project treats as its default. jj records no remote-HEAD symref of its own, so
-# with nothing for git to read the cycle answers from the fixed pair: main, then
-# master, then @.
-#
-# git is stood in for by a liar, not left off PATH: the point is that it is never
-# *asked*. A stand-in that answers `trunk` is an answer nobody should take (the
-# wrapper has no .git to have read it from), and the mark it leaves says whether
-# the question was put at all.
-mkdir -p "$tmp/git-bin"
-cat >"$tmp/git-bin/git" <<'EOF'
-#!/bin/sh
-touch "$GIT_MARKER"
-printf 'trunk\n'
-EOF
-chmod +x "$tmp/git-bin/git"
+# the cycle answers from the fixed pair: main, then master, then @ -- and the
+# liar git from above is still on the PATH, so a read that crept back in would
+# leave its mark.
 mkdir -p "$tmp/nogit/main" "$tmp/nogit/.jj/repo"
 
 # Both fixed names present: the first of them opens the cycle.
@@ -607,10 +625,11 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
     'output differs from the expected cycle'
 fi
 
-# And the guard from the other side: the `.git` that is not in the base
+# And the same guard from the other side: the `.git` that is not in the base
 # directory but in the wrapper above it. <wrapper>/main is how a ginit'd wrapper
-# is laid out, so this is the shape the flow really meets, and the symref is a
-# question git can answer there.
+# is laid out, so this is the shape the flow really meets -- and the symref there
+# points at trunk, which is exactly the answer a read that crept back in would
+# give. The fixed names answer instead, and the liar leaves no mark.
 mkdir -p "$tmp/gitwrap"
 git init -q "$tmp/gitwrap" && git -C "$tmp/gitwrap" \
   -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init &&
@@ -619,16 +638,21 @@ git init -q "$tmp/gitwrap" && git -C "$tmp/gitwrap" \
     refs/remotes/origin/trunk
 mkdir -p "$tmp/gitwrap/main"
 ran=$((ran + 1))
-printf 'trunk@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
-PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/gitwrap/main" \
-  >"$tmp/out" 2>"$tmp/err"
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/gitwrap/main" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail 'a .git beside main is a question for git' \
+  fail 'a .git beside main is not a question for git' \
     "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
-  fail 'a .git beside main is a question for git' \
+  fail 'a .git beside main is not a question for git' \
     'output differs from the expected cycle'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'a .git beside main never asks git' 'git was run'
 fi
 
 # The branch-name rule, applied where a person's typed name actually meets it:

@@ -309,17 +309,78 @@ if [ -d "$tmp/w/feat-q" ]; then
   fail "no djo refuses before anything is created" "$tmp/w/feat-q exists"
 fi
 
-# A path file that cannot be written: the workspace is already made, so this is
-# the one failure where the person has a workspace and no way to be told where
-# it is -- it has to be loud and non-zero rather than a shell warning.
+# A path file that cannot be written is refused UP FRONT, before anything exists.
+# The write itself happens at the end, after the workspace is made, so a shim
+# that only discovered the unwritable file there would leave a workspace with no
+# tab able to find it -- an orphan nobody asked for. Proven here for all three
+# modes: nothing created, no dojjo run, and no path file left behind by the
+# probe that decided it.
+rm -f "$tmp/djo.log"
 run_jws "$tmp/w" --path-file "$tmp/no-such-dir/path.txt" feat/w2
 ran=$((ran + 1))
 if [ "$status" -ne 1 ]; then
   fail "an unwritable path file is refused" "exit $status: $(cat "$tmp/err")"
 fi
 ran=$((ran + 1))
-if ! grep -Fq 'could not write the path' "$tmp/err"; then
+if ! grep -Fq 'cannot write the path file' "$tmp/err"; then
   fail "the refusal names the path file" "$(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fq "$tmp/no-such-dir/path.txt" "$tmp/err"; then
+  fail "the refusal names the path file it wanted" "$(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/w/feat-w2" ]; then
+  fail "an unwritable path file creates no workspace" "$tmp/w/feat-w2 exists"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/djo.log" ]; then
+  fail "an unwritable path file runs no dojjo" "$(cat "$tmp/djo.log")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/no-such-dir/path.txt" ]; then
+  fail "an unwritable path file leaves no file behind" \
+    "$tmp/no-such-dir/path.txt exists"
+fi
+ran=$((ran + 1))
+if [ "$(grep -c . "$tmp/err")" -ne 1 ]; then
+  fail "an unwritable path file is refused in one line" "$(cat "$tmp/err")"
+fi
+
+# ... and the same refusal in the two modes that start from something that
+# already exists. An attach would make a workspace on a bookmark and run its
+# hooks; the path file is refused before the add, so no workspace appears and
+# dojjo is never called.
+( cd "$tmp/w/main" && jj bookmark create nofile-attach -r @ >/dev/null 2>&1 )
+run_jws "$tmp/w" --attach --path-file "$tmp/no-such-dir/attach.txt" nofile-attach
+ran=$((ran + 1))
+if [ "$status" -ne 1 ]; then
+  fail "--attach with an unwritable path file is refused" \
+    "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/w/nofile-attach" ]; then
+  fail "--attach with an unwritable path file creates no workspace" \
+    "$tmp/w/nofile-attach exists"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/djo.log" ]; then
+  fail "--attach with an unwritable path file runs no dojjo" "$(cat "$tmp/djo.log")"
+fi
+
+# --existing writes the same file at the end, so it gets the same up-front
+# check -- and its refusal is the path file's rather than jj's, which is the
+# difference between "I cannot tell you where it is" and "there is no such
+# workspace".
+run_jws "$tmp/w" --existing --path-file "$tmp/no-such-dir/existing.txt" feat/x
+ran=$((ran + 1))
+if [ "$status" -ne 1 ]; then
+  fail "--existing with an unwritable path file is refused" \
+    "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fq 'cannot write the path file' "$tmp/err"; then
+  fail "--existing's refusal is the path file's" "$(cat "$tmp/err")"
 fi
 
 # --attach and --existing start from something that already exists, so a base
@@ -593,7 +654,10 @@ fi
 # to see the plain `jj git fetch`: with no `timeout` and no `gtimeout` on that
 # PATH, a fetch in the log is a fetch the unbounded form made.
 mkdir -p "$tmp/notimeout-bin"
-for tool in dirname tee sed; do
+# `touch` and `rm` are here because jws proves --path-file writable with them
+# before it makes anything; this case is about the ABSENT timeout/gtimeout, not
+# about a machine with no coreutils.
+for tool in dirname tee sed touch rm; do
   ln -sf "$(command -v "$tool")" "$tmp/notimeout-bin/$tool"
 done
 ln -sf "$(command -v fish)" "$tmp/notimeout-bin/fish"

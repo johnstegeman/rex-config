@@ -155,7 +155,7 @@ design stands on.
 | `jclone` | `~/.config/fish/functions/jclone.fish` (new) | the same end state from an existing remote: `jj git clone --no-colocate`, `main` workspace, beads from `refs/dolt/data` |
 | picker | `new-work.sh` (`wt_branch_rows`, `local_branch_rows`, `branch_mode`, fixtures) | workspaces from `jj workspace list`, branches from `jj bookmark list` |
 | name rule | `new-work.sh` (`valid_branch_name`) | no `git check-ref-format` |
-| base default | `new-work.sh` (`origin_head_ref`) | no git symref; jj bookmarks first, fixed-name fallback |
+| base default | `new-work.sh` (`origin_head_ref`) | no git at all: the `--origin-head` fixture or nothing, then bookmark `main`, then `master`, then `@` |
 | tab wrapper | `init.lua` (`M.new_tab_script`) | `switch` → `jws --existing`; `create`/`attach` → `jws`; `jq` and `wt` gone |
 | project | `init.lua` (`M.project_for`, `M.main_worktree`) | no `git rev-parse`; the wrapper walk; worktrunk's `main` flag fallback deleted |
 | done | `new-work.sh` (`done_wt_*`, `cmd_done`), `init.lua` (`M.work_done_go`) | `djo remove -y`; verification stays on `jj workspace list`; kept-bookmark from `jj bookmark list` |
@@ -253,7 +253,8 @@ remote is plain and empty.
    wrapper.
 5. The seed commit, in `main`, **before any workspace is created from it**:
    `README.md`, `.gitignore` (`.env`, `.worktrees/`, `.beads/`), `.worktreeinclude`
-   (`.env*`, as `ginit` writes it), and `.config/wt.toml` in the **[hooks]** form —
+   (created **empty**, so dojjo's literal include filter yields no lines), and
+   `.config/wt.toml` in the **[hooks]** form —
    a `[hooks.post-start]` table, never a top-level `[post-start]`. Naming as today:
    `[hooks.post-start] copy = "djo copy-ignored --from main"`, plus a
    `beads-redirect` hook only where a repo wants a worktree-local
@@ -321,16 +322,20 @@ list cannot tell a switch from an attach.
 
 ### The remote default branch without git
 
-`origin_head_ref` is what the base cycle opens on: today `git symbolic-ref --short
-refs/remotes/origin/HEAD`, which a wrapper with no `.git` cannot answer. jj has no
-remote-HEAD symref to read, so the resolution becomes a chain, and an empty answer
-is a fall-through rather than an error (the fixed names answer for it, exactly as
-they do today): the git symref **only when the wrapper still has a `.git`** to
-ask, then bookmark `main`, then bookmark `master`, then empty. A no-git wrapper
-therefore answers `<default>@origin` from the fixed names, which is the whole
-requirement — the base still opens on the remote's current state of the project's
-default branch. Whether that answer is worth *recording* at clone time so it is
-exact rather than conventional is in "What's left to the builder".
+`origin_head_ref` is what the base cycle opens on, and it asks git nothing at
+all. `git symbolic-ref --short refs/remotes/origin/HEAD` was the flow's last git
+read, in a wrapper whose whole point is that there is no `.git` to answer it —
+and jj records no remote-HEAD symref to put in its place. So the read is gone
+rather than conditional, and the function answers only what it was told: the
+`--origin-head` fixture a test or a dry run hands it, and empty otherwise. An
+empty answer is a fall-through rather than an error, and `base_chain`'s existing
+chain answers for it: bookmark `main@origin`, then `master@origin`, then `@`.
+That is the design, not a compromise — whether a clone calls its default branch
+`main` or `master` is a convention, jj keeps no answer of its own, and reading a
+symref wherever a `.git` happens to survive would make the opening revision
+depend on a layer the owner is deleting. Whether the answer is worth *recording*
+at clone time so it is exact rather than conventional is in "What's left to the
+builder".
 
 ### Name validation without git
 
@@ -511,8 +516,9 @@ Everything below runs from `bash test/run.sh`, no pty:
   still `switch`/`attach`/`create`); `project_for`'s wrapper walk and its
   refusal for a plain colocated repo; `main_workspace` as the only main answer.
 - `test/branch_test.sh` — the base chain from a saved bookmark listing (already
-  jj-shaped), plus the git-free `branch-default` resolution: the git symref where
-  a `.git` exists, then `main`, then `master`, then empty.
+  jj-shaped), plus the git-free resolution: **git is never asked**, proven with a
+  liar on `PATH` that would answer `trunk` and leave a mark if it were run, and
+  the cycle answers `main@origin`, then `master@origin`, then `@`.
 - `test/pick_test.sh` — `branch_mode` from the new fixtures: a name in the
   workspace list is a `switch`, a name only in the bookmark list is an `attach`,
   neither is a `create`; a `--workspaces` fixture that cannot be opened fails
@@ -567,7 +573,9 @@ Per repo:
    is the one repo with a redirect and no copy hook. **The copy hook no longer
    filters**: `--require-include` and `.worktreeinclude` are worktrunk's, and
    dojjo copies every ignored path — `node_modules` as well as `.env` — which the
-   owner accepted; the runbook says so in as many words.
+   owner accepted; the runbook says so in as many words. Where one command must
+   follow another, use a `[hooks]` pipeline (`post-start = [{ copy = … }, { dev =
+   … }]`) — one entry per step, and the steps run in order.
 2. **Delete the `[post-remove]` forget hook** with the rest of the old table.
    `djo remove` forgets the workspace and deletes the directory; leaving a
    top-level `[post-remove]` behind would be silently ignored, and carrying it

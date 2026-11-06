@@ -285,18 +285,19 @@ Three things about that deletion:
   copy-ignored loads and applies the file as a literal include list. If you find
   yourself reconciling the two, this document is the one that was run.
 
-`jinit` seeds that same `.env*` line into a fresh wrapper, so a wrapper made by
-`jinit` today copies nothing on its post-start hook either. That is a known
-defect in the seed, not intended behaviour; the workaround is the one above —
-delete the file, or use literal names — until the seed is fixed.
+A wrapper made by `jinit` now seeds this file **empty** (zero bytes), so a fresh
+repo copies everything: no lines means no filter, which is the accepted behaviour.
+The repos below were made before that change and carry `.env*` in
+`<wrapper>/main/.worktreeinclude`, so they still need the step above — delete the
+file, or replace its lines with literal paths.
 
 #### The git layer — the owner's step
 
 Stripping git from a wrapper is the owner's own work, `pi-rex` first: no bare
 `.git` at the wrapper, no `git worktree list` registrations, and nothing in the
 flow asks for it afterwards — `jws`, the picker and the done flow are jj's and
-dojjo's, and the flow's only remaining git question is `origin/HEAD`, which it
-falls through when there is no `.git` to ask. Converting the hook file first and
+dojjo's, and the flow asks git nothing at all, not even about `origin/HEAD`: the
+base cycle opens on the fixed names. Converting the hook file first and
 stripping git later is fine and is the order here, because the hook file is the
 part that silently breaks.
 

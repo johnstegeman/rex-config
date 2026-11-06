@@ -207,6 +207,23 @@ seed_gitignore=$(git -C "$remote" show main:.gitignore 2>/dev/null)
 if [ "$seed_gitignore" != $'.env\n.worktrees/\n.beads/' ]; then
   fail "the seed .gitignore is ginit's three entries" "[$seed_gitignore]"
 fi
+# .worktreeinclude is seeded EMPTY, and zero bytes is the whole assertion: dojjo
+# reads the file as a LITERAL include list, so any line in it (ginit's `.env*`
+# among them, which matches nothing without globbing) turns the copy hook off.
+# An empty file is what lets `djo copy-ignored` bring every ignored path across --
+# checked twice, because the size alone would pass for a file holding a single
+# newline: the file must be in the tree AND hold nothing at all.
+ran=$((ran + 1))
+seed_include_size=$(git -C "$remote" ls-tree -l main -- .worktreeinclude 2>/dev/null | awk '{ print $4 }')
+if [ "$seed_include_size" != 0 ]; then
+  fail "the seed .worktreeinclude is empty" \
+    "size: [$seed_include_size], remote main holds: [$seed_files]"
+fi
+ran=$((ran + 1))
+seed_include=$(git -C "$remote" show main:.worktreeinclude 2>/dev/null)
+if [ -n "$seed_include" ]; then
+  fail "the seed .worktreeinclude holds no line" "[$seed_include]"
+fi
 
 # 4. The hook config in the table form dojjo actually reads. worktrunk's
 #    top-level `[post-start]` is the shape dojjo half-reads, so a file carrying
