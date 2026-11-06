@@ -15,8 +15,9 @@
 #
 # Everything here is real except dojjo: a real wrapper is built under $tmp and a
 # real `jj workspace add` makes the workspace, because the whole point of this
-# shim is that dojjo creates nothing. The stand-in `djo` records what it was
-# asked and where, and touches the proof file its hook config names.
+# shim is that dojjo creates nothing. The stand-in `djo` runs the post-start
+# commands out of the hook config it finds in its own directory, one small copy
+# of what dojjo does.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -49,27 +50,30 @@ done
 
 export JWS_FILE=${JWS_FILE:-$HOME/.config/fish/functions/jws.fish}
 if [ ! -f "$JWS_FILE" ]; then
+  ran=$((ran + 1))
   fail "jws.fish is missing" "$JWS_FILE"
   printf '  the function is a developer file in ~/.config/fish/functions, not a repo file\n'
   exit 1
 fi
 
-# Only dojjo is stood in for. Its post-start run leaves `.hook-proof` in the
-# directory it ran in -- the file the wrapper's hook config asks for -- so "the
-# hooks ran, and they ran in the NEW workspace" is proven by a file in a
-# directory no stand-in created.
+# Only dojjo is stood in for. Two things are recorded per invocation: the
+# arguments as one bare line, so `grep -Fxq 'hook post-start'` is an exact
+# answer about what was asked, and a `cwd=` line for where it was asked from.
 #
-# Two lines per invocation: the arguments as one bare line, so
-# `grep -Fxq 'hook post-start'` is an exact answer about what was asked, and a
-# `cwd=` line for where it was asked from.
+# A post-start run then does dojjo's job in miniature: it reads the `proof`
+# command out of the `.config/wt.toml` in ITS OWN directory and runs it. So the
+# `.hook-proof` file only appears when the new workspace actually inherited
+# main's hook config, and it appears where the hooks ran -- a directory no
+# stand-in created, because jj made it.
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/djo" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$DJOLOG"
 printf 'cwd=%s\n' "$PWD" >>"$DJOLOG"
-if [ "$*" = "hook post-start" ]; then
-  : >.hook-proof
-fi
+[ "$*" = "hook post-start" ] || exit 0
+[ -f .config/wt.toml ] || exit 0
+sed -n 's/^proof = "\(.*\)"$/\1/p' .config/wt.toml |
+  while IFS= read -r command; do eval "$command"; done
 EOF
 chmod +x "$tmp/bin/djo"
 
@@ -97,7 +101,9 @@ make_wrapper() {
 # run_jws WORKDIR ARGS... ; stdout in $tmp/out, stderr in $tmp/err, and the
 # function's OWN exit status in $status -- which is the whole contract the tab
 # reads. JWS_PATH is the PATH the function runs with, so one case can run it on
-# a PATH that has no djo at all.
+# a PATH that has no djo at all. Nothing here counts an assertion: every check
+# below does that itself, so `ok N assertions` is the number of checks and a
+# failure report cannot out-count it.
 #
 # `fish --no-config` because the developer's own config.fish activates mise and
 # puts the REAL dojjo on the PATH whatever this test sets it to -- which would
@@ -106,7 +112,6 @@ make_wrapper() {
 run_jws() {
   local dir=$1
   shift
-  ran=$((ran + 1))
   rm -f "$tmp/djo.log"
   ( cd "$dir" && PATH="${JWS_PATH:-$tmp/bin:$PATH}" DJOLOG="$tmp/djo.log" \
     fish --no-config -c 'set -g fish_function_path (dirname "$JWS_FILE"); source "$JWS_FILE"; jws $argv' \
@@ -124,46 +129,82 @@ make_wrapper "$tmp/w"
 mkdir -p "$tmp/w/main/.config"
 printf '[hooks.post-start]\nproof = "touch .hook-proof"\n' >"$tmp/w/main/.config/wt.toml"
 # The seed commit carries the hook config, so the workspace made from main holds
-# it too -- which is what makes the stand-in's `.hook-proof` meaningful.
+# it too -- which is what makes the stand-in's `.hook-proof` meaningful: it is
+# written by a command that only exists in a workspace that inherited the file.
 ( cd "$tmp/w/main" && jj describe -m seed >/dev/null 2>&1 && jj new >/dev/null 2>&1 )
 
 run_jws "$tmp/w" --path-file path.txt feat/x
+ran=$((ran + 1))
 if [ "$status" -ne 0 ]; then
   fail "a create exits 0" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if [ "$(cat "$tmp/w/path.txt" 2>/dev/null || true)" != "$tmp/w/feat-x" ]; then
   fail "--path-file holds the workspace path, resolved against the caller" \
     "wanted $tmp/w/feat-x, got: $(cat "$tmp/w/path.txt" 2>/dev/null || echo '<no file>')"
 fi
 # awk rather than `wc -l <file`: a redirect onto a file that is not there is
 # an error bash prints itself, which no `2>/dev/null` on the command can quiet.
+ran=$((ran + 1))
 if [ "$(awk 'END { print NR }' "$tmp/w/path.txt" 2>/dev/null || true)" != 1 ]; then
   fail "--path-file is one line" "lines: $(awk 'END { print NR }' "$tmp/w/path.txt" 2>/dev/null)"
 fi
+ran=$((ran + 1))
 if [ ! -d "$tmp/w/feat-x" ]; then
   fail "the workspace directory exists" "no $tmp/w/feat-x"
 fi
+ran=$((ran + 1))
+if [ ! -f "$tmp/w/feat-x/.config/wt.toml" ]; then
+  fail "the new workspace inherited main's hook config" "no $tmp/w/feat-x/.config/wt.toml"
+fi
 # feat/x -> feat-x, and the workspace is NAMED for the branch, not the directory
 # (the picker and the done flow both look workspaces up by branch name).
+ran=$((ran + 1))
 if ! ( cd "$tmp/w" && jj --ignore-working-copy bookmark list -T 'name ++ "\n"' ) |
   grep -Fxq 'feat/x'; then
   fail "the create makes a bookmark named for the branch" \
     "$(cd "$tmp/w" && jj --ignore-working-copy bookmark list -T 'name ++ "\n"')"
 fi
+ran=$((ran + 1))
 if [ ! -f "$tmp/w/feat-x/.hook-proof" ]; then
   fail "the post-start hooks ran, in the new workspace" "no $tmp/w/feat-x/.hook-proof"
 fi
+ran=$((ran + 1))
 if ! djo_asked 'hook post-start'; then
   fail "dojjo is asked to run the hooks" "$(cat "$tmp/djo.log" 2>/dev/null)"
 fi
+ran=$((ran + 1))
 if ! djo_ran_in "$tmp/w/feat-x"; then
   fail "the hooks run inside the new workspace" "$(cat "$tmp/djo.log" 2>/dev/null)"
 fi
 # dojjo is named in exactly two places in this flow, and a create is one of
 # them: a second invocation here would be a `djo switch`, which dies on its
 # state file in this layout after making the workspace (constraint 15).
+ran=$((ran + 1))
 if [ "$(grep -vc '^cwd=' "$tmp/djo.log" 2>/dev/null || true)" != 1 ]; then
   fail "a create runs dojjo exactly once, for the hooks" "$(cat "$tmp/djo.log" 2>/dev/null)"
+fi
+
+# A create that was given a base revision starts the workspace there, and `-r`
+# is the only thing that makes that true: without it the new working copy is a
+# sibling of main's, so a shim that quietly dropped `-r` would still look right
+# in every other assertion here. root() is the one revision that cannot be
+# arrived at by accident.
+root_commit=$( cd "$tmp/w" && jj --ignore-working-copy log --no-graph -r 'root()' -T 'commit_id' )
+run_jws "$tmp/w" --path-file base.txt feat/r 'root()'
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "a create with a base revision exits 0" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ "$(cat "$tmp/w/base.txt" 2>/dev/null || true)" != "$tmp/w/feat-r" ]; then
+  fail "a create with a base revision reports its path" \
+    "wanted $tmp/w/feat-r, got: $(cat "$tmp/w/base.txt" 2>/dev/null || echo '<no file>')"
+fi
+ran=$((ran + 1))
+if [ "$(cd "$tmp/w" && jj --ignore-working-copy log --no-graph -r 'feat/r-' -T 'commit_id')" != "$root_commit" ]; then
+  fail "the base revision is where the workspace starts" \
+    "feat/r's parent: $(cd "$tmp/w" && jj --ignore-working-copy log --no-graph -r 'feat/r-' -T 'commit_id'), wanted root: $root_commit"
 fi
 
 # A destination that is already there is refused, and named: two branches can
@@ -172,26 +213,45 @@ fi
 # else's workspace.
 mkdir -p "$tmp/w/feat-y"
 run_jws "$tmp/w" --path-file "$tmp/refused-path.txt" feat/y
+ran=$((ran + 1))
 if [ "$status" -ne 1 ]; then
   fail "an existing destination is refused" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if ! grep -Fq "$tmp/w/feat-y" "$tmp/err"; then
   fail "the refusal names the destination" "$(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if [ -e "$tmp/refused-path.txt" ]; then
   fail "a refusal writes no path file" "$(cat "$tmp/refused-path.txt")"
 fi
+ran=$((ran + 1))
 if [ -e "$tmp/djo.log" ]; then
   fail "a refusal runs no dojjo" "$(cat "$tmp/djo.log")"
+fi
+
+# --attach and --existing are the two halves of `[--attach | --existing]`, so
+# asking for both is a caller's mistake rather than a mode: refused before the
+# wrapper is even looked for, and certainly before a workspace is made.
+run_jws "$tmp/w" --attach --existing feat/b
+ran=$((ran + 1))
+if [ "$status" -ne 1 ]; then
+  fail "--attach with --existing is refused" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -d "$tmp/w/feat-b" ]; then
+  fail "--attach with --existing creates nothing" "$tmp/w/feat-b exists"
 fi
 
 # A caller outside any wrapper: the walk finds no .jj/repo and says so, rather
 # than making a workspace somewhere up the tree.
 mkdir -p "$tmp/outside"
 run_jws "$tmp/outside" feat/z
+ran=$((ran + 1))
 if [ "$status" -ne 1 ]; then
   fail "a caller with no wrapper is refused" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if ! grep -Fq 'no jj repo' "$tmp/err"; then
   fail "the refusal names the missing jj repo" "$(cat "$tmp/err")"
 fi
@@ -201,9 +261,11 @@ fi
 make_wrapper "$tmp/nomain"
 rm -rf "$tmp/nomain/main"
 run_jws "$tmp/nomain" feat/z
+ran=$((ran + 1))
 if [ "$status" -ne 1 ]; then
   fail "a wrapper without main is refused" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if ! grep -Fq "$tmp/nomain/main" "$tmp/err"; then
   fail "the refusal names the base workspace it wanted" "$(cat "$tmp/err")"
 fi
@@ -214,12 +276,15 @@ fi
 mkdir -p "$tmp/min-bin"
 ln -sf "$(command -v fish)" "$tmp/min-bin/fish"
 JWS_PATH="$tmp/min-bin:/usr/bin:/bin" run_jws "$tmp/w/main" feat/q
+ran=$((ran + 1))
 if [ "$status" -ne 1 ]; then
   fail "no djo is refused" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if ! grep -Fq 'djo' "$tmp/err"; then
   fail "the refusal names djo" "$(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if [ -d "$tmp/w/feat-q" ]; then
   fail "no djo refuses before anything is created" "$tmp/w/feat-q exists"
 fi
@@ -228,9 +293,11 @@ fi
 # the one failure where the person has a workspace and no way to be told where
 # it is -- it has to be loud and non-zero rather than a shell warning.
 run_jws "$tmp/w" --path-file "$tmp/no-such-dir/path.txt" feat/w2
+ran=$((ran + 1))
 if [ "$status" -ne 1 ]; then
   fail "an unwritable path file is refused" "exit $status: $(cat "$tmp/err")"
 fi
+ran=$((ran + 1))
 if ! grep -Fq 'could not write the path' "$tmp/err"; then
   fail "the refusal names the path file" "$(cat "$tmp/err")"
 fi
@@ -240,9 +307,11 @@ fi
 # is made, not after.
 for mode in --attach --existing; do
   run_jws "$tmp/w" "$mode" feat/a main
+  ran=$((ran + 1))
   if [ "$status" -ne 1 ]; then
     fail "$mode with a base revision is refused" "exit $status: $(cat "$tmp/err")"
   fi
+  ran=$((ran + 1))
   if [ -d "$tmp/w/feat-a" ]; then
     fail "$mode with a base revision creates nothing" "$tmp/w/feat-a exists"
   fi
