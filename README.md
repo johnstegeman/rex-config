@@ -435,13 +435,23 @@ protected set, and so is a workspace and a worktree that disagree — a jj row
 with no worktree at its root, or a worktree no row claims — because removing
 one half of that is the state nobody unpicks from a float.
 
+Then, before it fetches, one question decides whether the teardown can finish
+at all: whether worktrunk will actually run the project's `post-remove` hook —
+`wt hook show post-remove --format=json`, read in the main worktree, which is
+the only place worktrunk reads project hooks from. worktrunk gates a project
+hook on approval and `wt remove -y` skips that prompt rather than granting it,
+so an unapproved hook does not run: the worktree would go, the jj row would
+stay, and the tab would be left open in a directory that is gone. A hook that
+is missing, unapproved, or not readable is a refusal before anything is fetched,
+moved or removed.
+
 The audit removes nothing, and beyond the fetch its only writes are the two
-`main` moves below. It fetches once first — `jj git fetch`, capped at 30
-seconds when `timeout` or `gtimeout` is installed, with `GIT_TERMINAL_PROMPT=0`
-so a credential prompt cannot hang a terminal nobody can type into — because
-every comparison below is a comparison against what the remote has, and a stale
-base reports merged work as unmerged. A fetch that fails is itself a refusal,
-naming that nothing could be compared. Then:
+`main` moves below. It fetches once the hook is settled — `jj git fetch`,
+capped at 30 seconds when `timeout` or `gtimeout` is installed, with
+`GIT_TERMINAL_PROMPT=0` so a credential prompt cannot hang a terminal nobody
+can type into — because every comparison below is a comparison against what the
+remote has, and a stale base reports merged work as unmerged. A fetch that
+fails is itself a refusal, naming that nothing could be compared. Then:
 
 - **whether the branch is merged.** The base is the picker's own opening base —
   the chain in [The base](#the-base), rendered as one jj revision:
