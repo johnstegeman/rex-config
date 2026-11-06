@@ -2224,14 +2224,15 @@ done_wt_owner() {
 # listed root that owns cwd is the answer, compared as whole path segments so
 # that /p/demo/feat-6c41 is not read as /p/demo/feat-6c4.
 done_workspace() {
-  case $cwd in
-    "$main" | "$main"/* | "$root")
-      done_refuse "can't tear down the main worktree" \
-        "  $cwd is the main worktree, not a workspace this flow removes"
-      ;;
-  esac
+  local listed jj_main='' row_name row_path
+  local best_name='' best_root='' wt_path='' wt_owner=''
 
-  local listed best_name='' best_root='' row_name row_path wt_path='' wt_owner=''
+  # jj's own answer to "which worktree is main" is read before anything is
+  # refused, because the protection below is built from it: worktrunk's `main`
+  # flag is not trusted. In a bare-rooted wrapper, where gws adds every
+  # workspace detached, worktrunk has been seen to flag a leftover and not the
+  # real main worktree -- and its flag is what arrives here as --main. jj names
+  # the row, so jj is asked, and its answer is the one that protects.
   if [ -n "$workspaces" ]; then
     listed=$(cat "$workspaces") ||
       die "done: could not read the workspace list from $workspaces"
@@ -2239,6 +2240,40 @@ done_workspace() {
     listed=$( cd "$cwd" && jj workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
       die "done: could not read the jj workspaces of $cwd"
   fi
+
+  while IFS=$'\t' read -r row_name row_path; do
+    [ "$row_name" = main ] || continue
+    [ -n "$row_path" ] || continue
+    jj_main=$row_path
+    break
+  done <<<"$listed"
+  # Put in the one form --main is put in by cmd_done: a row with a trailing
+  # slash names the same worktree, and is not a disagreement.
+  while [ "$jj_main" != / ] && [ "${jj_main%/}" != "$jj_main" ]; do
+    jj_main=${jj_main%/}
+  done
+
+  # Two answers that disagree about which worktree is main are refused rather
+  # than resolved, before the fetch and before anything is moved or removed:
+  # a run cannot tell which of the two it would be acting in, so no version of
+  # going ahead is safe. A repo with no `main` row -- a main workspace under
+  # another name -- has one answer only, and --main is it.
+  if [ -n "$jj_main" ] && [ "$jj_main" != "$main" ]; then
+    done_refuse "can't tear down $cwd" \
+      "  jj says the main workspace is $jj_main, --main says $main: the two answers disagree about which worktree is main, so nothing was done"
+  fi
+
+  # Then the protected set: --main, the wrapper root, and jj's own main row,
+  # so neither answer can be the one that lets a teardown through. jj_main is
+  # empty only where jj has no main row, and there --main is the whole answer.
+  # The wrapper is one directory and matches only as itself -- it is the
+  # default workspace, which owns every directory no other workspace does.
+  case $cwd in
+    "$main" | "$main"/* | "$root" | "${jj_main:-$main}" | "${jj_main:-$main}"/*)
+      done_refuse "can't tear down the main worktree" \
+        "  $cwd is the main worktree, not a workspace this flow removes"
+      ;;
+  esac
 
   while IFS=$'\t' read -r row_name row_path; do
     [ -n "$row_name" ] || continue

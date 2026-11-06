@@ -50,22 +50,44 @@ ln -sf "$(command -v bash)" "$tmp/no-wt-bin/bash"
 ln -sf "$(command -v jq)" "$tmp/no-wt-bin/jq"
 ln -sf "$(command -v cat)" "$tmp/no-wt-bin/cat"
 
+# jj's workspace list with its `main` row where --main says. Every case below is
+# about the audit rather than about the two answers disagreeing about which
+# worktree is main, so the listing agrees with --main unless a case brings its
+# own list through DONE_WS. It has to follow --main because --main is a real
+# directory in the cases that reach the moves and the answer /p/demo/main in
+# the rest: the rows are the shared fixture's, and only main's path moves.
+agreed_workspaces() {
+  local key file tab
+  tab=$'\t'
+  key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')
+  file=$tmp/ws-$key.txt
+  if [ ! -f "$file" ]; then
+    sed "s#^main$tab.*#main$tab$1#" test/fixtures/workspaces.txt >"$file"
+  fi
+  printf '%s' "$file"
+}
+
 run_done() {
   ran=$((ran + 1))
   rm -f "$tmp/rex-args" "$tmp/jj-args"
+  # A case that has to prove nothing was fetched cannot be handed --no-fetch:
+  # that option is what would have stopped the fetch. DONE_FETCH=1 leaves it
+  # out, so an empty jj argv file is evidence rather than a given.
+  local fetch_opt=--no-fetch
+  [ -z "${DONE_FETCH:-}" ] || fetch_opt=''
   PATH="${DONE_PATH:-$tmp/bin:$PATH}" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
     ./new-work.sh done \
     --cwd "${DONE_CWD:-/p/demo/feat-6c4}" \
     --main "${DONE_MAIN_DIR:-/p/demo/main}" --root /p/demo --project demo \
     --session s1 --window w1 \
-    --workspaces test/fixtures/workspaces.txt \
+    --workspaces "${DONE_WS:-$(agreed_workspaces "${DONE_MAIN_DIR:-/p/demo/main}")}" \
     --wt-json "${DONE_WT:-test/fixtures/done-wt-list.json}" \
     --diff "${DONE_DIFF:-$tmp/clean-diff}" \
     --own-status "${DONE_OWN:-$tmp/clean-own}" \
     --changes "${DONE_CHANGES:-$tmp/clean-changes}" \
     --main-state "${DONE_MAIN:-$tmp/clean-main}" \
     --bd-json "${DONE_BD_JSON:-test/fixtures/ready.json}" \
-    --no-fetch --base-bookmarks test/fixtures/bookmarks.txt \
+    $fetch_opt --base-bookmarks test/fixtures/bookmarks.txt \
     --origin-head origin/main \
     "$@" >"$tmp/out" 2>"$tmp/err" </dev/null
   status=$?
@@ -171,6 +193,65 @@ want_out "the main worktree block with --main /p/demo/main/" "can't tear down th
   /p/demo/main is the main worktree, not a workspace this flow removes
 
 nothing was removed; press any key"
+
+# --- Which worktree is main: jj's answer, not the one worktrunk flags ---
+#
+# pi-rex is bare-rooted and every worktree in it is detached at the same
+# commit, and there worktrunk's listing flags the wrong one: it calls the
+# leftover feat/b9y main and the real main worktree not main. jj's own
+# workspace list is right, and it is what the protection is built from. The
+# two answers disagreeing is refused rather than resolved, before the fetch and
+# before anything is moved or removed: a repo whose two answers disagree about
+# which worktree is main is exactly the one this flow must not act in.
+#
+# The side that used to refuse with the wrong reason -- feat/b9y is the
+# workspace the flow exists to remove, and it is also what worktrunk calls
+# main, so --main is the directory the key was pressed in. DONE_FETCH=1 leaves
+# --no-fetch off, so an empty jj argv file is evidence rather than a given.
+DONE_WS=test/fixtures/workspaces-main-elsewhere.txt DONE_FETCH=1 \
+  DONE_CWD=/p/pi-rex/feat-b9y DONE_MAIN_DIR=/p/pi-rex/feat-b9y \
+  run_done --root /p/pi-rex
+want_status "a disagreement about which worktree is main is refused" 4
+want_out "the main disagreement block" "can't tear down /p/pi-rex/feat-b9y
+
+  jj says the main workspace is /p/pi-rex/main, --main says /p/pi-rex/feat-b9y: the two answers disagree about which worktree is main, so nothing was done
+
+nothing was removed; press any key"
+ran=$((ran + 1))
+[ ! -s "$tmp/jj-args" ] ||
+  fail "a disagreement about main refuses before the fetch" "$(cat "$tmp/jj-args")"
+
+# The side that used to refuse nothing at all: the key pressed in jj's own
+# main worktree, while --main names somewhere else. Nothing is acted in, and
+# nothing is moved or removed.
+DONE_WS=test/fixtures/workspaces-main-elsewhere.txt DONE_FETCH=1 \
+  DONE_CWD=/p/pi-rex/main DONE_MAIN_DIR=/p/pi-rex/feat-b9y \
+  run_done --root /p/pi-rex
+want_status "a press in jj's main worktree is refused, not acted in" 4
+want_out_has "the inverse disagreement names both answers" \
+  "jj says the main workspace is /p/pi-rex/main, --main says /p/pi-rex/feat-b9y"
+ran=$((ran + 1))
+[ ! -s "$tmp/jj-args" ] ||
+  fail "the inverse disagreement fetches nothing" "$(cat "$tmp/jj-args")"
+
+# jj's main row and --main are compared in the one form --main is put in, so a
+# trailing slash on either is not a disagreement.
+printf 'default\t/p/demo\nfeat/6c4\t/p/demo/feat-6c4\nmain\t/p/demo/main/\n' \
+  >"$tmp/ws-main-slash.txt"
+DONE_WS=$tmp/ws-main-slash.txt DONE_CWD=/p/demo/main run_done
+want_status "a trailing slash on jj's main row is not a disagreement" 4
+want_out "a trailing slash on jj's main row is still the main worktree" \
+  "can't tear down the main worktree
+
+  /p/demo/main is the main worktree, not a workspace this flow removes
+
+nothing was removed; press any key"
+
+# A repo whose main workspace is named something else has no `main` row, and
+# then --main is the whole answer, as it was before jj was asked at all.
+DONE_WS=test/fixtures/workspaces-no-main.txt DONE_MAIN_DIR=$tmp/real-main run_done
+want_status "no jj main row falls back to --main and carries on" 0
+want_out "a run with no jj main row prints nothing" ""
 
 # The other half of the disagreement: worktrunk has a worktree jj lists no
 # workspace for, and the block names both halves.
@@ -329,7 +410,7 @@ rm -f "$tmp/jj-args"
 PATH="$tmp/failbin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
   --project demo --session s1 --window w1 \
-  --workspaces test/fixtures/workspaces.txt \
+  --workspaces "$(agreed_workspaces "$tmp/real-main")" \
   --wt-json test/fixtures/done-wt-list.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
@@ -360,7 +441,7 @@ rm -f "$tmp/jj-args"
 PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/no-such-main" --root /p/demo \
   --project demo --session s1 --window w1 \
-  --workspaces test/fixtures/workspaces.txt \
+  --workspaces "$(agreed_workspaces "$tmp/no-such-main")" \
   --wt-json test/fixtures/done-wt-list.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
@@ -514,7 +595,7 @@ rm -f "$tmp/rex-args" "$tmp/jj-args"
 PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
   --project demo --session s1 --window w1 \
-  --workspaces test/fixtures/workspaces.txt \
+  --workspaces "$(agreed_workspaces "$tmp/real-main")" \
   --wt-json test/fixtures/done-wt-list.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \

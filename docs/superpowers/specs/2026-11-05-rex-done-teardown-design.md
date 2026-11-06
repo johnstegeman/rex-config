@@ -216,27 +216,45 @@ passes it in as data.
 
 ### Finding the workspace, and the refusals that come before any question
 
-The script is handed `--cwd`, `--main` and `--root`, so it can refuse without
-asking anything of the repository:
+The script is handed `--cwd`, `--main` and `--root`. `--main` is worktrunk's
+answer to "which worktree is main", and it is not trusted on its own: in a
+bare-rooted wrapper every worktree is detached at the same commit, so worktrunk
+has flagged a leftover branch workspace as `main` and the real `main` worktree as
+not-main. jj names its own main row, and that is the answer the protection is
+built from — with `--main` kept as well, so the refusal below can never be the
+thing that lets a teardown through by being wrong on its own.
 
-1. **`--cwd` is `--main` or inside it, or is the wrapper root** → refuse: this
-   is the main worktree, or `default`, the empty workspace at the wrapper root,
-   and the flow never tears down either. Structural, by path — not by name, so a
-   repo whose main worktree is called something else is still protected.
-2. Otherwise, one read: `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`,
-   run in `--cwd`. **The longest listed root that is a prefix of, or equal to,
-   `--cwd` is this workspace** — its **name** (the tab label and the branch) and
-   its **root** (the directory to remove). Longest wins because roots nest:
+1. **Two answers to compare, before any refusal, from one read**:
+   `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`, run in `--cwd`. The
+   row named `main` is **jj's main worktree** (`jj_main`). Put in the same
+   one-slash form `--main` is put in, a trailing slash is not a disagreement.
+2. **`jj_main` and `--main` disagree** → refuse, naming both paths and saying
+   the two answers disagree about which worktree is main. Nothing is fetched,
+   moved or removed: this is precisely the repo the flow cannot tell how to act
+   in, and refusing is the only safe answer to it. A repo with no row named
+   `main` — a main workspace under another name — has one answer only, and
+   `--main` is it.
+3. **`--cwd` is `--main` or inside it, is `jj_main` or inside it, or is the
+   wrapper root** → refuse: this is the main worktree, or `default`, the empty
+   workspace at the wrapper root, and the flow never tears down either.
+   Structural, by path — not by name, so a repo whose main worktree is called
+   something else is still protected. The three are a union rather than a
+   choice: with the two answers agreeing, either one protects the same
+   directory, and with them disagreeing rule 2 has already refused.
+4. Otherwise the same one read answers the second question: **the longest listed
+   root that is a prefix of, or equal to, `--cwd` is this workspace** — its
+   **name** (the tab label and the branch) and its **root** (the directory to
+   remove). Longest wins because roots nest:
    measured on the live wrapper, `default` is `/…/rex-config`, `main` is
    `/…/rex-config/main` and `feat/6c4` is `/…/rex-config/feat-6c4`, so a
    subdirectory of a workspace matches two rows and only the deepest is the
    answer. `default` matching at all therefore means the cwd is at or under the
-   wrapper with no deeper workspace owning it — which is rule 1's refusal, from
+   wrapper with no deeper workspace owning it — which is rule 3's refusal, from
    the other direction.
-3. **No row matches** → refuse: this pane is not inside a jj workspace the
+5. **No row matches** → refuse: this pane is not inside a jj workspace the
    wrapper knows about (a stale directory, or a plain git worktree left over from
    before the conversion). Nothing is guessed.
-4. `wt list --format=json` must show a worktree at that root. If it does not,
+6. `wt list --format=json` must show a worktree at that root. If it does not,
    the directories have drifted apart — the jj row exists and the git worktree
    does not, or the reverse — and the screen says so instead of removing one
    half.
@@ -463,9 +481,15 @@ part of this change that is not code in a worktree.
 
 ## Edge cases and failure behaviour
 
-- **The pane is in `main` or at the wrapper root** — refused before anything is
-  read (`--cwd` is a path comparison). The screen is the same refusal, with one
-  line: the main worktree is not a workspace to tear down.
+- **The pane is in `main` or at the wrapper root** — refused before any question
+  is asked (`--cwd` is a path comparison, made against `--main`, the wrapper root
+  and jj's own `main` row). The screen is the same refusal, with one line: the
+  main worktree is not a workspace to tear down.
+- **jj's `main` row and `--main` disagree about which worktree is main** —
+  refused, naming both paths, before the fetch: nothing was fetched, moved or
+  removed. A bare-rooted wrapper of detached worktrees is where worktrunk's
+  `main` flag has been seen to name a leftover, and `jj workspace list` is the
+  other answer; the flow does not choose between them.
 - **The pane is in a directory jj does not list** — refused, naming the cwd. A
   stale directory from a half-done removal is the usual cause, and the message
   says which paths exist and which do not.
@@ -533,17 +557,21 @@ Everything runs from `bash test/run.sh`, no pty.
   `jj workspace list -T …`), `--wt-json` (a saved `wt list --format=json`),
   `--diff` (a saved `jj diff --summary` for the base range), `--own-status` (a
   saved `jj diff --summary -r @`), `--main-state` (a saved rendering of the two
-  `main` checks), `--bd-json` and `--running`. `--no-fetch` is passed by every
-  scripted run, so the suite never touches the network. Asserted: exit 4 and the
+  `main` checks), `--bd-json` and `--running`. `--no-fetch` is passed by the
+  scripted runs, and the two that leave it off do so to prove the disagreement
+  about `main` refuses *before* the fetch — `jj` is a stand-in in both, so the
+  suite never touches the network. Asserted: exit 4 and the
   exact refusal block for each blocker alone and in combination; the paths listed
   for a non-empty content diff, and **exit 0 for the squash case** where the base
   range has changes but an empty diff; the bead line printed for a matching id,
   absent for no match and for no `bd`; exit 4 for a `--cwd` equal to `--main`, to
   the wrapper, and for a `--cwd` under a workspace **inside another workspace**
   (the longest-prefix rule, with a `default`-plus-`feat/6c4` fixture); exit 4 when
-  the jj row and the worktree disagree; exit 4 naming the fetch when a stand-in
-  `jj` on `PATH` fails it (every other scripted run passes `--no-fetch`, so the
-  suite never reaches the network); the `main` refresh running `jj new main@origin` for a
+  the jj row and the worktree disagree; exit 4 — before any fetch, with an empty
+  jj argv file — when `--main` and jj's own `main` row name different worktrees
+  (a fixture in the pi-rex shape, whose `main` row is elsewhere), and carrying on
+  when the listing has no `main` row at all; exit 4 naming the fetch when a stand-in
+  `jj` on `PATH` fails it; the `main` refresh running `jj new main@origin` for a
   provably empty `main` and **not** running it for a `main` with a description or
   a non-empty diff; the bookmark move skipped when `main` is not contained in
   `main@origin`; exit 2 for a relative `--cwd`; and — for a clean workspace — exit
