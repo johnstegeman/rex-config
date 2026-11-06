@@ -2,10 +2,10 @@
 # `new-work.sh branch-default`, `new-work.sh candidates` and `new-work.sh bases`.
 #
 # branch-default turns a bead's issue_type and id into the branch name the
-# picker offers; candidates collects the branch names that already exist so the
-# picker can offer them too. bases resolves the jj revision a new workspace is
-# started from and the short cycle of revisions around it. All three run
-# without fzf.
+# picker offers; candidates collects the branch names that already exist -- the
+# workspaces jj lists and the local bookmarks -- so the picker can offer them
+# too. bases resolves the jj revision a new workspace is started from and the
+# short cycle of revisions around it. All three run without fzf.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -78,27 +78,22 @@ fi
 run_branch_default_missing --id pmm-iris-a4l
 run_branch_default_missing
 
-# Existing branch names, one per line: worktree branches first, then local
-# branches, de-duplicated in that order, and never a ref ending in /HEAD.
-cat >"$tmp/refs" <<'EOF'
-feat/abc123
-main
-origin/HEAD
-johnstegeman/k1ier
-fix/cleanup
-EOF
-
+# Existing branch names, one per line: the branches a jj workspace is already on
+# first, then the local bookmarks with no workspace of their own, de-duplicated in
+# that order. The listing is the same "name<TAB>root" rendering `done --workspaces`
+# reads, so one fixture serves both subcommands, and a bookmark is a name alone.
+# The `default` row of the listing is jj's own workspace at the wrapper and is
+# never a branch, so feat/6c4, feat/6c4-sub and main are the whole first half.
 cat >"$tmp/candidates.expected" <<'EOF'
+feat/6c4
+feat/6c4-sub
 main
-chore/p4pip
-feat/abc123
-johnstegeman/k1ier
-fix/cleanup
+bug/a4l
 EOF
 
 ran=$((ran + 1))
-./new-work.sh candidates --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  >"$tmp/out" 2>"$tmp/err"
+./new-work.sh candidates --workspaces test/fixtures/workspaces.txt \
+  --bookmarks test/fixtures/branch-bookmarks.txt >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
   fail "candidates listing" "exit $status: $(cat "$tmp/err")"
@@ -106,38 +101,68 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
   fail "candidates listing" "output differs from the expected branch list"
 fi
 
-# The same call with no fzf anywhere on PATH: the script must not need it.
+# The same call with neither fzf nor jq on PATH: neither is part of this answer
+# any more. There is no JSON document to parse -- jj's rows are already the two
+# lists -- so a copy of the script is not needed to read them.
 ran=$((ran + 1))
 mkdir -p "$tmp/bin"
-for tool in bash jq awk cat; do
+for tool in bash awk cat; do
   ln -s "$(command -v "$tool")" "$tmp/bin/$tool"
 done
-PATH=$tmp/bin ./new-work.sh candidates --wt-json test/fixtures/wt-list.json \
-  --refs "$tmp/refs" >"$tmp/out" 2>"$tmp/err"
+PATH=$tmp/bin ./new-work.sh candidates --workspaces test/fixtures/workspaces.txt \
+  --bookmarks test/fixtures/branch-bookmarks.txt >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "candidates needs no fzf" "exit $status: $(cat "$tmp/err")"
+  fail "candidates needs neither fzf nor jq" "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
-  fail "candidates needs no fzf" "output differs from the expected branch list"
+  fail "candidates needs neither fzf nor jq" \
+    "output differs from the expected branch list"
 fi
 
-# Reading the branches out of a real repository: --main with no fixtures.
+# A row ending in /HEAD is dropped rather than offered: git's short refname
+# rendering and a detached worktree both used to put one in this list, and it is
+# no branch to switch to. The listing here holds nothing but the `default` row,
+# so the bookmarks are the whole answer.
+printf 'origin/HEAD\nfix/headless\n' >"$tmp/head-bookmarks"
+printf 'fix/headless\n' >"$tmp/head.expected"
 ran=$((ran + 1))
-git init -q "$tmp/repo" && git -C "$tmp/repo" -c user.email=t@example.com \
-  -c user.name=t commit -q --allow-empty -m init &&
-  git -C "$tmp/repo" branch feat/real-one && git -C "$tmp/repo" branch fix/real-two
-./new-work.sh candidates --main "$tmp/repo" >"$tmp/out" 2>"$tmp/err"
+./new-work.sh candidates \
+  --workspaces test/fixtures/workspaces-default-only.txt \
+  --bookmarks "$tmp/head-bookmarks" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "candidates from a repository" "exit $status: $(cat "$tmp/err")"
+  fail "a /HEAD row is dropped" "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/head.expected" "$tmp/out"; then
+  fail "a /HEAD row is dropped" "output: $(cat "$tmp/out")"
+fi
+
+# Reading both lists out of a real repository: --main with no fixtures at all.
+# The repository is a real one because the one thing a saved listing cannot
+# prove is that jj's own rendering parses as rows -- the tab between a workspace
+# and its root, the trailing newline, and the `default` workspace that is no
+# branch. jj is asked here and nowhere else in this file, so a host without it
+# says so once instead of failing every case below.
+if ! command -v jj >/dev/null 2>&1; then
+  fail 'candidates from a repository' \
+    'this host has no jj, so no repository can be made to read'
 else
-  for want in feat/real-one fix/real-two; do
-    if ! grep -qx "$want" "$tmp/out"; then
-      fail "candidates from a repository" "missing $want in: $(cat "$tmp/out")"
+  ran=$((ran + 1))
+  mkdir -p "$tmp/jjrepo/main"
+  if ( cd "$tmp/jjrepo/main" && jj git init . >/dev/null 2>&1 &&
+    jj workspace add --name feat/real-one "$tmp/jjrepo/feat-real-one" \
+      >/dev/null 2>&1 &&
+    jj bookmark create fix/real-two -r @ >/dev/null 2>&1 ); then
+    printf 'feat/real-one\nfix/real-two\n' >"$tmp/repo.expected"
+    ./new-work.sh candidates --main "$tmp/jjrepo/main" >"$tmp/out" 2>"$tmp/err"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      fail "candidates from a repository" "exit $status: $(cat "$tmp/err")"
+    elif ! diff -u "$tmp/repo.expected" "$tmp/out"; then
+      fail "candidates from a repository" \
+        "output differs from the expected branch list"
     fi
-  done
-  if sort "$tmp/out" | uniq -d | grep -q .; then
-    fail "candidates from a repository" "duplicate rows in: $(cat "$tmp/out")"
+  else
+    fail 'candidates from a repository' 'the jj fixtures could not be made'
   fi
 fi
 
@@ -164,13 +189,14 @@ elif grep -q 'cd:' "$tmp/err"; then
     "bash's own cd error is still in: $(cat "$tmp/err")"
 fi
 
-# ... but only when it will really be read: with both fixtures --wt-json and
-# --refs are the two sources candidates has, so --main is never touched and a
-# directory that is not there costs nothing. The same shape pick accepts, since
-# it is how the tests and dry runs call both commands.
+# ... but only when it will really be read: --workspaces and --bookmarks are the
+# two sources candidates has, so --main is never touched and a directory that is
+# not there costs nothing. The same shape pick accepts, since it is how the tests
+# and dry runs call both commands.
 ran=$((ran + 1))
 ./new-work.sh candidates --main "$tmp/nowhere" \
-  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --workspaces test/fixtures/workspaces.txt \
+  --bookmarks test/fixtures/branch-bookmarks.txt \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -181,44 +207,60 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
     "output differs from the expected branch list"
 fi
 
-# A --wt-json that cannot be opened is the caller's mistake, not a repository
-# this machine cannot read, so it is not forgiven the way a failed `wt list` is:
-# the run stops at the failed read and prints no rows at all -- git's half
-# included, because half a list is a guess dressed as an answer.
+# A --workspaces fixture that cannot be opened is the caller's mistake, not a
+# repository this machine cannot read, so it is not forgiven the way a failed
+# `jj workspace list` is: the run stops at the failed read, naming the file, and
+# prints no rows at all -- the bookmark half included, because half a list is a
+# guess dressed as an answer.
 ran=$((ran + 1))
-./new-work.sh candidates --main "$tmp/repo" --wt-json "$tmp/no-such-wt.json" \
+./new-work.sh candidates --main "$tmp/nowhere" \
+  --workspaces "$tmp/no-such-workspaces.txt" \
+  --bookmarks test/fixtures/branch-bookmarks.txt \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -eq 0 ]; then
-  fail "candidates with an unopenable --wt-json exits non-zero" \
+  fail "candidates with an unopenable --workspaces exits non-zero" \
     "exit $status"
 elif [ -s "$tmp/out" ]; then
-  fail "candidates with an unopenable --wt-json prints no rows" \
+  fail "candidates with an unopenable --workspaces prints no rows" \
     "output: $(cat "$tmp/out")"
+elif [ "$(cat "$tmp/err")" != \
+  "new-work.sh: could not read the workspaces of $tmp/no-such-workspaces.txt" ]; then
+  fail "candidates with an unopenable --workspaces names the file" \
+    "stderr: $(cat "$tmp/err")"
 fi
 
-# A worktrunk that cannot read the repository: its worktree rows are lost, but
-# git's branches still come through -- and the partial list says so, naming the
-# directory. Only this subcommand answers from half the list: a pick given a
-# name missing here is refused rather than guessed at, since the guess would be
-# a create (or an attach) for a branch that already has a worktree.
-mkdir -p "$tmp/bad-wt"
-cat >"$tmp/bad-wt/wt" <<'EOF'
+# A jj that cannot produce one of the two lists: that half is lost, the other one
+# still comes through, and the partial list says so, naming the directory. Only
+# this subcommand answers from half of it: a pick given a name missing here is
+# refused rather than guessed at, since the guess would be a create (or an
+# attach) for a branch that already has a workspace.
+mkdir -p "$tmp/half-jj"
+cat >"$tmp/half-jj/jj" <<'EOF'
 #!/bin/sh
-printf 'wt: not a worktrunk repository\n' >&2
-exit 1
+# The listing fails the way a locked working copy or a missing repository makes
+# it fail; the bookmarks are answered as jj renders them.
+case " $* " in
+  *' workspace list '*) printf 'jj: could not read the repository\n' >&2; exit 1 ;;
+  *' bookmark list '*) printf 'fix/real-two\n' ;;
+  *) exit 1 ;;
+esac
 EOF
-chmod +x "$tmp/bad-wt/wt"
+chmod +x "$tmp/half-jj/jj"
+mkdir -p "$tmp/half-repo"
 ran=$((ran + 1))
-PATH="$tmp/bad-wt:$PATH" ./new-work.sh candidates --main "$tmp/repo" \
+PATH="$tmp/half-jj:$PATH" ./new-work.sh candidates --main "$tmp/half-repo" \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "a failed wt list still lists git's branches" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qx 'feat/real-one' "$tmp/out"; then
-  fail "a failed wt list still lists git's branches" "output: $(cat "$tmp/out")"
-elif ! grep -qF "could not read the worktrees of $tmp/repo" "$tmp/err"; then
-  fail "a failed wt list is said out loud" "stderr: $(cat "$tmp/err")"
+  fail "a failed workspace listing still lists the bookmarks" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! grep -qx 'fix/real-two' "$tmp/out"; then
+  fail "a failed workspace listing still lists the bookmarks" \
+    "output: $(cat "$tmp/out")"
+elif ! grep -qxF \
+  "new-work.sh: could not read the workspaces of $tmp/half-repo" "$tmp/err"; then
+  fail "a failed workspace listing is said out loud" "stderr: $(cat "$tmp/err")"
 fi
 
 # The bookmarks of a pretend repository, as bases reads them: exactly what
