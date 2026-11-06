@@ -317,6 +317,199 @@ for mode in --attach --existing; do
   fi
 done
 
+# --attach: the bookmark is there and the workspace is not. jj puts the new
+# working copy on a NEW commit on top of the branch and the bookmark stays
+# where it was -- exactly what `gws` + `git checkout <branch>` left behind.
+# That is the whole difference from a create: a create makes the branch, an
+# attach borrows it.
+( cd "$tmp/w/main" && jj bookmark create br -r @ >/dev/null 2>&1 )
+br_want=$( cd "$tmp/w" && jj --ignore-working-copy log -r br --no-graph -T 'commit_id' )
+run_jws "$tmp/w" --attach --path-file attach.txt br
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "--attach exits 0" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ "$(cat "$tmp/w/attach.txt" 2>/dev/null || true)" != "$tmp/w/br" ]; then
+  fail "--attach reports the workspace path" \
+    "wanted $tmp/w/br, got: $(cat "$tmp/w/attach.txt" 2>/dev/null || echo '<no file>')"
+fi
+# The new working copy's parent is the bookmark's commit: the workspace starts
+# ON the branch rather than beside it, which is what `-r=<branch>` on the add
+# means and what a copy of the create's arguments would not have done.
+ran=$((ran + 1))
+attached_parent=$( cd "$tmp/w/br" && jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' )
+if [ "$attached_parent" != "$br_want" ]; then
+  fail "--attach starts the workspace on the branch" \
+    "@- in the new workspace: $attached_parent, wanted $br_want"
+fi
+# ... and the bookmark did not move. `jj bookmark create` would have failed on
+# the existing name and `jj bookmark move` would have rewritten the branch, so
+# an attach that quietly did either is caught right here.
+ran=$((ran + 1))
+br_now=$( cd "$tmp/w" && jj --ignore-working-copy log -r br --no-graph -T 'commit_id' )
+if [ "$br_now" != "$br_want" ]; then
+  fail "--attach leaves the bookmark where it was" \
+    "br: $br_now, wanted $br_want"
+fi
+ran=$((ran + 1))
+if [ ! -f "$tmp/w/br/.hook-proof" ]; then
+  fail "an attach runs the post-start hooks too" "no $tmp/w/br/.hook-proof"
+fi
+ran=$((ran + 1))
+if ! djo_ran_in "$tmp/w/br"; then
+  fail "an attach's hooks run inside the new workspace" "$(cat "$tmp/djo.log" 2>/dev/null)"
+fi
+
+# --existing: a workspace that is already there. The path comes back, and
+# NOTHING is made: no workspace, no bookmark, no hook -- it is the mode a
+# switch runs, not a mode that creates.
+rows_now() {
+  ( cd "$tmp/w" && jj --ignore-working-copy workspace list -T 'name ++ "\n"' ) | awk 'END { print NR }'
+}
+rows_before=$(rows_now)
+rm -f "$tmp/w/feat-x/.hook-proof"
+run_jws "$tmp/w" --existing --path-file switch.txt feat/x
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "--existing exits 0 for a workspace jj lists" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ "$(cat "$tmp/w/switch.txt" 2>/dev/null || true)" != "$tmp/w/feat-x" ]; then
+  fail "--existing reports the workspace path" \
+    "wanted $tmp/w/feat-x, got: $(cat "$tmp/w/switch.txt" 2>/dev/null || echo '<no file>')"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/djo.log" ]; then
+  fail "--existing runs no dojjo at all" "$(cat "$tmp/djo.log")"
+fi
+ran=$((ran + 1))
+if [ -f "$tmp/w/feat-x/.hook-proof" ]; then
+  fail "--existing runs no hooks" "$tmp/w/feat-x/.hook-proof came back"
+fi
+ran=$((ran + 1))
+rows_after=$(rows_now)
+if [ "$rows_after" != "$rows_before" ]; then
+  fail "--existing creates no workspace" "rows were $rows_before, now $rows_after"
+fi
+
+# --existing for a name jj does not list: refused, in one line, BEFORE dojjo is
+# even looked for. dojjo asks `Create it? [y/N]` for a name it does not know,
+# and in a pane nobody can type into that is an invisible hang -- so the
+# guard, not dojjo, is what answers a stale name.
+run_jws "$tmp/w" --existing --path-file "$tmp/nope.txt" nope
+ran=$((ran + 1))
+if [ "$status" -ne 1 ]; then
+  fail "--existing refuses a name jj does not list" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fq 'lists no workspace' "$tmp/err"; then
+  fail "the refusal says jj lists no such workspace" "$(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/djo.log" ]; then
+  fail "a refused --existing calls no dojjo" "$(cat "$tmp/djo.log")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/w/nope" ]; then
+  fail "a refused --existing creates nothing" "$tmp/w/nope exists"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/nope.txt" ]; then
+  fail "a refused --existing writes no path file" "$(cat "$tmp/nope.txt")"
+fi
+
+# The djo requirement belongs to the modes that run dojjo: --existing is jj's
+# alone, so a machine with no dojjo on the PATH can still switch. min-bin is
+# fish, jj and the OS, and no dojjo.
+ln -sf "$(command -v jj)" "$tmp/min-bin/jj"
+JWS_PATH="$tmp/min-bin:/usr/bin:/bin" run_jws "$tmp/w" --existing --path-file nodjo.txt feat/x
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "--existing works with no djo on the PATH" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ "$(cat "$tmp/w/nodjo.txt" 2>/dev/null || true)" != "$tmp/w/feat-x" ]; then
+  fail "--existing without djo still reports the path" \
+    "wanted $tmp/w/feat-x, got: $(cat "$tmp/w/nodjo.txt" 2>/dev/null || echo '<no file>')"
+fi
+
+# The bounded fetch. dojjo never fetches -- there is no `jj git fetch` in its
+# source -- and the base revision the picker names is a REMOTE answer, so a
+# create that was given one refreshes first: bounded, because the pane is a
+# terminal nobody can type into, and forgivably, because offline is not a
+# failed create.
+#
+# Two stand-ins prove both halves: a `jj` that passes everything through to the
+# real jj except `git fetch`, where it logs and fails, and a `timeout` that
+# logs what it was handed before running it. So the log says the fetch was
+# attempted AND that it was bounded by 30 seconds.
+real_jj=$(command -v jj)
+mkdir -p "$tmp/fetchbin"
+cat >"$tmp/fetchbin/jj" <<EOF
+#!/bin/sh
+if [ "\$1" = git ] && [ "\$2" = fetch ]; then
+  printf 'fetch\n' >>"$tmp/fetch.log"
+  exit 1
+fi
+exec "$real_jj" "\$@"
+EOF
+cat >"$tmp/fetchbin/timeout" <<EOF
+#!/bin/sh
+printf 'bounded: %s\n' "\$*" >>"$tmp/fetch.log"
+shift
+exec "\$@"
+EOF
+chmod +x "$tmp/fetchbin/jj" "$tmp/fetchbin/timeout"
+rm -f "$tmp/fetch.log"
+JWS_PATH="$tmp/fetchbin:$tmp/bin:$PATH" run_jws "$tmp/w" --path-file fetched.txt feat/fetched 'root()'
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "a failed fetch does not fail the create" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fxq 'fetch' "$tmp/fetch.log" 2>/dev/null; then
+  fail "a base revision is fetched before the workspace is made" \
+    "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>') / $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -Fxq 'bounded: 30 jj git fetch' "$tmp/fetch.log" 2>/dev/null; then
+  fail "the fetch is bounded by 30 seconds" \
+    "$(cat "$tmp/fetch.log" 2>/dev/null || echo '<no fetch>')"
+fi
+# The failure is one readable line, and the create carries on from the
+# revision as it resolves locally rather than retrying something.
+ran=$((ran + 1))
+if ! grep -Fq 'could not fetch' "$tmp/err"; then
+  fail "a failed fetch says so, in one line" "$(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ "$(cat "$tmp/w/fetched.txt" 2>/dev/null || true)" != "$tmp/w/feat-fetched" ]; then
+  fail "the create after a failed fetch still reports its path" \
+    "wanted $tmp/w/feat-fetched, got: $(cat "$tmp/w/fetched.txt" 2>/dev/null || echo '<no file>')"
+fi
+# ... and the base revision is still the base: a fetch that failed changes
+# nothing about the revision that was named.
+ran=$((ran + 1))
+fetched_parent=$( cd "$tmp/w" && jj --ignore-working-copy log -r 'feat/fetched-' --no-graph -T 'commit_id' )
+if [ "$fetched_parent" != "$root_commit" ]; then
+  fail "a failed fetch keeps the base revision" \
+    "feat/fetched's parent: $fetched_parent, wanted root: $root_commit"
+fi
+
+# The other half of "only when a base revision was given": a create with no
+# base has nothing to refresh, so it does not go to the network at all.
+rm -f "$tmp/fetch.log"
+JWS_PATH="$tmp/fetchbin:$tmp/bin:$PATH" run_jws "$tmp/w" --path-file nobase.txt feat/nobase
+ran=$((ran + 1))
+if [ "$status" -ne 0 ]; then
+  fail "a create with no base revision still exits 0" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/fetch.log" ]; then
+  fail "a create with no base revision does not fetch" "$(cat "$tmp/fetch.log")"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"
   exit 1
