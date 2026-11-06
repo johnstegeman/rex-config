@@ -1672,19 +1672,19 @@ cmd_pick() {
   if [ -z "$bd_json" ] || [ -z "$workspaces" ] || [ -z "$bookmarks" ] ||
     { [ -z "$base_bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
-    # Being there is not enough: the new workspace is made by gws, so what this
-    # needs is the shape gws can build in -- the wrapper ginit makes, with .jj/repo
+    # Being there is not enough: the new workspace is made by jws, so what this
+    # needs is the shape jws can build in -- the wrapper ginit makes, with .jj/repo
     # as a *directory* beside the main worktree (main's own .jj/repo is a file
-    # there, and that file is how gws tells the two apart). A clone ginit'd where
+    # there, and that file is how jws tells the two apart). A clone ginit'd where
     # it stands is deliberately not accepted even though a loose ancestor walk
-    # would find its repo: gws runs its add from <wrapper>/main to inherit that
+    # would find its repo: jws runs its add from <wrapper>/main to inherit that
     # workspace's sparse patterns, so it refuses a wrapper with no main -- after
     # the bead is claimed, which is the outcome this check exists to prevent. A
     # repo that was never ginit'd has no fallback here either, by design: a plain
     # git worktree would quietly recreate the problem jj is there to solve, so
     # this refuses and names the thing to run.
     [ -d "$(dirname "$main")/.jj/repo" ] ||
-      die "pick: $(dirname "$main") is not ginit'd — gws needs a wrapper with .jj/repo as a directory beside the main worktree; run ginit first"
+      die "pick: $(dirname "$main") is not ginit'd — jws needs a wrapper with .jj/repo as a directory beside the main worktree; run ginit first"
   fi
 
   # The screen's own requirements, before any work, and only where the screen
@@ -1704,8 +1704,10 @@ cmd_pick() {
   # hooks are dojjo's -- so it is named only where a tab will really be made: a
   # --dry-run creates no workspace and hands its answers back, and a run holding
   # the saved workspace listing is the same kind of scripted run. What the check
-  # buys is a machine with nothing to build a workspace with refused before the
-  # screen opens rather than after the bead is claimed.
+  # buys is a machine that cannot finish a workspace refused before the screen
+  # opens rather than after the bead is claimed -- except a pick that turns out to
+  # be a switch, which runs jj alone and calls no djo; refusing before the screen
+  # is worth more than that accuracy.
   [ "$dry_run" -eq 1 ] || [ -n "$workspaces" ] || need djo
   need jq
   [ -n "$bd_json" ] || need bd

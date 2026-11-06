@@ -926,7 +926,7 @@ fi
 
 # jj reads the base cycle, so it is named only where that cycle is really read:
 # no --base-bookmarks fixture stands in for the bookmark list here, which is
-# also why --main has to exist -- and, being a wrapper gws could create in, to
+# also why --main has to exist -- and, being a wrapper jws could create in, to
 # hold .jj/repo itself, which the preflight finds with dirname.
 mkdir -p "$tmp/ginit/main" "$tmp/ginit/.jj/repo"
 restricted_path "$tmp/no-jj-bin" \
@@ -942,7 +942,7 @@ refused "a missing jj exits 1" 'jj not found on PATH — press any key' \
 # The shape that is deliberately NOT supported, pinned here so it is not
 # re-admitted by accident: a normal clone ginit'd where it stands, so .jj/repo
 # sits inside the worktree itself rather than in a wrapper beside a main
-# workspace. gws' ancestor walk would find that repo, but gws then runs its add
+# workspace. jws' ancestor walk would find that repo, but jws then runs its add
 # from <wrapper>/main to inherit that workspace's sparse patterns and refuses
 # without one -- after the bead is claimed, which is the outcome this preflight
 # exists to prevent. So the refusal happens here, before anything is asked.
@@ -954,8 +954,8 @@ refused "a repo ginit'd in place is refused for it" "not ginit'd" \
   --bookmarks test/fixtures/branch-bookmarks.txt \
   --bead pmm-iris-a4l --branch feat/in-place
 ran=$((ran + 1))
-if ! grep -qF 'gws needs a wrapper with .jj/repo as a directory' "$tmp/err"; then
-  fail "the in-place refusal says which shape gws needs" \
+if ! grep -qF 'jws needs a wrapper with .jj/repo as a directory' "$tmp/err"; then
+  fail "the in-place refusal says which shape jws needs" \
     "stderr: $(cat "$tmp/err")"
 fi
 

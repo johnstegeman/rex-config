@@ -230,8 +230,9 @@ looked up through your shell):
 `bash` is the exception to that: it runs under Rex's own `PATH` — the picker is
 started by its `#!/usr/bin/env bash` shebang, and `new-work.sh` is a bash script
 (`pipefail`, process substitution) — so it only needs to be where Rex can find
-it. Nothing in the flow asks for `git`, and a machine without it runs the flow
-as it is.
+it. `git` is not required: where a `.git` sits beside the base the picker asks
+it for `origin/HEAD`, and with no git, or no such symref, the cycle opens on
+`main` then `master`.
 
 Also needed:
 
@@ -374,7 +375,7 @@ Before the screen opens:
   names the directory.
 - The repo is not ginit'd — no `.jj/repo` as a directory in the directory above
   the main worktree: the picker refuses in one line and names `ginit`, and no
-  bead is claimed: `pick: /… is not ginit'd — gws needs a wrapper with .jj/repo
+  bead is claimed: `pick: /… is not ginit'd — jws needs a wrapper with .jj/repo
   as a directory beside the main worktree; run ginit first`.
 - A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `wt`, `jq`,
   `jj`, or a fish with no `gws`: the float names the missing piece and waits for

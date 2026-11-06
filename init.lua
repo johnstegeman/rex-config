@@ -413,8 +413,8 @@ end
 
 -- Rex runs an action with its own PATH -- /usr/bin:/bin:/usr/sbin:/sbin on this
 -- Mac -- which knows nothing of mise or Homebrew installs, while the design puts
--- fish, wt, jq, jj and bd on the login shell's PATH. wt and bd therefore run in
--- that shell, which is also where mise keeps the environment its shims need.
+-- fish, djo, jq, jj and bd on the login shell's PATH. djo and bd therefore run
+-- in that shell, which is also where mise keeps the environment its shims need.
 -- The new tab is a fish program for the same reason: jws exists only as a fish
 -- function, so the flow has to reach it from fish -- which is also what the
 -- picker's own check asks for (`fish -c 'functions -q jws'`). Nothing is
@@ -620,7 +620,7 @@ end
 local NO_DATABASE = "no beads database"
 
 -- Whether the project has a beads database, asked from the main worktree: in
--- the worktrunk layout the root holds only .git, and main/.beads/redirect is
+-- the ginit wrapper layout the root holds only .git, and main/.beads/redirect is
 -- what resolves the database.
 --
 -- Returns true, or false and the reason bd gave: nil when bd ran and reported no
@@ -775,11 +775,11 @@ local function agent_choices()
 end
 
 -- argv for new-work.sh's picker, every word of it built here and nowhere else.
--- base = false means "let worktrunk choose", so there is no ref to pass on --
+-- base = false means "no revision at all", so there is no ref to pass on --
 -- but the picker still has to be told, because a picker told nothing resolves
 -- the remote's default branch itself and the screen would open on a base the
 -- configuration opted out of. So false is --no-base: the cycle opens on the
--- worktrunk-default sentinel, and ctrl-r can still move off it.
+-- "no revision at all" sentinel, and ctrl-r can still move off it.
 local function picker_command(project)
   local command = {
     M.options.script, "pick",
