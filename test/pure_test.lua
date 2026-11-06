@@ -84,21 +84,121 @@ eq("version", M.version, "0.1.0")
 eq("render_prompt", M.render_prompt("/brainstorming for bead {id} ({title}) {id}", { id = "pmm-iris-58h", title = "Diff path" }),
    "/brainstorming for bead pmm-iris-58h (Diff path) pmm-iris-58h")
 eq("render_prompt missing key", M.render_prompt("x{b}y", {}), "xy")
-eq("project_from_common_dir", M.project_from_common_dir("/x/pmm-iris/.git").name, "pmm-iris")
-eq("project_from_common_dir root", M.project_from_common_dir("/x/pmm-iris/.git/").root, "/x/pmm-iris")
-eq("project_from_common_dir relative", M.project_from_common_dir(".git"), nil)
--- A value that is not a path at all, as a wrong argument or a decoded null would
--- be: nil rather than a Lua error, the way wt_switch_argv guards.
-eq("project_from_common_dir non-string", M.project_from_common_dir(42), nil)
-eq("project_from_common_dir nil", M.project_from_common_dir(nil), nil)
-eq("main_worktree schema2", M.main_worktree({ items = { { worktree = { path = "/r/main", main = true } }, { worktree = { path = "/r/feat", main = false } } } }), "/r/main")
-eq("main_worktree legacy", M.main_worktree({ { path = "/r/main", is_main = true }, { path = "/r/feat" } }), "/r/main")
--- A producer that quoted the flag: "true" is the main worktree too, since the
--- alternative is losing the project altogether.
-eq("main_worktree string flag", M.main_worktree({ items = { { worktree = { path = "/r/main", main = "true" } } } }), "/r/main")
-eq("main_worktree string flag false", M.main_worktree({ items = { { worktree = { path = "/r/main", main = "false" } } } }), nil)
-eq("main_worktree none", M.main_worktree({ items = {} }), nil)
-eq("main_worktree non-table items", M.main_worktree({ items = "x" }), nil)
+-- The project a directory belongs to ----------------------------------------
+--
+-- project_for finds the wrapper by walking the filesystem for `.jj/repo` as a
+-- directory, so these fixtures are real directories rather than strings: made
+-- here, removed at the end of the block, the way the shell tests use a
+-- mktemp -d and a trap. The jj listing beside each one is a fixture too -- the
+-- text jj prints -- so no jj runs for this half of the question.
+local function mktemp_dir()
+  local pipe = io.popen("mktemp -d 2>/dev/null")
+  if pipe == nil then return nil end
+  local path = pipe:read("l")
+  pipe:close()
+  if path == nil or path == "" then return nil end
+  return (path:gsub("/+$", ""))
+end
+
+-- One shell word, whatever the path holds, so a TMPDIR with a space in it is a
+-- directory rather than two arguments. Quoted here rather than through the
+-- module's own shell_quote, so the fixture does not lean on the code under test.
+local function quote(text) return "'" .. tostring(text):gsub("'", "'\\''") .. "'" end
+
+local function mkdirp(path)
+  os.execute("mkdir -p " .. quote(path))
+end
+
+local function write_file(path, text)
+  local handle = assert(io.open(path, "w"))
+  handle:write(text)
+  handle:close()
+end
+
+-- The reason a refusal gives, for the part of it that has to be there: a
+-- message that lost the word `main` would leave a person with a refusal about
+-- nothing in particular.
+local function contains(name, text, needle)
+  count = count + 1
+  if type(text) ~= "string" or not text:find(needle, 1, true) then
+    fails = fails + 1
+    io.stderr:write("FAIL " .. name .. "\n  got:  " .. show(text)
+      .. "\n  want: a message containing " .. show(needle) .. "\n")
+  end
+end
+
+local tmp = assert(mktemp_dir(), "mktemp -d failed")
+-- A wrapper: .jj/repo as a directory beside main/, and a branch workspace
+-- beneath it whose own .jj/repo is a *file* -- the path of the store it
+-- borrows -- which is the shape the walk has to pass on its way up.
+local wrapper = tmp .. "/iris"
+local feat = wrapper .. "/feat-2ow"
+mkdirp(wrapper .. "/.jj/repo")
+mkdirp(wrapper .. "/main")
+mkdirp(feat .. "/.jj")
+write_file(feat .. "/.jj/repo", "../../.jj/repo\n")
+
+eq("the wrapper holds the project root", M.wrapper_root(feat), wrapper)
+eq("a branch workspace's .jj/repo is a file, so the walk passes it",
+  M.wrapper_root(feat .. "/.jj"), wrapper)
+eq("the wrapper is its own answer", M.wrapper_root(wrapper), wrapper)
+eq("a trailing slash names the same directory", M.wrapper_root(feat .. "/"), wrapper)
+eq("a directory that is not there is still under the wrapper",
+  M.wrapper_root(wrapper .. "/no-such-workspace"), wrapper)
+eq("a relative path names no wrapper", M.wrapper_root("feat-2ow"), nil)
+eq("a value that is not a path names no wrapper", M.wrapper_root(42), nil)
+
+-- jj's listing as the template prints it: name, a tab, the root, a newline.
+local function rows(...)
+  local lines = {}
+  for i, row in ipairs({ ... }) do lines[i] = row[1] .. "\t" .. row[2] end
+  return table.concat(lines, "\n") .. "\n"
+end
+
+local listed = rows({ "default", wrapper }, { "main", wrapper .. "/main" })
+local project = M.project_at(wrapper, listed)
+eq("the project root is the wrapper", project and project.root, wrapper)
+eq("the project name is the wrapper's basename", project and project.name, "iris")
+eq("the project main is the wrapper's main workspace",
+  project and project.main, wrapper .. "/main")
+
+-- jj's root is used as a path, so a trailing slash may not carry into it.
+eq("a trailing slash on jj's root is dropped",
+  (M.project_at(wrapper, rows({ "main", wrapper .. "/main/" })) or {}).main,
+  wrapper .. "/main")
+
+-- A plain colocated repo: .jj/repo is a directory at the root, the files are
+-- there too, and there is no main beside it. This flow cannot make a workspace
+-- in one, and saying so here is kinder than a picker that opens and then has
+-- nothing to offer.
+local plain = tmp .. "/plain"
+mkdirp(plain .. "/.jj/repo")
+eq("a plain colocated repo is still a wrapper root", M.wrapper_root(plain), plain)
+local colocated, colocated_reason = M.project_at(plain, rows({ "default", plain }))
+eq("a plain colocated repo is refused", colocated, nil)
+contains("the colocated refusal names main", colocated_reason, "main")
+
+-- A wrapper whose listing names no main row, and one whose row only starts
+-- with it: `maintenance` is another workspace, not this one.
+local no_main, no_main_reason =
+  M.project_at(wrapper, rows({ "default", wrapper }, { "trunk", wrapper .. "/trunk" }))
+eq("a wrapper with no main row is refused", no_main, nil)
+contains("that refusal names main", no_main_reason, "main")
+local near, near_reason =
+  M.project_at(wrapper, rows({ "maintenance", wrapper .. "/elsewhere" }))
+eq("a workspace only named like main is refused", near, nil)
+contains("the near-miss refusal names main", near_reason, "main")
+
+-- No .jj anywhere above: the walk answers nil, and project_for refuses before
+-- it asks jj anything -- which is why this half runs with no rex global here.
+local bare = tmp .. "/bare/inside"
+mkdirp(bare)
+eq("no .jj above a plain directory means no wrapper", M.wrapper_root(bare), nil)
+local none, none_reason = M.project_for(bare)
+eq("project_for refuses a directory in no wrapper", none, nil)
+contains("the refusal names .jj", none_reason, ".jj")
+
+os.execute("rm -rf " .. quote(tmp))
 
 -- What a tab is still running --------------------------------------------------
 --

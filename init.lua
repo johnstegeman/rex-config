@@ -20,60 +20,6 @@ function M.render_prompt(template, vars)
   end))
 end
 
--- `<project root>/.git`, as produced by `git rev-parse --path-format=absolute
--- --git-common-dir` (with or without a trailing slash): the project root is its
--- parent and the project name the basename of that root. The plain form of that
--- command prints a path relative to the worktree (".git"), which names no
--- project at all, so a relative input returns nil instead of empty strings --
--- callers must ask git for the absolute form and handle nil.
-function M.project_from_common_dir(common_dir)
-  if type(common_dir) ~= "string" then
-    return nil
-  end
-  local dir = common_dir:gsub("/+$", "")
-  if not dir:match("^/") then
-    return nil
-  end
-  local root = dir:match("^(.*)/[^/]+$")
-  if root == nil then
-    return nil
-  end
-  local name = root:match("([^/]+)$")
-  if name == nil then
-    return nil
-  end
-  return { root = root, name = name }
-end
-
--- Path of the main worktree from a decoded `wt list --format=json`.
--- Accepts schema 2 (items[].worktree.path + items[].worktree.main) and the
--- legacy flat shape ([].path + [].is_main); nil when neither flags a main.
-function M.main_worktree(list_json)
-  if type(list_json) ~= "table" then
-    return nil
-  end
-  local items = list_json.items or list_json
-  if type(items) ~= "table" then
-    return nil
-  end
-  for _, item in ipairs(items) do
-    if type(item) == "table" then
-      local path, is_main
-      if type(item.worktree) == "table" then
-        path, is_main = item.worktree.path, item.worktree.main
-      else
-        path, is_main = item.path, item.is_main
-      end
-      -- A literal true is what rex.json.decode gives for `"main": true`; the
-      -- string form is read the same way, because a producer that quoted the
-      -- flag would otherwise lose the main worktree and refuse the project.
-      if (is_main == true or is_main == "true") and type(path) == "string" then
-        return path
-      end
-    end
-  end
-  return nil
-end
 
 -- The session whose label is exactly the project's name. The label is the only
 -- key: a session called pmm-iris-2 belongs to something else, and adopting it
@@ -564,10 +510,9 @@ end
 -- template new-work.sh's done uses, and the read that names main below. It goes
 -- through the login shell, where jj lives, and it skips the working-copy
 -- snapshot for the reason the flow's own wait does: a plain read wants the
--- working-copy lock, which a background `jj workspace forget` hook can hold,
--- and a read that fails here falls back to worktrunk's answer -- the wrong one
--- in exactly the repo this fixes. The template's backslashes are escaped here
--- because they are jj's own, handed to it through the shell as written.
+-- working-copy lock, which a background `jj workspace forget` hook can hold.
+-- The template's backslashes are escaped here because they are jj's own, handed
+-- to it through the shell as written.
 local JJ_WORKSPACES = "jj --ignore-working-copy workspace list -T 'name ++ \"\\t\" ++ root ++ \"\\n\"'"
 
 -- The root of the workspace named exactly `main` in that listing, or nil when
@@ -587,68 +532,109 @@ local function main_workspace(listed)
   return nil
 end
 
--- The project a directory belongs to: its root and name from git's common
--- directory, and the main worktree from jj's `main` workspace -- or, when jj
--- names no such workspace, from worktrunk's own main flag. Returns nil and a
--- message naming the reason when the directory is not in a repository this can
--- use.
-function M.project_for(cwd)
-  local git, git_reason = run({ "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" })
-  if git == nil then
-    return nil, "git could not be run: " .. tostring(git_reason)
+-- Whether PATH is a directory, asked of io.open alone: a read of a directory
+-- fails, and that failure is the only answer io.open gives -- it opens one as
+-- happily as a file. A file always reads, even an empty one, so a failed read
+-- is the directory answer and a nil handle is simply not there.
+local function is_dir(path)
+  local handle = io.open(path, "r")
+  if handle == nil then
+    return false
   end
-  if git.code ~= 0 then
-    return nil, "not a git repository: " .. cwd
+  local first, reason = handle:read(1)
+  handle:close()
+  return first == nil and reason ~= nil
+end
+
+-- The wrapper a directory sits in: the nearest ancestor holding `.jj/repo` as
+-- a directory. This replaces a `git rev-parse --git-common-dir` read, because
+-- a wrapper cut to jj alone has no git to ask -- and the question it answered
+-- is one the filesystem still answers.
+--
+-- The directory form is what makes the walk work: a branch workspace, main
+-- included, has a `.jj/repo` of its own, but as a *file* holding the path of
+-- the store it borrows. So the walk passes every workspace and stops at the
+-- directory that holds them, which is also the directory gws adds to and the
+-- one whose basename is the project's name.
+function M.wrapper_root(cwd)
+  if type(cwd) ~= "string" then
+    return nil
+  end
+  -- A relative path names no project: every caller passes an absolute one, and
+  -- a walk up from here would answer about this process's directory instead.
+  local dir = cwd:gsub("/+$", "")
+  if not dir:match("^/") then
+    return nil
   end
 
-  -- Only the absolute form names a project: the plain one prints ".git", which
-  -- project_from_common_dir refuses rather than turn into empty strings.
-  local common_dir = (git.stdout or ""):gsub("%s+$", "")
-  local project = M.project_from_common_dir(common_dir)
-  if project == nil then
-    return nil, "could not resolve the project root of " .. cwd
+  -- `/` is its own last step: the pattern cannot shorten it, and the walk has
+  -- then looked at every ancestor there is.
+  while dir ~= "" and dir ~= "/" do
+    if is_dir(dir .. "/.jj/repo") then
+      return dir
+    end
+    local parent = dir:match("^(.*)/[^/]+$")
+    if parent == nil then
+      return nil
+    end
+    -- `/a`'s parent is the root itself, which the pattern gives as the empty
+    -- string: the last step is the one this cannot shorten.
+    dir = parent == "" and "/" or parent
   end
 
-  -- The main worktree is jj's workspace named `main`, and only that. worktrunk's
-  -- own flag can name the wrong worktree -- in a bare-rooted wrapper whose
-  -- worktrees are all detached (pi-rex) it calls a branch workspace main -- while
-  -- jj's workspace name is the convention every part of this flow already assumes
-  -- when it says "main". A repository jj does not manage, or one whose main
-  -- workspace has another name, has no such row and falls through to the flag.
-  local jj_listed = run_in_shell(JJ_WORKSPACES, project.root)
-  local main
-  if jj_listed ~= nil and jj_listed.code == 0 then
-    main = main_workspace(jj_listed.stdout)
+  if is_dir("/.jj/repo") then
+    return "/"
   end
+  return nil
+end
 
+-- The project a wrapper is, from the jj listing read inside it: the wrapper is
+-- the root, its basename the name, and the row jj calls `main` the main
+-- workspace.
+--
+-- A wrapper with no `main` row is refused here rather than looked for anywhere
+-- else. This flow cannot make a workspace without one, so a plain colocated
+-- repo -- jj's default workspace is the root itself, with no main beside it --
+-- is exactly that case, and being told so is kinder than a picker that opens
+-- and then has nothing to offer. It is also the case worktrunk's own main flag
+-- used to answer, wrongly: in a bare-rooted wrapper whose worktrees are all
+-- detached (pi-rex) it called a branch workspace main, and the audit then ran
+-- in somebody's feature branch.
+function M.project_at(wrapper, listed)
+  local name = type(wrapper) == "string" and wrapper:match("([^/]+)$")
+  if name == nil then
+    return nil, "could not resolve the project root of " .. tostring(wrapper)
+  end
+  local main = main_workspace(listed)
   if main == nil then
-    local listed, list_reason = run_in_shell("wt list --format=json", project.root)
-    if listed == nil or listed.code ~= 0 then
-      return nil, "worktrunk could not list worktrees for " .. project.root .. ": "
-        .. first_line(listed and listed.stderr or list_reason)
-    end
+    return nil, "the wrapper " .. wrapper .. " has no jj workspace named main"
+  end
+  return { root = wrapper, name = name, main = main }
+end
 
-    -- main_worktree reads the decoded document, not raw text: raw JSON is never a
-    -- table. rex.json.decode reports bad text by returning nil and a reason rather
-    -- than raising, so the value decides -- and what it is, when it is not an
-    -- object, is what the message names.
-    local decoded, decode_reason = rex.json.decode(listed.stdout or "")
-    if type(decoded) ~= "table" then
-      local why
-      if decode_reason ~= nil then
-        why = tostring(decode_reason)
-      else
-        why = "the listing decoded to a " .. type(decoded) .. ", not an object"
-      end
-      return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. why
-    end
-    main = M.main_worktree(decoded)
-    if main == nil then
-      return nil, "no main worktree found for " .. project.root
-    end
+-- The project a directory belongs to: the wrapper it sits in, that directory's
+-- name, and the `main` workspace beside it. Returns nil and a message naming
+-- the reason when the directory is not in a wrapper this flow can make a
+-- workspace in.
+function M.project_for(cwd)
+  local wrapper = M.wrapper_root(cwd)
+  if wrapper == nil then
+    return nil, "not in a jj wrapper: no .jj/repo directory above " .. tostring(cwd)
   end
 
-  return { root = project.root, name = project.name, main = main }
+  -- jj's own workspace list is the only source: its `main` row is the name
+  -- every part of this flow already assumes when it says "main". A listing that
+  -- cannot be read is a failed read, not an empty one, and saying which it was
+  -- is what keeps "jj is broken" from reading as "this project has no main".
+  local listed, reason = run_in_shell(JJ_WORKSPACES, wrapper)
+  if listed == nil then
+    return nil, "jj could not be run in " .. wrapper .. ": " .. tostring(reason)
+  end
+  if listed.code ~= 0 then
+    return nil, "could not list the jj workspaces of " .. wrapper .. ": "
+      .. first_line(listed.stderr)
+  end
+  return M.project_at(wrapper, listed.stdout)
 end
 
 -- bd's own way of saying a directory has no database. A failure that says

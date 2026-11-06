@@ -200,13 +200,56 @@ local rex_stub = fresh_rex()
 local M = dofile(here .. "/../init.lua")
 M.setup{}
 
--- The project every test uses: a worktrunk repository whose main worktree is
--- main/, with a beads database reachable from it.
+-- The project every test uses, on disk: project_for finds the wrapper by walking
+-- for `.jj/repo` as a directory, so the fixture is a real one -- a mktemp -d per
+-- run, removed with the file as setup_test.lua's is -- with main and the branch
+-- workspace beneath it.
+local function mktemp_dir()
+  local pipe = io.popen("mktemp -d 2>/dev/null")
+  if pipe == nil then return nil end
+  local path = pipe:read("l")
+  pipe:close()
+  if path == nil or path == "" then return nil end
+  return (path:gsub("/+$", ""))
+end
+
+-- One shell word, whatever the path holds, so a TMPDIR with a space in it is a
+-- directory rather than two arguments. Quoted here rather than through the
+-- module's own shell_quote, so the fixture does not lean on the code under test.
+local function quote(text) return "'" .. tostring(text):gsub("'", "'\\''") .. "'" end
+
+local function mkdirp(path)
+  os.execute("mkdir -p " .. quote(path))
+end
+
 local PROJECT = "pmm-iris"
-local ROOT = "/x/pmm-iris"
-local MAIN = "/x/pmm-iris/main"
+local TMP = assert(mktemp_dir(), "mktemp -d failed")
+local ROOT = TMP .. "/" .. PROJECT
+local MAIN = ROOT .. "/main"
 local BRANCH = "bug/58h"
+local WORKTREE = ROOT .. "/bug-58h"
 local BEAD = "pmm-iris-58h"
+mkdirp(ROOT .. "/.jj/repo")
+mkdirp(MAIN)
+mkdirp(WORKTREE)
+
+-- jj's workspace list, as project_for and the done flow read it: one name, one
+-- tab, the root, one newline per row.
+local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- jj's answer as that template prints it. A non-zero code is jj refusing -- a
+-- failed read rather than a listing without the row -- and its line is on stderr
+-- the way a real jj's is.
+local function jj_rows(stdout, code)
+  code = code or 0
+  return { ok = code == 0, code = code, stdout = code == 0 and stdout or "",
+    stderr = code == 0 and "" or stdout }
+end
+
+-- The fixture's rows: the wrapper's default workspace, main, and the branch
+-- workspace the tab is in.
+local JJ_ROWS = "default\t" .. ROOT .. "\nmain\t" .. MAIN
+  .. "\n" .. BRANCH .. "\t" .. WORKTREE .. "\n"
 
 -- What the picker hands back for a new branch on that bead.
 local function payload(overrides)
@@ -473,18 +516,9 @@ end
 -- whose stub already answers per block.
 local function done_stub(by_block)
   local stub = tab_stub(by_block)
-  -- The project is the fixture's, so project_for's two questions answer here as
-  -- they do in setup_test.lua.
-  stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pmm-iris/.git\n", stderr = "" }
-  stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "wt list", stderr = "" }
-  stub.json_replies = {
-    ["wt list"] = { items = { { worktree = { path = MAIN, main = true } } } },
-  }
-  stub.json.decode = function(text)
-    local value = stub.json_replies[text]
-    if value == nil then return nil, "rex.json.decode: text is not valid JSON" end
-    return value
-  end
+  -- The project is the fixture's, so project_for finds the wrapper and the main
+  -- workspace it holds, as it does in setup_test.lua.
+  stub.exec_replies[WORKSPACES] = jj_rows(JJ_ROWS)
   -- The float itself: one layer, recorded, because the argv it is opened with
   -- is the whole of what this action decides.
   stub.layers = {}
@@ -497,7 +531,7 @@ end
 
 do
   local stub = done_stub({
-    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:one"] = { foreground = { name = "fish", cwd = WORKTREE } },
     ["block:two"] = { foreground = { name = "node" } },
   })
   local ok = pcall(M.work_done,
@@ -506,7 +540,7 @@ do
   eq("the audit names the tab it will close, and what that tab is running",
     stub.layers[1].layout.block.options.command,
     { M.options.script, "done", "--main", MAIN, "--root", ROOT, "--project", PROJECT,
-      "--cwd", "/x/pmm-iris/bug-58h", "--session", "session:iris",
+      "--cwd", WORKTREE, "--session", "session:iris",
       "--window", "window:tab", "--running", "node" })
 end
 
@@ -515,7 +549,7 @@ end
 -- work.
 do
   local stub = done_stub({
-    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:one"] = { foreground = { name = "fish", cwd = WORKTREE } },
     ["block:two"] = function() error("no process") end,
   })
   local ok = pcall(M.work_done,
@@ -540,10 +574,10 @@ end
 -- here instead of answering plausibly.
 
 local REMOVE = "wt remove '/p/demo/feat-6c4' --foreground -y --format=json"
--- Read from the op log rather than the working copy: the background post-remove
--- hook is running `jj workspace forget` in the same repository, and a plain read
--- waits on the working-copy lock that hook holds.
-local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+-- The workspace read is WORKSPACES, defined with the project fixture above: it
+-- reads the op log rather than the working copy, because the background
+-- post-remove hook is running `jj workspace forget` in the same repository and a
+-- plain read waits on the working-copy lock that hook holds.
 local WORKTREES = "wt list --format=json"
 -- What the flow runs itself when the wait still finds the row: one `jj
 -- workspace forget` for the workspace, its name quoted like every other word
@@ -1537,6 +1571,10 @@ do
   eq("no revision carries no remote word either", command[7], M.options.agent)
   M.options.base = saved
 end
+
+-- The fixture wrapper goes with the file: a mktemp -d per run, removed like the
+-- shell tests' trap. TMP is this file's own, so nothing else is named.
+os.execute("rm -rf " .. quote(TMP))
 
 if fails > 0 then os.exit(1) end
 print("ok " .. count .. " assertions")
