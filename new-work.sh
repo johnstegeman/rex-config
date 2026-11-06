@@ -53,7 +53,7 @@ commands:
       cycle-agent, cycle-base and branch-field are what ctrl-a, ctrl-r and ctrl-b
       run, and branch-field prints nothing
   done --cwd PATH --main DIR --root PATH --project NAME --session ID
-       --window ID [--running NAME]... [--workspaces FILE] [--wt-json FILE]
+       --window ID [--running NAME]... [--workspaces FILE]
        [--diff FILE] [--own-status FILE] [--changes FILE]
        [--main-state FILE] [--bd-json FILE] [--base-bookmarks FILE]
        [--origin-head REF] [--no-fetch] [--dry-run]
@@ -69,7 +69,6 @@ commands:
         --running        a program still running in the tab; repeat for each
         --workspaces     a saved `jj workspace list -T` rendering, one
                          "name<TAB>root" row per line, instead of asking jj
-        --wt-json        a saved `wt list --format=json`, instead of worktrunk
         --diff           a saved `jj diff --summary` of the branch against its base
         --own-status     a saved `jj diff --summary` of the working copy
         --changes        a saved list of the change ids the branch holds
@@ -2271,64 +2270,32 @@ done_main_move() {
   fi
 }
 
-# The worktrunk worktree list as JSON: --wt-json when one is given, else
-# `wt list` asked from the main worktree, which is the worktree every wt call
-# uses. Reads `main` and `wt_json` from cmd_done, its only caller.
-done_wt_list() {
-  if [ -n "$wt_json" ]; then
-    cat "$wt_json" ||
-      die "done: could not read the worktree list from $wt_json"
-  else
-    ( cd "$main" && wt list --format=json ) ||
-      die "done: could not read the worktrees of $main"
-  fi
-}
-
-# The worktrunk worktree path that is exactly $1, or nothing.
-done_wt_path() {
-  done_wt_list |
-    jq -r --arg path "$1" '
-      (.items // [])
-      | map(.worktree.path // "")
-      | map(select(. == $path))
-      | .[0] // ""
-    '
-}
-
-# The worktrunk worktree that owns $1, or nothing: the longest listed path
-# that is $1 or a directory of it, compared as whole path segments as jj's
-# roots are.
-done_wt_owner() {
-  done_wt_list |
-    jq -r --arg want "$1" '
-      (.items // [])
-      | map(.worktree.path // "")
-      | map(select(. as $path | $want == $path or ($want | startswith($path + "/"))))
-      | sort_by(length)
-      | .[-1] // ""
-    '
-}
-
 # The workspace the pane is in, left in the caller's `name` and `root_path`, or
 # a refusal. Reads `cwd`, `main`, `root` and `workspaces` from cmd_done, its
-# only caller -- and `wt_json` through done_wt_path -- and answers in those two
-# variables rather than on stdout, because a refusal printed inside a command
-# substitution would be caught by the capture instead of reaching the screen.
+# only caller, and answers in those two variables rather than on stdout,
+# because a refusal printed inside a command substitution would be caught by
+# the capture instead of reaching the screen.
 #
 # Roots nest -- jj's default workspace is the wrapper itself, main is a
 # directory inside it, and a branch's workspace is another -- so the longest
 # listed root that owns cwd is the answer, compared as whole path segments so
 # that /p/demo/feat-6c41 is not read as /p/demo/feat-6c4.
+#
+# jj is the only list there is: the workspaces this flow removes are the ones
+# jws made and djo remove forgets, and both are jj's own record. There is no
+# second opinion to reconcile a row with, so a row is the answer and the only
+# refusal left is the directory no row owns.
 done_workspace() {
   local listed jj_main='' row_name row_path
-  local best_name='' best_root='' wt_path='' wt_owner=''
+  local best_name='' best_root=''
 
-  # jj's own answer to "which worktree is main" is read before anything is
-  # refused, because the protection below is built from it: worktrunk's `main`
-  # flag is not trusted. In a bare-rooted wrapper, where gws adds every
-  # workspace detached, worktrunk has been seen to flag a leftover and not the
-  # real main worktree -- and its flag is what arrives here as --main. jj names
-  # the row, so jj is asked, and its answer is the one that protects.
+  # jj's own answer to "which workspace is main" is read before anything is
+  # refused, because the protection below is built from it. --main is the
+  # caller's answer -- Rex's reading of which project this pane belongs to --
+  # and a run cannot tell which of the two answers it would be acting in, so
+  # the two disagreeing is refused rather than resolved. A repo with no `main`
+  # row -- a main workspace under another name -- has one answer only, and
+  # --main is it.
   if [ -n "$workspaces" ]; then
     listed=$(cat "$workspaces") ||
       die "done: could not read the workspace list from $workspaces"
@@ -2352,8 +2319,7 @@ done_workspace() {
   # Two answers that disagree about which worktree is main are refused rather
   # than resolved, before the fetch and before anything is moved or removed:
   # a run cannot tell which of the two it would be acting in, so no version of
-  # going ahead is safe. A repo with no `main` row -- a main workspace under
-  # another name -- has one answer only, and --main is it.
+  # going ahead is safe.
   if [ -n "$jj_main" ] && [ "$jj_main" != "$main" ]; then
     done_refuse "can't tear down $cwd" \
       "  jj says the main workspace is $jj_main, --main says $main: the two answers disagree about which worktree is main, so nothing was done"
@@ -2376,8 +2342,8 @@ done_workspace() {
     # The wrapper is jj's default workspace -- the directory main and the
     # branch workspaces sit in -- and it is refused above by name. Left in the
     # scan it would claim every directory under the wrapper that no other
-    # workspace owns, and read one of those as "a jj row with no worktree" when
-    # it is not a workspace at all.
+    # workspace owns, and read one of those as a workspace the flow could
+    # remove when it is not a workspace at all.
     [ "$row_path" != "$root" ] || continue
     case $cwd in
       "$row_path" | "$row_path"/*)
@@ -2390,25 +2356,8 @@ done_workspace() {
   done <<<"$listed"
 
   if [ -z "$best_root" ]; then
-    # A worktree jj has no row for is the other half of the same disagreement:
-    # worktrunk would be asked to remove a path jj does not believe is a
-    # workspace, so it is refused, naming the worktree and jj's silence both.
-    wt_owner=$(done_wt_owner "$cwd") || exit $?
-    if [ -n "$wt_owner" ]; then
-      done_refuse "can't tear down $wt_owner" \
-        "  worktrunk has a worktree at $wt_owner, but jj lists no workspace there"
-    fi
     done_refuse "can't tear down $cwd" \
       "  $cwd is not inside a jj workspace this wrapper knows about"
-  fi
-
-  # The two halves have to agree before anything is removed: a jj row with no
-  # worktree, or a worktree with no row, is the state that is hard to unpick --
-  # and the one a person cannot repair from the float.
-  wt_path=$(done_wt_path "$best_root") || exit $?
-  if [ -z "$wt_path" ]; then
-    done_refuse "can't tear down $best_name" \
-      "  jj lists this workspace at $best_root, but worktrunk has no worktree there"
   fi
 
   name=$best_name
@@ -2430,7 +2379,7 @@ cmd_done() {
   # blockers, the programs still running in the tab, main's fast-forward and the
   # hand-back. They are parsed here so a missing value is refused as a usage
   # error now rather than surfacing as an empty answer later.
-  local workspaces='' wt_json='' diff='' own_status=''
+  local workspaces='' diff='' own_status=''
   local changes='' main_state=''
   local bd_json='' bookmarks='' origin_head='' running=''
   local no_fetch=0 dry_run=0
@@ -2489,11 +2438,6 @@ cmd_done() {
       --workspaces)
         [ $# -ge 2 ] || usage_error 'done: --workspaces needs a file'
         workspaces=$2
-        shift 2
-        ;;
-      --wt-json)
-        [ $# -ge 2 ] || usage_error 'done: --wt-json needs a file'
-        wt_json=$2
         shift 2
         ;;
       --diff)
@@ -2567,17 +2511,17 @@ cmd_done() {
   while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root=${root%/}; done
 
   # Every payload this command reads is JSON, read through jq like the rest of
-  # this file's, and worktrunk is the other tool that answers -- unless a saved
-  # answer stands in for it, which is the seam a test or a dry run uses.
+  # this file's. jj is the tool that answers for the workspace listing, unless
+  # --workspaces stands in for it, which is the seam a test or a dry run uses.
   need jq
-  [ -n "$wt_json" ] || need wt
 
-  # jj is read from --cwd and worktrunk from --main, unless a saved answer
-  # stands in for one of them, so a directory that is not there is refused here
-  # by name: left to the `cd` in the subshell that reads it, the failure reads
-  # as a line number in this script rather than as a place that does not exist.
+  # jj is read from --cwd, unless a saved listing stands in for it, so a
+  # directory that is not there is refused here by name: left to the `cd` in
+  # the subshell that reads it, the failure reads as a line number in this
+  # script rather than as a place that does not exist. --main needs no guard of
+  # its own any more: the fetch is the first thing that enters it, and names a
+  # place it cannot enter itself.
   [ -n "$workspaces" ] || [ -d "$cwd" ] || die "done: no such directory: $cwd"
-  [ -n "$wt_json" ] || [ -d "$main" ] || die "done: no such directory: $main"
   done_workspace
 
   # The fetch comes before every comparison, because each one below is about what
@@ -2644,7 +2588,7 @@ cmd_done() {
   fi
 
   # A program still running in the tab is the next question: it is the one
-  # blocker the person can clear without touching jj or worktrunk, so it
+  # blocker the person can clear without touching jj or djo, so it
   # belongs on the same screen rather than on one of its own. The names are
   # already one comma-separated list, in the order the tab listed them.
   [ -z "$running" ] || done_blocker "  still running in this tab: $running"
@@ -2663,12 +2607,12 @@ cmd_done() {
     done_stop
   fi
 
-  # Nothing is in the way, so the removal goes back to Rex: worktrunk's steps,
-  # the hook and the two verifications are the tab's work, and what this script
-  # has left to say is which workspace it means. The five keys are the whole
-  # contract -- `workspace` is the name the tab carries and `path` the worktree
-  # worktrunk removes -- and jq builds them so a path with a quote or a space in
-  # it cannot break the hand-back.
+  # Nothing is in the way, so the removal goes back to Rex: dojjo's remove, the
+  # hook and the two verifications are the tab's work, and what this script has
+  # left to say is which workspace it means. The five keys are the whole
+  # contract -- `workspace` is the name the tab carries and `path` the directory
+  # the removal takes away -- and jq builds them so a path with a quote or a
+  # space in it cannot break the hand-back.
   local payload
   payload=$(jq -cn \
     --arg project "$project" --arg root "$root" --arg main "$main" \
