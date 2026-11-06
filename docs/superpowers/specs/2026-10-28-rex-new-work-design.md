@@ -1,7 +1,11 @@
 # rex-config: `ctrl+space>n` — start new work from a bead
 
 **Date:** 2026-10-28
-**Status:** design, approved in conversation
+**Status:** design, approved in conversation. **Historical:** the tooling this
+document names has moved twice since — worktrunk (`wt`) gave way to jj workspaces
+(`2026-11-03-rex-jj-workspaces-design.md`) and then to `jws`/dojjo
+(`2026-11-06-dojjo-workspace-cut-design.md`). Every `wt` here is what the flow
+used *then*; read the later two for what it does now.
 **Owner:** John Stegeman
 
 ## Intent

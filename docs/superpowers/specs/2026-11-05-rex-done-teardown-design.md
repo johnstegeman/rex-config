@@ -1,21 +1,26 @@
 # rex-config: "I'm done" — one key removes the tab, the worktree, the branch and the jj workspace
 
 **Date:** 2026-11-05
-**Status:** design, approved in conversation
+**Status:** design, approved in conversation. **Superseded for the workspace
+tool** by `docs/superpowers/specs/2026-11-06-dojjo-workspace-cut-design.md`:
+the removal is `djo remove <workspace> -y` (not `wt remove`), and the
+kept-branch report comes from jj (not worktrunk's `branch_outcome`). Everything
+here that is not about those two answers still stands.
 **Owner:** John Stegeman
 **Bead:** `rex-config-6c4`
 
 ## Intent
 
-Today, finishing work means typing several different things: `wt remove` for the
-worktree and branch, `jj workspace forget` for the workspace row (which is not
-run today at all — `main` has no `.config/wt.toml`), and closing the Rex tab by
-hand. The ask is one action that does all three, and nothing typed.
+Finishing work used to mean typing several different things: `wt remove` for the
+worktree and branch — `djo remove <branch> -y` since the 2026-11-06 cut —
+`jj workspace forget` for the workspace row (which was not run at all — `main`
+had no `.config/wt.toml`), and closing the Rex tab by hand. The ask is one action
+that does all three, and nothing typed.
 
 This is the counterpart to `ctrl+space>n` (`2026-10-28-rex-new-work-design.md`,
 `2026-11-03-rex-jj-workspaces-design.md`): new work is created by one key, so
 work is torn down by one key. The same three units are involved in reverse —
-the jj workspace, the git worktree and branch, and the Rex tab inside the
+the jj workspace row, its directory and bookmark, and the Rex tab inside the
 project's session.
 
 The second half of the ask is that the key leaves the repository ready for the
@@ -43,8 +48,8 @@ and "unmerged" means content rather than ancestry.
 ## Goals
 
 - One action, bound to a key and present in the "New work" category, that tears
-  down the workspace the focused pane is in: the tab, the git worktree, the
-  branch, the jj workspace row.
+  down the workspace the focused pane is in: the tab, the workspace's directory,
+  its bookmark, the jj workspace row.
 - The safety is the feature: when anything would be lost or is still running,
   the flow **refuses**, on a screen that names what is blocking. It removes
   nothing in that case.
@@ -59,8 +64,11 @@ and "unmerged" means content rather than ancestry.
 - **`main` is left ready for the next branch**: when — and only when — `main`'s
   working copy is provably empty and `main` is behind `main@origin`, the flow
   moves the `main` workspace forward onto `main@origin`, by Step 8's method.
-- `main` gets the `post-remove` hook it is missing, so `wt remove` forgets the
-  jj workspace by itself, in this repo as it already does in a `ginit`'d one.
+- `main` gets the hook config it is missing, so a new workspace starts the way
+  every other repo's does. **The seeding is the runbook's job since the
+  2026-11-06 cut**, which rewrote every worktrunk-shaped hook table as a
+  `[hooks.post-start]` one and deleted the forget hook — `djo remove` forgets
+  the workspace itself, so there is nothing left for a hook to do.
 - The clean path is quiet: no confirmation, no choices. The tab disappearing is
   the confirmation.
 - Everything above is testable from `bash test/run.sh`, no pty.
@@ -80,15 +88,17 @@ and "unmerged" means content rather than ancestry.
   moving `main` forward, which is the exception named below and nothing more.
 - **Moving any workspace other than `main`.** Every other workspace is a report,
   not a target — Step 8's rule, kept.
-- **Forcing.** No `-f`, no `-D`, no `--reap`. The audit already refused the
-  situations those flags exist for. No `--no-hooks` either, but for the opposite
-  reason: the hook is the step that forgets the jj workspace, so skipping it
-  would leave half the teardown undone.
-- **Reaping processes.** Killing dev servers is `wt --reap`'s experimental job,
-  and it kills things rex did not start.
+- **Forcing.** No `-f`, no `-D`, no `--reap` — worktrunk's flags, and the flow
+  runs no worktrunk now (history). The audit already refused the situations they
+  exist for. `djo remove` is given `-y` and nothing else: no `--keep-bookmark`,
+  because the branch goes with the workspace it was named for, and no
+  `--keep-revision` either.
+- **Reaping processes.** Killing dev servers was `wt --reap`'s experimental job
+  (history: nothing in the flow reaps now), and it kills things rex did not
+  start.
 - **Merging, pushing, rebasing, or opening a PR.** The merge is the person's, on
   the forge. This flow never pushes.
-- **Feeding the rest of the repository's ginit seed.** `main` also lacks
+- **Feeding the rest of the repository's seed.** `main` also lacks
   `.worktreeinclude` and the `post-start` `copy-ignored` hook. Noticed while
   looking, deliberately left out of this change (see *Edge cases*).
 - **Unclaiming or commenting the bead.** See *The bead*.
@@ -115,11 +125,11 @@ and "unmerged" means content rather than ancestry.
 
 ## Constraints
 
-- **Rex runs actions with its own PATH** (`/usr/bin:/bin:…`), while `wt`, `jj`,
+- **Rex runs actions with its own PATH** (`/usr/bin:/bin:…`), while `djo`, `jj`,
   `bd` and `fish` live on the login shell's PATH. Everything this flow runs goes
   through the login shell, as the new-work flow already does.
 - **The pane's shell lives in the directory being removed.** Its cwd is the
-  workspace root; `wt remove` unlinks it out from under that shell.
+  workspace root; `djo remove` deletes it out from under that shell.
 - **Closing a window kills every block in it**, including the block that asked
   for the close. Nothing may follow a close, and the close must be the last act
   of the process that issues it — or it must be issued by somebody who outlives
@@ -128,24 +138,31 @@ and "unmerged" means content rather than ancestry.
 - **A fetch needs the network and a credential-free path.** The pane is a
   terminal nobody can type into, so a credential prompt must not hang there:
   `GIT_TERMINAL_PROMPT=0`, and the fetch bounded by `timeout`/`gtimeout` at 30
-  seconds when either is installed — the discipline `gws` already uses.
-- **`wt` post-* hooks run in the background** with output logged, so a removal
-  that succeeds at the git level can still leave the jj workspace row behind,
-  invisibly. `wt remove --foreground` blocks the *removal*, not the hook — only
-  `wt hook <type> --foreground` runs a hook inline — so the row is something the
-  verification *waits for* rather than something it can trust.
-- **`wt remove` deletes the branch only when `wt` itself judges it merged**, and
-  reports what it did as `branch_outcome` in its `--format=json` reply
-  (`deleted`, `retained_unmerged`, `retained_checked_out`, …).
-- **`wt` reads the project hooks from `main`** — `wt hook show` names
-  `main/.config/wt.toml`. A hook seeded anywhere else does nothing.
+  seconds when either is installed — the discipline `jws` already uses.
+- **dojjo's remove is synchronous and forgets the workspace itself.** `djo
+  remove <name> -y` deletes the directory, forgets the row and deletes the
+  bookmark in one command, and it has no merged check to second-guess. The row is
+  still *verified* rather than believed, because an exit code only says dojjo
+  thought it had finished; a row left behind is forgotten by the flow itself,
+  once, before it is reported.
+- **`djo remove` deletes the bookmark unconditionally.** (History: worktrunk
+  deleted a branch only when it judged it merged, and reported `branch_outcome`
+  in its `--format=json` reply.) So a bookmark that still resolves after the
+  removal is the only "kept" case this flow has, and the audit's unmerged-changes
+  refusal is the single thing between unmerged work and `djo remove`.
+- **dojjo reads the project hooks from the workspace** —
+  `<workspace>/.config/wt.toml`, which is the file `main` carries into every new
+  workspace. A hook seeded anywhere else does nothing.
 - **Merged means content, not ancestry.** After a squash or rebase merge — the
   normal forge flow, and the one this repo uses — a branch's changes are not
   ancestors of `main@origin` even though the work is fully merged. Only a
-  content comparison answers "is this merged?" after a squash.
+  content comparison answers "is this merged?" after a squash — and nothing else
+  answers it for you: dojjo has no merged check to defer to.
 - **Worktree names and branch names differ in shape.** The branch and the jj
-  workspace are both named after the plan (`feat/6c4`); the directory is
-  worktrunk's sanitised form (`feat-6c4`). The tab is labelled with the branch.
+  workspace are both named after the plan (`feat/6c4`); the directory is that
+  name with every `/` replaced by `-` (`feat-6c4`) — the form worktrunk's
+  template produced and `jws` still produces. The tab is labelled with the
+  branch.
 - **jj workspaces share one repository.** The workspace's commits are already in
   the shared object store; removing the workspace loses the *row*, the
   *directory*, and the *finding*, not the commits.
@@ -160,11 +177,16 @@ and "unmerged" means content rather than ancestry.
 
 - The screen **refuses and says what is blocking**; it does not offer a choice.
 - The flow **stays strictly on the pane it was invoked from**; no stale sweep.
-- The `post-remove` hook is **seeded by this change**.
+- The `post-remove` hook was to be **seeded by this change**; the 2026-11-06 cut
+  deleted it instead — `djo remove` forgets the workspace itself — and what the
+  seeding step leaves behind is the `[hooks.post-start]` seed. See *The
+  `[hooks.post-start]` seed, and no forget hook at all*.
 - The flow **fetches automatically**, and **keeps `main` up to date** if it can.
-- **A retained branch is a failure, not silence** (from the builder check): the
-  flow's whole promise is one complete teardown, so a branch worktrunk declines
-  to delete is reported with the one command that finishes it.
+- **A kept bookmark is a failure, not silence** (from the builder check): the
+  flow's whole promise is one complete teardown, so a bookmark that survives the
+  removal is reported with the one command that finishes it —
+  `jj bookmark delete <name>`. (History: the branch worktrunk declined to delete
+  was reported with `wt remove -D`.)
 
 ## How it works
 
@@ -176,12 +198,12 @@ and "unmerged" means content rather than ancestry.
 | action `work_done_go` | `init.lua` (`M.setup`) | new action with declared args: the hand-back target that removes and verifies |
 | the flow's guts | `init.lua` | `M.work_done`, `M.work_done_go`, `M.tab_processes` — beside `M.work_new`/`work_new_go` |
 | the audit, the refresh and the screen | `new-work.sh` | a `done` subcommand with fixture seams and a `--dry-run` hand-back |
-| project hooks | `main/.config/wt.toml` | **new file**: the `post-remove` hook, committed on `main` |
+| project hooks | `main/.config/wt.toml` | the `[hooks.post-start]` seed when `main` has none — by the 2026-11-06 cut this is the runbook's file, not this plan's |
 | keybinding | `README.md` | one `rex.bind` line beside `ctrl+space>n`, and a flow section |
 | tests | `test/done_test.sh`, `test/action_test.lua`, `test/setup_test.lua` | the refusal cases, the clean hand-back, the removal sequence |
 
 Nothing else moves. `pick`, the composer, `bases`, `branch-default`, the payload
-of the new-work flow, `gws`, and the finishing skill are untouched.
+of the new-work flow, `jws`, and the finishing skill are untouched.
 
 ### The shape: picker-shaped, like `work_new`
 
@@ -192,7 +214,7 @@ is the pattern this repo tests well:
 key  →  work_done                 (no args; finds the pane, opens a float)
           new-work.sh done        (process check, fetch, audit, refresh, decide)
             →  rex do work_done_go --args '{"project":…,"root":…,"main":…,"workspace":…,"path":…}'
-                 work_done_go     (wt remove, verify, report)
+                 work_done_go     (djo remove, verify, report)
             →  rex window close -s <session> <window>   (the script's last act)
 ```
 
@@ -204,21 +226,21 @@ programs the tab is still running (`M.tab_processes`), and opens a float running
 cwd> --session <id> --window <id>` plus one `--running <name>` per program. The
 float is a layer in the current window, `bounds` as the picker uses them.
 
-The `main` in that hand-back is resolved by jj, not by worktrunk: `M.project_for`
-takes the wrapper root and the project name from git's common directory and the
-main worktree from **jj's own workspace named `main`** — `jj workspace list -T
-'name ++ "\t" ++ root ++ "\n"'`, read through the login shell, because jj lives
-on the login PATH and Rex's PATH does not have it. worktrunk's `main` flag in
-`wt list --format=json` is the fallback, for a repository with no workspace called
-`main` (or no jj at all), and it is only the fallback because it can be wrong: in
-a bare-rooted wrapper whose worktrees are all detached (`pi-rex`) worktrunk flags
-a *branch* workspace as main, which put the picker's float, `bd` and the
-teardown's two `main` moves in the wrong directory. jj's workspace name is what
-the rest of this flow already means by "main": `ginit` creates it, `gws` adds
-workspaces beside it, and the refusals below compare against it. When neither
-source names a main worktree the project is refused as before, and a jj read that
-fails falls back rather than failing the project — the flag is the floor, not the
-answer.
+The `main` in that hand-back is resolved by jj, and by nothing else: `M.project_for`
+takes the wrapper root from the nearest ancestor holding `.jj/repo` **as a
+directory** (history: it used to be git's common directory), the project name
+from that directory's basename, and the main worktree from **jj's own workspace
+named `main`** — `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`, read
+through the login shell, because jj lives on the login PATH and Rex's PATH does
+not have it. There is no fallback any more: a wrapper with no `main` row is
+refused by name, which is kinder than the flag that used to answer instead and
+could answer wrongly — in a bare-rooted wrapper whose worktrees are all detached
+(`pi-rex`) worktrunk flagged a *branch* workspace as main, which put the picker's
+float, `bd` and the teardown's two `main` moves in the wrong directory. jj's
+workspace name is what the rest of this flow already means by "main": `jinit`
+and `jclone` create it, `jws` adds workspaces beside it, and the refusals below
+compare against it. (History: worktrunk's `main` flag in `wt list --format=json`
+was the fallback, and a wrapper with no jj at all was answered from it.)
 
 The window and session ids come from the pane, not from a label lookup: `ctx`
 already carries `session_id` and `block_id` (that is how `block_cwd` works), so
@@ -226,19 +248,19 @@ the tab being torn down is the tab the person is looking at. This is the one
 place where the flow is *simpler* than `work_new_go`, which has to find its tab
 by label because the tab it wants does not exist yet.
 
-Rex facts stay in Rex, jj and git facts stay in bash. The one crossover is
+Rex facts stay in Rex, jj facts stay in bash. The one crossover is
 "what is still running", which only Rex can answer, so `work_done` reads it and
 passes it in as data.
 
 ### Finding the workspace, and the refusals that come before any question
 
-The script is handed `--cwd`, `--main` and `--root`. `--main` is worktrunk's
-answer to "which worktree is main", and it is not trusted on its own: in a
-bare-rooted wrapper every worktree is detached at the same commit, so worktrunk
-has flagged a leftover branch workspace as `main` and the real `main` worktree as
-not-main. jj names its own main row, and that is the answer the protection is
-built from — with `--main` kept as well, so the refusal below can never be the
-thing that lets a teardown through by being wrong on its own.
+The script is handed `--cwd`, `--main` and `--root`. `--main` is Rex's own answer
+to "which directory is this project's main worktree" — `M.project_for`'s read of
+jj's `main` row — and it is not trusted on its own: the two readings of the same
+fact are compared, and a disagreement is refused rather than resolved. jj names
+its own main row, and that is the answer the protection is built from — with
+`--main` kept as well, so the refusal below can never be the thing that lets a
+teardown through by being wrong on its own.
 
 1. **Two answers to compare, before any refusal, from one read**:
    `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`, run in `--cwd`. The
@@ -270,14 +292,17 @@ thing that lets a teardown through by being wrong on its own.
 5. **No row matches** → refuse: this pane is not inside a jj workspace the
    wrapper knows about (a stale directory, or a plain git worktree left over from
    before the conversion). Nothing is guessed.
-6. `wt list --format=json` must show a worktree at that root. If it does not,
-   the directories have drifted apart — the jj row exists and the git worktree
-   does not, or the reverse — and the screen says so instead of removing one
-   half.
 
-The workspace **name** is what the tab is called; the workspace **root path** is
-what `wt remove` is given, because a path cannot be a branch name and cannot
-collide with one.
+Rule 6 of this design — `wt list --format=json` had to show a worktree at that
+root, and the two listings disagreeing was a refusal — is **deleted**: `jj
+workspace list` is now the only listing, dojjo's remove takes the directory with
+the row, and nothing can drift. (History: the rule existed because two tools each
+held half of the truth.)
+
+The workspace **name** is what the tab is called and what `djo remove` is given,
+because dojjo takes the workspace and not a path; the workspace **root path** is
+what the flow checks is gone afterwards — the directory, and the bookmark by
+name.
 
 ### The audit: the fetch, then four facts and a bead
 
@@ -290,7 +315,7 @@ not `main` would otherwise refuse forever.
 **The fetch comes first**, because every comparison below is a comparison
 against `main@origin` and a stale `main@origin` makes the answer wrong in the
 direction that matters: it reports merged work as unmerged. One `jj git fetch`,
-bounded by `timeout`/`gtimeout` at 30 seconds when installed (the `gws`
+bounded by `timeout`/`gtimeout` at 30 seconds when installed (the `jws`
 discipline, moved intact), with `GIT_TERMINAL_PROMPT=0` exported so a credential
 prompt cannot hang the float. A failed fetch is a **refusal**, naming that the
 fetch failed and that the comparison could not be made — never a silently stale
@@ -301,10 +326,10 @@ Then, all read-only, all from inside the workspace:
 - **Changes not merged into the base** — *content*, not ancestry:
   `jj diff --summary -r '<base>..@'` is non-empty. Reachability would refuse
   forever after a squash or rebase merge, which is this repo's normal flow; the
-  content diff is the same rule worktrunk applies when it decides whether a
-  branch is merged. The refusal lists the affected **paths** and the number of
-  changes in the range, because "3 changes touching new-work.sh, init.lua" is
-  what the person can act on.
+  content diff is the rule this flow applies, and it no longer defers to a tool's
+  own merged check — dojjo has none. The refusal lists the affected **paths** and
+  the number of changes in the range, because "3 changes touching new-work.sh,
+  init.lua" is what the person can act on.
 - **A working copy with changes of its own** — `jj diff --summary -r @` is
   non-empty. This is what `dirty=yes` means in `jj-finish-audit state`'s
   vocabulary, and it is the workspace's own commit; the refusal says how many
@@ -418,49 +443,45 @@ confirmation: with nothing at risk, the tab going away is the feedback.
 
 `work_done_go` removes and reports; it does not close anything.
 
-1. **`wt remove <path> --foreground -y --format=json`**, run through the login
-   shell with `cwd = main`. `--foreground` so the removal itself blocks and its
-   `branch_outcome` is final — it does not wait for the `post-remove` hook, which
-   worktrunk runs in the background; `-y` because nobody is there to approve a
-   prompt; `--format=json` so the reply can be read rather than guessed. No `-f`,
-   `-D`, no `--reap`, no `--no-hooks`: if worktrunk refuses on its own terms,
-   that refusal is the report.
-2. **The branch really went.** The reply is an array — one entry per removal,
-   and this flow removes one path — so the entry's `branch_outcome` is what is
-   read. `deleted` is complete. `not_attempted` with no `branch` is complete
-   too, and it is the *normal* answer here: a jj wrapper's workspaces are
-   detached (`gws` adds them with `jj workspace add`, and nothing attaches a
-   branch), so worktrunk has nothing to delete and leaves nothing behind.
-   Anything else — `retained_unmerged`, `retained_checked_out`,
-   `retained_raced`, `retained_failed`, a field that is not there, or a value
-   this flow does not know — is a **failure**, reported with the branch's name
-   and `wt remove -D <branch>` as the command that would finish it: the
-   worktree's path is gone by then, so the branch is the only thing left to
-   name. `-D` is not run by the flow: if worktrunk and the audit disagree about
-   merged, the person decides. A bookmark or a branch ref that survives the
-   removal is not this case at all: Step 8 owns bookmarks, and the flow neither
-   deletes nor reports one.
-3. **Verify the store, rather than trust the hook.** `jj workspace list` must no
-   longer list the name — read with `--ignore-working-copy`, because the
-   background hook is forgetting the workspace in this same repository and a
-   plain read would wait on the working-copy lock that hook holds — and
-   `wt list --format=json` must no longer show the path. This is the check the
-   bead's comment asked for, because the seeded hook ends in `|| true` and a
-   background hook can fail silently. The hook is the **fast path** and not a
-   guarantee: worktrunk cannot expand `jj workspace forget {{ branch }}` for a
-   detached worktree — which is all `jj workspace add`, and so `gws`, creates,
-   since there is no `branch` variable there. Because it runs after the removal
-   has returned, the row is therefore first given a bounded moment (up to ten
-   reads over about two seconds), so a row a healthy hook clears a moment later
-   costs nothing; and a row still there at the end of that is forgotten by the
-   flow itself — `jj workspace forget '<workspace>'`, run through the login
-   shell with `cwd = main` — after which the listing is read once more. A row
-   left behind for a directory the flow has just removed is the teardown it
-   started, finished; only a row that survives the flow's own forget is
-   reported, with `jj workspace forget '<name>'` as the command that would clear
-   it, and a forget that fails is judged by the row that follow it rather than by
-   its own exit status. The hook doing its job runs no extra command.
-4. **Return.** Success returns nothing; every failure returns its line, which
+1. **`djo remove <workspace> -y`**, run through the login shell with `cwd =
+   main`. `-y` because nobody is there to approve a prompt, and no
+   `--keep-bookmark` because the branch is merged and goes with the workspace it
+   was named for. No `-f`, `-D` or `--reap` — those were worktrunk's and none of
+   them has a counterpart here — and no `--no-hooks` either: dojjo runs its own
+   remove hooks, and a refusal of its own is the report. In one command dojjo
+   deletes the directory, forgets the workspace and deletes the bookmark, and it
+   has no merged check to second-guess, so the reads below are the only audit
+   this teardown gets.
+2. **The bookmark really went.** dojjo deletes the bookmark with the workspace,
+   so one that still resolves is the **only** "kept" case this flow has, and it
+   is a failure: reported with `jj bookmark delete '<name>'` as the command that
+   finishes the job. The read is a jj revset that names the bookmark exactly —
+   `jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"<name>")' -T
+   'commit_id ++ "\n"'` — and not a `jj bookmark list`, because deleting a
+   bookmark a remote tracks only tombstones it: the listing goes on printing the
+   name, so it cannot tell a deleted bookmark from a kept one. A revset can,
+   because it resolves to a commit only while the bookmark is really there. The
+   delete is not run by the flow: the one command that would finish the job is
+   named, and the person decides.
+3. **Verify the store, rather than trust the exit code.** `jj workspace list`
+   must no longer list the name — read with `--ignore-working-copy`, because a
+   post-start hook dojjo started may still hold the working-copy lock. A row
+   still there is given a bounded moment (up to ten reads over about two
+   seconds), and a row that survives that is forgotten by the flow itself —
+   `jj workspace forget '<workspace>'`, run through the login shell with
+   `cwd = main` — after which the listing is read once more. A row left behind
+   for a directory the flow has just removed is the teardown it started,
+   finished; only a row that survives the flow's own forget is reported, with
+   `jj workspace forget '<name>'` as the command that would clear it, and a
+   forget that fails is judged by the row that follows it rather than by its own
+   exit status. This is history's check, kept: the seeded forget hook ended in
+   `|| true`, so the row was never something to take on trust.
+4. **The directory itself.** `test ! -d <path>` — one argv, so a path with a
+   space or a quote in it is never shell text — and a directory still there is
+   reported with `djo list -f` as the command that says what dojjo thinks it
+   removed. There is no `wt list` to read any more; the directory is the second
+   half of "the workspace is gone".
+5. **Return.** Success returns nothing; every failure returns its line, which
    Rex prints on the float's terminal and which makes `rex do` exit non-zero.
 
 Then the **script** finishes: it prints any line the hand-back produced and holds
@@ -476,41 +497,46 @@ is a block in that window, so the process that asks for the close dies with it;
 the script is that process here, and it has nothing left to do. This is why
 `work_done_go` must not close: it runs under `rex do`, a child of that block, and
 closing there would kill the caller in the middle of the removal. The `cd` first
-is not cosmetic — the script's own cwd is the directory `wt remove` just deleted,
+is not cosmetic — the script's own cwd is the directory `djo remove` just deleted,
 and a process with a deleted cwd may fail to exec.
 
 This also removes the need for a second float: every failure happens while the
 first one is still on screen.
 
-### Seeding the `post-remove` hook
+### The `[hooks.post-start]` seed, and no forget hook at all
 
-`main` has no `.config/wt.toml` today, so `wt remove` in this repo leaves the
-workspace row behind — which is the `jj workspace forget` the person types by
-hand now. The file is created in `main` and committed on `main`, matching
-`ginit`'s seed exactly:
+dojjo reads hooks from a `[hooks]` table only — a `[hooks.post-start]` table,
+never a top-level `[post-start]`, which dojjo parses and silently ignores. That
+matters here because this repo's `main` had no `.config/wt.toml` at all, and a
+file seeded in the wrong shape is worse than no file: hooks that vanish without a
+message are worse than hooks that fail. The file keeps its name —
+`main/.config/wt.toml`, committed on `main` — so no repo is left with a second
+file that dojjo half-reads.
+
+What the seed is now:
 
 ```toml
-[post-remove]
-jj = "jj workspace list -T 'name ++ \"|\" ++ root ++ \"\\n\"' | awk -F'|' -v p='{{ worktree_path }}' '$2==p{print $1}' | xargs jj workspace forget 2>/dev/null || true"
+[hooks.post-start]
+copy = "djo copy-ignored --from main"
 ```
 
-Identical to `ginit.fish` on purpose: a repo seeded two ways is a repo where the
-next surprise is a difference nobody remembers choosing. The seed resolves the
-workspace **by the path worktrunk removed**, because the obvious line —
-`jj workspace forget {{ branch }}` — does not work here: there is no `branch`
-variable for a detached worktree, so worktrunk cannot expand it
-(`Failed to expand project:jj: undefined variable branch @ line 1`) and the hook
-never runs at all. The trailing `|| true` is kept from the seed, and is exactly
-why step 3 of the clean path verifies the row is gone instead of assuming it.
+`djo copy-ignored` copies every ignored path — `node_modules` as well as `.env` —
+because dojjo has no include filter and does not read `.worktreeinclude`; the
+owner accepted that trade. A repo that wants a worktree-local `.beads/redirect`
+adds its own hook, pointing at `{{ primary_workspace_path }}` (under dojjo
+`repo_path` is the *new* workspace). Most wrapper-layout repos need no redirect
+hook at all, because beads is found by upward detection.
 
-The seed is a **fast path, not a guarantee**. It cannot even be expanded for a
-detached worktree — all `jj workspace add`, and so `gws`, creates — because there
-is no `branch` variable to interpolate (`Failed to expand project:jj: undefined
-variable branch @ line 1`). So the flow forgets the row itself when the hook did
-not, and only a row that survives that is reported.
+**There is no forget hook, in any form.** `djo remove` forgets the workspace
+itself, so a `[hooks.post-remove]` table would be a no-op and a top-level
+`[post-remove]` would be silently ignored. It was deleted rather than carried
+across. The row is still verified after the removal, as step 3 of the clean path
+says, because the listing rather than a hook is the proof.
 
-This is a commit on `main`, separate from the feature commit, and it is the one
-part of this change that is not code in a worktree.
+The seed is `jinit`'s seed, in `jinit`'s file, so a repo seeded two ways does not
+become a repo where the next surprise is a difference nobody remembers choosing.
+Seeding `rex-config`'s own `main` is the **runbook's** job since the 2026-11-06
+cut, and it is a commit in that repo, not code in this one.
 
 ## Edge cases and failure behaviour
 
@@ -520,15 +546,18 @@ part of this change that is not code in a worktree.
   main worktree is not a workspace to tear down.
 - **jj's `main` row and `--main` disagree about which worktree is main** —
   refused, naming both paths, before the fetch: nothing was fetched, moved or
-  removed. A bare-rooted wrapper of detached worktrees is where worktrunk's
-  `main` flag has been seen to name a leftover, and `jj workspace list` is the
-  other answer; the flow does not choose between them.
+  removed. Both answers are readings of the same jj row now — Rex's and the
+  script's — so a disagreement means one of the two reads is wrong, and the flow
+  does not choose between them. (History: the second answer was worktrunk's
+  `main` flag, seen naming a leftover in a bare-rooted wrapper of detached
+  worktrees.)
 - **The pane is in a directory jj does not list** — refused, naming the cwd. A
   stale directory from a half-done removal is the usual cause, and the message
   says which paths exist and which do not.
-- **jj lists the row, worktrunk does not** (or the reverse) — refused, naming
-  both halves, because removing one of them is the state that is hard to unpick
-  by hand.
+- **jj lists the row and the directory is gone** — the state this design used to
+  refuse as the row and the worktree disagreeing. It is the *result* of a
+  successful teardown now, so the refusal is deleted; what remains is a row
+  dojjo's remove left behind, which the flow forgets itself before reporting it.
 - **The fetch fails** (no network, no credentials, timeout) — refused, naming
   the fetch and that no comparison was possible. Nothing is removed, and
   `main@origin` is not silently believed.
@@ -556,29 +585,32 @@ part of this change that is not code in a worktree.
   directory, and **not** a blocker. This is my call: they are the thing
   `post-start` hooks recreate, and refusing on `node_modules` would make the flow
   useless in every repo that has one. The screen does not count them.
-- **The removal succeeds, the jj row survives** — the hook failed, or never
-  finished, and the row is still there at the end of the wait. Reported with
+- **The removal succeeds, the jj row survives** — dojjo's forget did not take, and
+  the row is still there at the end of the wait. The flow forgets it itself, once,
+  and reads the listing again; only a row that survives *that* is reported, with
   the exact command to finish by hand, on the float that stays.
-- **The removal succeeds, the branch is retained** — reported with
-  `wt remove -D <branch>` — the branch, not the path, because the worktree is
-  gone by the time the line is read — and the tab does **not** close (nothing is
-  closed on any failure), so the person can finish from where they are.
-- **The workspace is detached** — the jj wrapper's normal case, since `gws`
-  adds workspaces with `jj workspace add` and nothing attaches a branch. There
-  is no branch for worktrunk to delete, it says `not_attempted`, and that is a
-  completed teardown: nothing was left behind to report.
+- **The removal succeeds, the bookmark is kept** — reported with
+  `jj bookmark delete <name>`, and the tab does **not** close (nothing is closed
+  on any failure), so the person can finish from where they are. dojjo deletes
+  the bookmark with the workspace, so a bookmark still resolving is a teardown
+  that did not finish.
+- **The workspace has no bookmark** — nothing to report. (History: under worktrunk
+  this was the normal case — its reply said `not_attempted` for a detached
+  worktree and that counted as a complete teardown. Every workspace `jws` makes
+  carries its branch's bookmark, so the silent case is now the rare one.)
 - **The window will not close** — the last act failed and nothing is left running
   to say so. Accepted and documented: the directories and the workspace row are
   already gone by then, so the residue is a tab whose shell is in a deleted
   directory; `ctrl+w` closes it.
-- **A local bookmark survives the removal** — Step 8 owns bookmarks (it deletes
-  the merged one after proving the trees identical), so this flow neither deletes
-  nor reports it. A bookmark left pointing at an abandoned change is harmless; a
-  bookmark left pointing at unmerged work is exactly what the unmerged-changes
-  refusal already caught.
+- **A local bookmark survives the removal** — **reported**, with
+  `jj bookmark delete '<name>'` as the command that finishes the job. (History:
+  this flow once left bookmarks to the finishing skill's Step 8 and reported
+  nothing. dojjo deletes the bookmark with the workspace, so one still there is a
+  teardown that half happened, and a half teardown is the one thing this flow
+  promises never to leave.)
 - **`main` has no `.worktreeinclude` and no `post-start` hook** — noticed while
   reading, out of scope here, and worth its own bead: new workspaces in this repo
-  do not get their ignored files copied, which is the seed `ginit` writes and
+  do not get their ignored files copied, which is the seed `jinit` writes and
   `rex-config` never received.
 
 ## Testing
@@ -587,11 +619,10 @@ Everything runs from `bash test/run.sh`, no pty.
 
 - **`test/done_test.sh`** (new) — the audit, the refresh and the screen, with
   every tool read replaced by a fixture: `--workspaces` (a saved
-  `jj workspace list -T …`), `--wt-json` (a saved `wt list --format=json`),
-  `--diff` (a saved `jj diff --summary` for the base range), `--own-status` (a
-  saved `jj diff --summary -r @`), `--main-state` (a saved rendering of the two
-  `main` checks), `--bd-json` and `--running`. Every scripted run passes
-  `--no-fetch` except the four that must really reach the fetch — the two
+  `jj workspace list -T …`), `--diff` (a saved `jj diff --summary` for the base
+  range), `--own-status` (a saved `jj diff --summary -r @`), `--main-state` (a
+  saved rendering of the two `main` checks), `--bd-json` and `--running`. Every
+  scripted run passes `--no-fetch` except the four that must really reach the fetch — the two
   `main`-disagreement runs, which prove that refusal comes first, and the two
   fetch-failure runs — and each of those reaches jj through the stand-in first on
   `PATH`, so no real jj and no network is touched.
@@ -601,9 +632,10 @@ Everything runs from `bash test/run.sh`, no pty.
   line printed for a matching id, absent for no match and for no `bd`; exit 4
   for a `--cwd` equal to `--main`, to the wrapper, and for a `--cwd` under a
   workspace **inside another workspace** (the longest-prefix rule, with a
-  `default`-plus-`feat/6c4` fixture); exit 4 when the jj row and the worktree
-  disagree; exit 4 naming the fetch when a stand-in `jj` on `PATH` fails it; the
-  `main` disagreement refusal coming before the fetch — the refusal screen is
+  `default`-plus-`feat/6c4` fixture); exit 2 for `--wt-json`, the option that
+  went with worktrunk, so a script still passing it fails loudly; exit 4 naming
+  the fetch when a stand-in `jj` on `PATH` fails it; the `main` disagreement
+  refusal coming before the fetch — the refusal screen is
   what proves the ordering, and the stand-in `jj` recording **no argv at all** on
   a run given no `--no-fetch` corroborates it (that run's `--main` is not a
   directory, so a fetch moved ahead of the refusal would fail in its own `cd`
@@ -618,15 +650,15 @@ Everything runs from `bash test/run.sh`, no pty.
   argv (`--session`/`--window` from ctx, one `--running` per non-shell foreground
   process, including a tab whose second block runs `node`, and none for a tab of
   bare shells); `block.process` failing to answer produces a `--running` entry
-  rather than silence. `M.work_done_go` runs `wt remove <path> --foreground -y
-  --format=json` with `cwd = main`, and **never** closes a window: the removal's
-  reply is read from `test/fixtures` as worktrunk writes it — an array, one entry
-  per removal — so a `deleted` entry returns success and so does the detached
-  `not_attempted` one, `retained_unmerged` returns the branch line naming
-  `wt remove -D <branch>`, and an entry with no `branch_outcome` fails; a
-  surviving `jj workspace list` row returns the leftover-row
-  line only after the list has been read again within the wait, and a row the
-  next read loses is a success; a `wt` that exits non-zero returns its stderr.
+  rather than silence. `M.work_done_go` runs `djo remove 'feat/6c4' -y` with
+  `cwd = main`, and **never** closes a window: the three reads that follow each
+  have their answer stubbed — the workspace row, `test ! -d <path>`, and the
+  bookmark revset — so a clean teardown returns success, a row that survives both
+  the wait and the flow's own `jj workspace forget` returns the leftover-row line,
+  a directory still there returns the `djo list -f` line, a bookmark that still
+  resolves returns `jj bookmark delete 'feat/6c4'`, a `jj bookmark list` is
+  answered by a case that proves it was never asked, and a `djo` that exits
+  non-zero returns its stderr.
 - **`test/setup_test.lua`** — both actions are registered, `work_done` has
   `category = "New work"` and no `args`, and `work_done_go` declares exactly
   `project`, `root`, `main`, `workspace`, `path`.
@@ -636,9 +668,9 @@ Everything runs from `bash test/run.sh`, no pty.
   close last, and nothing at all after it.
 - **By hand, once, in the float** — one real teardown: the fetch, the refusal
   screen readable for as long as it takes to read, then a clean run where the tab,
-  the directory, the branch and the `jj workspace list` row all go, `main`'s `@`
+  the directory, the bookmark and the `jj workspace list` row all go, `main`'s `@`
   lands on `main@origin`, and the tab closes itself. A pipe cannot prove the hold,
-  the window close, the fetch, or the unlink-under-a-live-shell, and pretending
+  the window close, the fetch, or the delete-under-a-live-shell, and pretending
   otherwise would be the test lying.
 
 ## What's left to the builder
