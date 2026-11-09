@@ -675,7 +675,7 @@ do
   -- removal just unlinked, so a process started in it may not even exec.
   eq("the jj read runs in the main worktree", exec_for(stub, WORKSPACES).cwd, "/p/demo/main")
   eq("the directory check is one test argv, path and all",
-    exec_for(stub, DIRECTORY).argv, { "test", "!", "-d", "/p/demo/feat-6c4" })
+    exec_for(stub, DIRECTORY).argv, { "test", "!", "-e", "/p/demo/feat-6c4" })
   eq("the directory check runs in the main worktree", exec_for(stub, DIRECTORY).cwd, "/p/demo/main")
   eq("the bookmark read runs in the main worktree", exec_for(stub, BOOKMARK).cwd, "/p/demo/main")
   contains("the bookmark read asks jj for a live target",
@@ -693,15 +693,34 @@ end
 
 -- Nothing in this action is worktrunk's any more: no word of an argv it runs is
 -- the tool the flow used to shell out to. A word, not a substring of the joined
--- line -- a workspace under a path with `wt` in it is nobody's worktrunk.
+-- line -- a workspace under a path with `wt` in it is nobody's worktrunk -- but
+-- an argv element can be a whole shell line (`sh -lc '… wt …'`), so each one is
+-- cut into the words a shell would see before it is read. The separators are
+-- the ones a shell breaks a command line on, `=` included, so an assignment
+-- spelled `x=wt` is caught too.
 local function names_worktrunk(call)
-  for _, word in ipairs(call.argv or {}) do
-    if word == "wt" or word:find("^wt ") or word:find("worktrunk", 1, true) then
+  for _, argument in ipairs(call.argv or {}) do
+    local text = tostring(argument)
+    if text:find("worktrunk", 1, true) then
       return true
+    end
+    for word in text:gmatch("[^%s;|&()<>=]+") do
+      if word == "wt" then
+        return true
+      end
     end
   end
   return false
 end
+
+-- The scan has to reach inside a shell line, and it has to leave a path that
+-- merely holds the letters alone: both said here, on the reader itself, so a
+-- scan that went back to whole-argument comparisons fails this instead of
+-- quietly passing every case below.
+eq("the worktrunk scan reads the words of a shell line",
+  names_worktrunk({ argv = { "sh", "-lc", "wt step copy-ignored && echo done" } }), true)
+eq("the worktrunk scan is not fooled by a path that holds the letters",
+  names_worktrunk({ argv = { "sh", "-lc", "/p/demo-wt/main done" } }), false)
 
 do
   local stub = go_stub()
@@ -762,9 +781,47 @@ do
   contains("the bookmark read failure carries jj's line", said, "no jj repo here")
 end
 
+-- A name jj's own revset syntax would choke on: the quote and the backslash
+-- are escaped inside the string literal, so jj parses the revset instead of
+-- failing on it -- and a failure there is reported as a failed read rather than
+-- read as a kept bookmark.
+do
+  local name = 'odd"name'
+  local path = '/p/demo/odd"name'
+  local remove = [[djo remove 'odd"name' -y]]
+  local listing = 'main\t/p/demo/main\n'
+  local bookmark = [[jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"odd\"name")' -T 'commit_id ++ "\n"']]
+  local stub = go_stub({
+    [remove] = REMOVED,
+    [WORKSPACES] = { code = 0, stdout = listing, stderr = "" },
+    [DIRECTORY] = GONE,
+    [bookmark] = BOOKMARK_GONE,
+  })
+  local ok, result = pcall(M.work_done_go, {}, removal{ workspace = name, path = path })
+  eq("a name holding a quote is torn down", ok, true)
+  eq("a name holding a quote returns nothing", result, nil)
+  eq("the bookmark revset escapes the name's own quote",
+    exec_for(stub, bookmark).argv ~= nil, true)
+end
+
+-- And the same read with nothing to run it: a shell that could not start jj has
+-- no exit code and no jj line to carry, so the reason the exec gave is what the
+-- report names -- and it still fails rather than reading as "no bookmark".
+do
+  local stub = go_stub()
+  stub.exec_replies[BOOKMARK] = nil
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a bookmark read that could not run fails the teardown", ok, false)
+  contains("the bookmark read that could not run is named", said,
+    "could not read the bookmark of feat/6c4")
+  contains("the reason the bookmark read could not run is carried", said,
+    "executable file not found in PATH")
+end
+
 -- And the directory itself, which is what a person looks for when they doubt the
--- removal: `test ! -d` is the whole of that check, and it is an argv rather than
--- a shell line so the path is one word whatever it holds.
+-- removal: `test ! -e` is the whole of that check -- `-e` and not `-d`, since
+-- anything at all left at the path is a leftover -- and it is an argv rather
+-- than a shell line, so the path is one word whatever it holds.
 do
   local stub = go_stub({ [DIRECTORY] = MISSING })
   local ok, said = pcall(M.work_done_go, {}, removal())
@@ -989,7 +1046,7 @@ do
   eq("the quoted workspace is what the login shell ran",
     stub.exec_calls[1] and program(stub.exec_calls[1]), awkward)
   eq("the path reaches the directory check as one word",
-    exec_for(stub, DIRECTORY).argv, { "test", "!", "-d", "/p/demo/it's here" })
+    exec_for(stub, DIRECTORY).argv, { "test", "!", "-e", "/p/demo/it's here" })
 end
 
 -- The hand-back is also a `rex do` entry point, where an --args object is not
@@ -1061,7 +1118,7 @@ eq("new_tab_argv for an existing worktree",
   { "fish", "-c", WRAPPER, "switch", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
 
 -- A create with no base answered and none configured: the picker resolves the
--- default itself, so the wrapper is told nothing and passes gws no base word.
+-- default itself, so the wrapper is told nothing and passes jws no base word.
 eq("new_tab_argv for a new branch",
   M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "create", bead = BEAD, title = "Diff" }),
   { "fish", "-c", WRAPPER, "create", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
@@ -1575,7 +1632,7 @@ end
 -- The no-revision sentinel is false, and it has to stay false all the way: a
 -- configuration naming a base must not undo the picker's answer, and a
 -- declaration that turned it into the string "false" would send `false` to
--- gws as the base revision.
+-- jws as the base revision.
 do
   local saved = M.options.base
   M.options.base = "main"
@@ -1589,9 +1646,14 @@ do
   M.options.base = saved
 end
 
--- The fixture wrapper goes with the file: a mktemp -d per run, removed like the
--- shell tests' trap. TMP is this file's own, so nothing else is named.
-os.execute("rm -rf " .. quote(TMP))
+-- The fixture wrapper goes with the file on either way out: a run that failed
+-- is the one most likely to be re-run, and a mktemp tree left under it is litter
+-- nobody goes looking for. So the removal and the exit are one step, the removal
+-- first. TMP is this file's own, so nothing else is named.
+local function finish()
+  os.execute("rm -rf " .. quote(TMP))
+  if fails > 0 then os.exit(1) end
+  print("ok " .. count .. " assertions")
+end
 
-if fails > 0 then os.exit(1) end
-print("ok " .. count .. " assertions")
+finish()

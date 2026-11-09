@@ -214,6 +214,15 @@ bookmarks=$( cd "$tmp/w" && jj --ignore-working-copy bookmark list -a \
 if ! grep -Fxq 'main@origin tracked' <<<"$bookmarks"; then
   fail "the main bookmark tracks main@origin" "$bookmarks"
 fi
+# ... and the LOCAL bookmark is there too, not only the remote one it tracks: a
+# clone that left `main@origin` tracking nothing local would satisfy the line
+# above while `jj bookmark list` named no branch at all, and a --branch-style
+# change to how the clone is made is the way that happens quietly.
+ran=$((ran + 1))
+local_bookmarks=$( cd "$tmp/w" && jj --ignore-working-copy bookmark list -T 'name ++ "\n"' 2>/dev/null )
+if ! grep -Fxq main <<<"$local_bookmarks"; then
+  fail "the clone leaves a local main bookmark" "jj bookmark list: [$local_bookmarks]"
+fi
 
 # 4. main inherited the FULL sparse patterns. This is the add-before-the-clear
 #    rule: a workspace added after the clear inherits an empty pattern set and
@@ -343,6 +352,15 @@ ran=$((ran + 1))
 if [ ! -f "$tmp/w/feat-q/.config/wt.toml" ]; then
   fail "the created workspace inherited main's hook config" \
     "no $tmp/w/feat-q/.config/wt.toml"
+fi
+# ... and in the shape dojjo reads. Inheriting the file is not enough: worktrunk's
+# top-level `[post-start]` is a file dojjo parses and runs nowhere, so a clone
+# that brought a repo's hooks across without their `[hooks.post-start]` head
+# would pass the line above and never run a hook.
+ran=$((ran + 1))
+if ! grep -Fq '[hooks.post-start]' "$tmp/w/feat-q/.config/wt.toml" 2>/dev/null; then
+  fail "the inherited hook config is in dojjo's table" \
+    "$(cat "$tmp/w/feat-q/.config/wt.toml" 2>&1)"
 fi
 ran=$((ran + 1))
 local_git=$(find "$tmp/w" -maxdepth 4 -name .git -print -quit 2>/dev/null)

@@ -197,6 +197,14 @@ end
 set -l ws_path
 if test "$mode" = switch -o "$mode" = create -o "$mode" = attach
   set -l pf (command mktemp)
+  # An empty answer is mktemp failing rather than a file name, and the `head`
+  # below would then read this pane's stdin and block there with no agent and no
+  # message on screen: refused here, in one line, like every other step that
+  # cannot go on.
+  if test -z "$pf"
+    printf 'rex-config: could not make a path file for %s; not starting %s\n' "$branch" "$what" >&2
+    leave_shell
+  end
   if test "$mode" = switch
     jws --existing $branch --path-file $pf
   else if test "$mode" = attach
@@ -540,9 +548,16 @@ function M.wrapper_root(cwd)
   end
   -- A relative path names no project: every caller passes an absolute one, and
   -- a walk up from here would answer about this process's directory instead.
-  local dir = cwd:gsub("/+$", "")
-  if not dir:match("^/") then
+  if not cwd:match("^/") then
     return nil
+  end
+  -- Every slash comes off, not just the last -- and a bare / keeps its one, so
+  -- that `/` handed over as the directory and `/` reached as an ancestor answer
+  -- the same: without that, the trim leaves nothing and the walk below would
+  -- skip every test the loop and the root check make.
+  local dir = cwd:gsub("/+$", "")
+  if dir == "" then
+    dir = "/"
   end
 
   -- `/` is its own last step: the pattern cannot shorten it, and the walk has
@@ -578,16 +593,24 @@ end
 -- used to answer, wrongly: in a bare-rooted wrapper whose worktrees are all
 -- detached (pi-rex) it called a branch workspace main, and the audit then ran
 -- in somebody's feature branch.
+--
+-- Exported because it is the pure half of the question and the test drives it
+-- directly: a listing written as text needs no `rex` stub, which is what
+-- project_for would take.
 function M.project_at(wrapper, listed)
-  local name = type(wrapper) == "string" and wrapper:match("([^/]+)$")
+  -- The last segment is the name, and a trailing slash would leave none: the
+  -- wrapper walk trims its own answer, and a caller that handed over a path
+  -- with a slash would otherwise be told the root could not be resolved.
+  local root = type(wrapper) == "string" and (wrapper:gsub("/+$", "")) or nil
+  local name = root ~= nil and root:match("([^/]+)$") or nil
   if name == nil then
     return nil, "could not resolve the project root of " .. tostring(wrapper)
   end
   local main = main_workspace(listed)
   if main == nil then
-    return nil, "the wrapper " .. wrapper .. " has no jj workspace named main"
+    return nil, "the wrapper " .. root .. " has no jj workspace named main"
   end
-  return { root = wrapper, name = name, main = main }
+  return { root = root, name = name, main = main }
 end
 
 -- The project a directory belongs to: the wrapper it sits in, that directory's
@@ -1346,10 +1369,13 @@ function M.work_done_go(ctx, args)
   end
 
   -- And the directory itself, which is what a person looks for when they doubt
-  -- the removal. `test ! -d` is one argv rather than a shell line, so the path is
+  -- the removal. `test ! -e` is one argv rather than a shell line, so the path is
   -- one word whatever it holds -- and a check that could not be run is not a proof
-  -- of absence either, so it is reported rather than read as a directory that went.
-  local absent, absent_reason = run({ "test", "!", "-d", path }, main)
+  -- of absence either, so it is reported rather than read as a directory that
+  -- went. `-e` and not `-d`: dojjo takes the directory away whole, so anything
+  -- left at the path -- a stray file included -- is a leftover, and a `-d` test
+  -- would read that as the path being gone.
+  local absent, absent_reason = run({ "test", "!", "-e", path }, main)
   if absent == nil then
     error("could not check whether " .. path .. " is still there: "
       .. tostring(absent_reason), 0)
@@ -1360,10 +1386,13 @@ function M.work_done_go(ctx, args)
 
   -- And the bookmark, which dojjo deletes with the workspace -- so one that still
   -- resolves is the only "kept" case this flow has. It is not this action's to
-  -- delete: the one command that would finish the job is named rather than run. A
-  -- name jj's own revset syntax cannot carry is jj's error, reported below rather
-  -- than read as a live bookmark.
-  local target = 'bookmarks(exact:"' .. workspace .. '")'
+  -- delete: the one command that would finish the job is named rather than run.
+  -- The name goes inside a jj string literal, so its own quote and backslash are
+  -- escaped first: a bookmark can hold either, and unescaped they end the literal
+  -- early -- which makes jj fail to parse a revset rather than answer one, and the
+  -- failure is reported below rather than read as a live bookmark.
+  local escaped = workspace:gsub('[\\"]', '\\%0')
+  local target = 'bookmarks(exact:"' .. escaped .. '")'
   local live, live_reason = run_in_shell(
     string.format(BOOKMARK_TARGET, M.shell_quote(target)), main)
   if live == nil or live.code ~= 0 then

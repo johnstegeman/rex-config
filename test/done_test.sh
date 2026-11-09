@@ -320,9 +320,11 @@ run_done --wt-json /nonexistent
 want_status "--wt-json is no longer an option" 2
 
 # With no saved workspace listing jj is asked from --cwd, and a machine without
-# it says so by name -- not by bash's "command not found", which would read as
-# the repository's workspaces being unreadable. --cwd is a real directory here,
-# so the run reaches the jj read rather than stopping earlier.
+# it is told so by name. bash's own "jj: command not found" is on stderr too --
+# the subshell that ran it prints it -- so what this case pins is the line a
+# reader is given: the flow's own names the tool and the place, where the
+# shell's reads as the repository's workspaces being unreadable. --cwd is a real
+# directory here, so the run reaches the jj read rather than stopping earlier.
 DONE_PATH=$tmp/no-jj-bin run_done --workspaces '' --cwd "$tmp/real-ws"
 want_status "a missing jj is a missing tool" 1
 want_err_has "a missing jj is named" \

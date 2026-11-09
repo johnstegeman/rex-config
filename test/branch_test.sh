@@ -647,6 +647,15 @@ git init -q "$tmp/gitwrap" && git -C "$tmp/gitwrap" \
   git -C "$tmp/gitwrap" symbolic-ref refs/remotes/origin/HEAD \
     refs/remotes/origin/trunk
 mkdir -p "$tmp/gitwrap/main"
+# The marker only proves something if the liar is the git this run would find:
+# a stand-in the ambient PATH reached instead would leave no mark and look like
+# a clean run. Asked through a plain sh, which has no command cache of its own
+# to answer from.
+liar_git=$(PATH="$tmp/git-bin:$PATH" sh -c 'command -v git')
+ran=$((ran + 1))
+if [ "$liar_git" != "$tmp/git-bin/git" ]; then
+  fail 'the liar is the git this case would ask' "command -v git answers $liar_git"
+fi
 ran=$((ran + 1))
 printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
 rm -f "$tmp/git-asked"
@@ -656,13 +665,16 @@ status=$?
 if [ "$status" -ne 0 ]; then
   fail 'a .git beside main is not a question for git' \
     "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'a .git beside main is not a failure' "stderr: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'a .git beside main is not a question for git' \
     'output differs from the expected cycle'
 fi
 ran=$((ran + 1))
-if [ -e "$tmp/git-asked" ]; then
-  fail 'a .git beside main never asks git' 'git was run'
+if [ -e "$tmp/git-asked" ] || grep -qx 'trunk' "$tmp/out"; then
+  fail 'a .git beside main never asks git' \
+    "git was run: $(cat "$tmp/git-asked" 2>/dev/null || true)"
 fi
 
 # The branch-name rule, applied where a person's typed name actually meets it:

@@ -127,6 +127,29 @@ local function contains(name, text, needle)
   end
 end
 
+-- Whether PATH exists, asked with `test -e` because a `.jj` is a directory and
+-- io.open opens one as happily as a file.
+local function exists(path)
+  local ok, _, code = os.execute("test -e " .. quote(path))
+  if type(ok) == "number" then return ok == 0 end
+  return ok == true
+end
+
+-- The nearest directory at or above PATH that holds a `.jj`, or nil. The
+-- fixture root is a fresh mktemp -d, but its ancestors are the machine's: /tmp
+-- on this machine is a jj workspace dojjo left behind, and a walk that reached
+-- it would answer for it rather than for the code.
+local function jj_above(path)
+  local dir = tostring(path):gsub("/+$", "")
+  while dir ~= "" do
+    if exists(dir .. "/.jj") then
+      return dir
+    end
+    dir = dir:match("^(.*)/[^/]+$") or ""
+  end
+  return nil
+end
+
 local tmp = assert(mktemp_dir(), "mktemp -d failed")
 -- A wrapper: .jj/repo as a directory beside main/, and a branch workspace
 -- beneath it whose own .jj/repo is a *file* -- the path of the store it
@@ -147,6 +170,12 @@ eq("a directory that is not there is still under the wrapper",
   M.wrapper_root(wrapper .. "/no-such-workspace"), wrapper)
 eq("a relative path names no wrapper", M.wrapper_root("feat-2ow"), nil)
 eq("a value that is not a path names no wrapper", M.wrapper_root(42), nil)
+-- `/` is reached two ways -- handed over as the directory, and walked up to from
+-- below -- and both answer the same thing: it is tested like any other ancestor
+-- rather than skipped by the trim that leaves an empty string. Neither finds a
+-- `.jj` here, so neither names a wrapper, and the match is what says so.
+eq("the root is read as its own ancestor would be",
+  M.wrapper_root("/"), M.wrapper_root(tmp .. "/no-such-dir"))
 
 -- jj's listing as the template prints it: name, a tab, the root, a newline.
 local function rows(...)
@@ -166,6 +195,13 @@ eq("the project main is the wrapper's main workspace",
 eq("a trailing slash on jj's root is dropped",
   (M.project_at(wrapper, rows({ "main", wrapper .. "/main/" })) or {}).main,
   wrapper .. "/main")
+-- The wrapper's own path gets the same trim: the name is its last segment, and a
+-- trailing slash leaves none -- so a caller that handed one over would otherwise
+-- be told the project root could not be resolved.
+eq("a trailing slash on the wrapper is dropped",
+  (M.project_at(wrapper .. "/", listed) or {}).root, wrapper)
+eq("a trailing slash on the wrapper still names the project",
+  (M.project_at(wrapper .. "/", listed) or {}).name, "iris")
 
 -- A plain colocated repo: .jj/repo is a directory at the root, the files are
 -- there too, and there is no main beside it. This flow cannot make a workspace
@@ -189,6 +225,12 @@ local near, near_reason =
 eq("a workspace only named like main is refused", near, nil)
 contains("the near-miss refusal names main", near_reason, "main")
 
+-- The fixture root has to be a directory in no wrapper, or the refusals below
+-- pass for the machine's reason rather than this code's: asserted once, before
+-- the case that relies on it, so a failure here reads as the machine's shape
+-- rather than as a bug in the walk.
+eq("the fixture root has no .jj above it", jj_above(tmp), nil)
+
 -- No .jj anywhere above: the walk answers nil, and project_for refuses before
 -- it asks jj anything -- which is why this half runs with no rex global here.
 local bare = tmp .. "/bare/inside"
@@ -197,8 +239,6 @@ eq("no .jj above a plain directory means no wrapper", M.wrapper_root(bare), nil)
 local none, none_reason = M.project_for(bare)
 eq("project_for refuses a directory in no wrapper", none, nil)
 contains("the refusal names .jj", none_reason, ".jj")
-
-os.execute("rm -rf " .. quote(tmp))
 
 -- What a tab is still running --------------------------------------------------
 --
@@ -436,5 +476,14 @@ end
 -- they are executed: test/wrapper_test.sh runs the tab's wrapper with a stand-in
 -- `jws` and reads the words it was given, for all three modes.
 
-if fails > 0 then os.exit(1) end
-print("ok " .. count .. " assertions")
+-- The fixture directories go with the file on either way out: a run that failed
+-- is the one most likely to be re-run, and a mktemp tree left under it is litter
+-- nobody goes looking for. So the removal and the exit are one step, the removal
+-- first.
+local function finish()
+  os.execute("rm -rf " .. quote(tmp))
+  if fails > 0 then os.exit(1) end
+  print("ok " .. count .. " assertions")
+end
+
+finish()

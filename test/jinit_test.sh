@@ -88,6 +88,15 @@ ws_names() {
   jj --ignore-working-copy --repository "$1" workspace list -T 'name ++ "\n"' 2>/dev/null
 }
 
+# first_git DIR -> the first .git at or under DIR, or nothing. One helper for
+# both places that ask, because it is one question asked twice: a wrapper has no
+# git layer, and a create is the moment one could come back. `-print -quit`
+# because the first answer is the whole answer -- the second .git would say the
+# same thing.
+first_git() {
+  find "$1" -maxdepth 4 -name .git -print -quit 2>/dev/null
+}
+
 # names_has REPO NAME -> yes/no, read from a here-string and not from a pipe:
 # `set -o pipefail` is on, and a `grep -Fq` that stops reading early makes the
 # producer take SIGPIPE -- which would turn a MATCHING line into a failed
@@ -118,7 +127,7 @@ if [ ! -d "$tmp/w/.jj/repo" ]; then
   fail "the wrapper is a jj repo" "no $tmp/w/.jj/repo"
 fi
 ran=$((ran + 1))
-local_git=$(find "$tmp/w" -maxdepth 4 -name .git -print -quit 2>/dev/null)
+local_git=$(first_git "$tmp/w")
 if [ -n "$local_git" ]; then
   fail "there is no .git anywhere in the wrapper" "found $local_git"
 fi
@@ -159,7 +168,10 @@ if [ -n "$default_sparse" ]; then
   fail "the default workspace is sparse-cleared" "sparse list holds: [$default_sparse]"
 fi
 # (b) parked on root(): its @ is a child of the root commit, so even a
-# resurrected default has nothing to reuse. The root id is all zeros in jj.
+# resurrected default has nothing to reuse. That is not the trace of the `jj new`
+# step, though -- the commit jj hands a fresh repo already sits on root(), so
+# this passes for a function with no such line in it at all. The marker below is
+# what carries the discrimination. The root id is all zeros in jj.
 ran=$((ran + 1))
 root_id=$(cd "$tmp/w" && jj --ignore-working-copy log -r 'root()' --no-graph -T 'commit_id' 2>&1)
 default_parent=$(cd "$tmp/w" && jj --ignore-working-copy log -r 'default@-' --no-graph -T 'commit_id' 2>&1)
@@ -304,7 +316,7 @@ fi
 # something could put a git layer back: jj and dojjo are the two programs that
 # run here, and neither may leave one.
 ran=$((ran + 1))
-local_git=$(find "$tmp/w" -maxdepth 4 -name .git -print -quit 2>/dev/null)
+local_git=$(first_git "$tmp/w")
 if [ -n "$local_git" ]; then
   fail "a create in the wrapper leaves no .git behind" "found $local_git"
 fi

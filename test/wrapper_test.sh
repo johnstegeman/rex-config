@@ -147,6 +147,9 @@ function jws
     # the caller has no path, which is the failure this wrapper has to catch.
     if test "$JWS_WRITE" != 0; and test -n "$pf"
         printf '%s\n' $JWS_PATH >$pf
+        # JWS_EXTRA is a second line in the same file -- a jws that said more
+        # than the one path. The tab reads the first line and must not move.
+        set -q JWS_EXTRA; and test -n "$JWS_EXTRA"; and printf '%s\n' $JWS_EXTRA >>$pf
     end
     echo "jws: $JWS_PATH ready"
 end
@@ -243,16 +246,31 @@ EOF
 
 chmod +x "$bin/agent" "$bin/agent-killed" "$bin/agent-trapping" "$tmp/shell"
 
+# mktemp, stood in for so one case can make it fail: the tab names its path
+# file with one, and with no name at all the `head` that reads that file would
+# read the pane's stdin instead. It passes through unless MKTEMP_FAIL=1.
+real_mktemp=$(command -v mktemp)
+cat >"$bin/mktemp" <<EOF
+#!/bin/sh
+if [ "\${MKTEMP_FAIL:-0}" = 1 ]; then
+  echo 'mktemp: failed to create file' >&2
+  exit 1
+fi
+exec "$real_mktemp" "\$@"
+EOF
+chmod +x "$bin/mktemp"
+
 # Run the wrapper the way Rex runs the tab: as an argv with no shell in between,
 # the tab's own directory as cwd, and the answer under test as its parameters --
 # the three positional words (mode, branch, base) and then the agent, its
 # arguments and the prompt. TEST_SHELL replaces the stand-in shell or
 # UNSET_SHELL takes SHELL away, JWS_PATH, JWS_FAIL and JWS_WRITE choose what the
 # stand-in jws does and the path it reports, JWS_CD=0 keeps it from moving the
-# shell, JWS_MAIN is where it moves to, and STDIN_FROM is what the pane's stdin
-# is (a file of commands, for a fallback sh that is not a stub). The stand-ins'
-# records are cleared first, so an assertion that something never ran reads that
-# run alone.
+# shell, JWS_MAIN is where it moves to, JWS_EXTRA is a second line for the path
+# file, MKTEMP_FAIL=1 makes the tab's own mktemp fail, and STDIN_FROM is what
+# the pane's stdin is (a file of commands, for a fallback sh that is not a
+# stub). The stand-ins' records are cleared first, so an assertion that
+# something never ran reads that run alone.
 # Sets $status and leaves stdout in $tmp/out, stderr in $tmp/err.
 run_wrapper() {
   local mode=$1 branch=$2 base=$3
@@ -275,9 +293,10 @@ run_wrapper() {
     WT_WORDS=$tmp/wt-words JQ_WORDS=$tmp/jq-words GIT_CALLS=$tmp/git-calls
     JWS_WORDS=$tmp/jws-words JWS_PATH=${JWS_PATH:-$worktree}
     JWS_ENV=$tmp/jws-env JWS_MAIN=${JWS_MAIN:-$main} JWS_CD=${JWS_CD:-1}
-    JWS_FAIL=${JWS_FAIL:-0} JWS_WRITE=${JWS_WRITE:-1}
+    JWS_FAIL=${JWS_FAIL:-0} JWS_WRITE=${JWS_WRITE:-1} JWS_EXTRA=${JWS_EXTRA:-}
     export PATH fish_function_path WT_WORDS JQ_WORDS GIT_CALLS
     export JWS_WORDS JWS_PATH JWS_ENV JWS_MAIN JWS_CD JWS_FAIL JWS_WRITE
+    export JWS_EXTRA
     "$fish_bin" -c "$script" "$mode" "$branch" "$base" "$@"
   ) >"$tmp/out" 2>"$tmp/err" <"${STDIN_FROM:-/dev/null}"
   status=$?
@@ -564,16 +583,31 @@ fi
 
 # An attach that fails is the same failure a create's is: jws said why on this
 # pane, nothing is started in a directory nobody named, and the shell still
-# opens so the pane is usable.
+# opens so the pane is usable -- in the workspace jws moved to, since an attach
+# cds into main before it makes the workspace exactly as a create does.
 ran=$((ran + 1))
 JWS_FAIL=1 run_wrapper attach feat/x1 origin/main agent "/brainstorming"
+if [ "$status" -ne 0 ]; then
+  fail "a failing attach still leaves a shell" "exit $status: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
 if grep -q "agent pwd" "$tmp/out"; then
   fail "a failing attach never starts the agent" "output: $(cat "$tmp/out")"
+fi
+ran=$((ran + 1))
+if ! grep -qx "shell pwd: $main" "$tmp/out"; then
+  fail "after a failing attach the shell is in the workspace jws moved to" \
+    "output: $(cat "$tmp/out")"
 fi
 ran=$((ran + 1))
 if ! grep -qxF 'rex-config: jws feat/x1 failed (exit 1); not starting agent' "$tmp/err"; then
   fail "a failing attach names jws, its exit status and what is not started" \
     "stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if ! grep -qx 'GIT_TERMINAL_PROMPT=0' "$tmp/jws-env"; then
+  fail "an attach's jws runs with GIT_TERMINAL_PROMPT=0" \
+    "recorded: $(cat "$tmp/jws-env" 2>/dev/null)"
 fi
 
 # A first word that is none of the three: a caller that does not know the
@@ -655,6 +689,30 @@ if ! grep -qxF 'rex-config: could not read the workspace path of feat/x1 from th
     "stderr: $(cat "$tmp/err")"
 fi
 
+# And a path file that could not even be named: mktemp failing leaves the tab
+# with no file to name, and the `head` that reads it would then read the pane's
+# stdin and block there -- no agent, no message, a tab that only looks hung. It
+# is refused in one line, before jws is asked anything. XDG_CONFIG_HOME is an
+# empty directory for this run because the developer's own config.fish puts
+# mise's PATH in front of the shim's, which would hide it behind the real
+# mktemp.
+mkdir -p "$tmp/xdg"
+ran=$((ran + 1))
+MKTEMP_FAIL=1 XDG_CONFIG_HOME=$tmp/xdg run_wrapper switch feat/x1 "" agent "/brainstorming"
+if [ "$status" -ne 0 ] || ! grep -qx "shell pwd: $start" "$tmp/out"; then
+  fail "a mktemp that fails still leaves a shell" \
+    "exit $status: output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/jws-words" ]; then
+  fail "a mktemp that fails runs no jws" "jws was given: $(cat "$tmp/jws-words")"
+fi
+ran=$((ran + 1))
+if ! grep -qxF 'rex-config: could not make a path file for feat/x1; not starting agent' \
+  "$tmp/err"; then
+  fail "a mktemp that fails says so in one line" "stderr: $(cat "$tmp/err")"
+fi
+
 # A workspace path that starts with a dash: fish's `cd` reads it as an option and,
 # unlike sh's, takes no `--` to end them, so the wrapper has to hand it over in a
 # shape that is a path and not a flag.
@@ -663,6 +721,18 @@ mkdir -p "$start/-dash"
 JWS_PATH=-dash run_wrapper switch feat/x1 "" agent "/brainstorming"
 if ! grep -qx "agent pwd: $start/-dash" "$tmp/out"; then
   fail "a workspace path starting with a dash is entered" \
+    "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
+fi
+
+# The path file is read for its FIRST line and nothing else. jws writes one
+# line, but nothing in the file's shape enforces that, and a path taken from
+# the wrong line would run the agent in a directory nobody named -- so a second
+# line is planted here and the agent and the shell still land on the first.
+ran=$((ran + 1))
+JWS_EXTRA=/nonexistent/second run_wrapper switch feat/x1 "" agent "/brainstorming"
+if ! grep -qx "agent pwd: $worktree" "$tmp/out" \
+  || ! grep -qx "shell pwd: $worktree" "$tmp/out"; then
+  fail "a second line in the path file is ignored" \
     "output: $(cat "$tmp/out") stderr: $(cat "$tmp/err")"
 fi
 

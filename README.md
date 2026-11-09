@@ -167,8 +167,10 @@ wrote can be run there. Exiting that shell closes the tab.
 ## The base
 
 A new branch starts from one **jj revision**, not from whatever this clone last
-checked out. Here that revision is `main@origin` — the remote's current state of
-the conventional default branch, rather than this machine's copy of it.
+checked out. The convention is `main@origin` — the remote's current state of the
+conventional default branch — though the cycle falls through to `master@origin`
+and then to `@` when the bookmarks do not render it (below), so the revision can
+be this machine's own copy.
 `origin/main` was the git spelling of the same thing; the `@remote` suffix says
 where a revision comes from now, so there is no second field that could disagree
 with it.
@@ -302,9 +304,11 @@ One thing is **not** in this repository, and a new machine has to be given it by
 hand: `jws`, `jinit` and `jclone` are fish functions that live in
 `~/.config/fish/functions` (`jws.fish`, `jinit.fish`, `jclone.fish`), unversioned
 like the `gws`/`ginit`/`gclone` they sit beside. Copy them across from the
-machine that has them. Without `jws` the picker refuses every launch (`jws is not
-a fish function`), and `bash test/run.sh` fails on `test/jws_test.sh` rather than
-skipping it — the suite is written for the machine that has them.
+machine that has them. Without `jws` the picker refuses every **interactive**
+launch (`jws is not a fish function`) — `--dry-run` makes no workspace and is
+the one launch that skips that preflight — and `bash test/run.sh` fails on
+`test/jws_test.sh` rather than skipping it: the suite is written for the machine
+that has them.
 
 ## Options
 

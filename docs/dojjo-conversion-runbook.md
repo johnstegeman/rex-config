@@ -27,7 +27,8 @@ not repo files: they are unversioned, and nothing clones them onto a machine.
 Without them every `jws`/`jclone` line below answers `Unknown command`, and
 `bash test/run.sh` fails rather than skipping (`test/jws_test.sh`,
 `test/jinit_test.sh` and `test/jclone_test.sh` read the functions from that
-directory). So before step 5 — the first step that runs `jws` — check
+directory). So before step 4 — the first step that runs one of them, since its
+rebuild route runs `jclone` — check
 `fish -c 'functions -q jws; and functions -q jinit; and functions -q jclone'`,
 and copy the three files from the machine that has them if it says nothing.
 Everything else this runbook needs is on the login shell's `PATH`: `jj` 0.47.1,
@@ -416,9 +417,11 @@ just its last line. A permission error does it; so does a disk that fills up
 part-way through 981 MB, which is the realistic case here. Verified: with an
 unreadable file inside `main/node_modules` the log read `Failed to copy
 …/main/node_modules: cp: … Permission denied`, then `Copied 2 entries from main.`,
-exit 0 — and the workspace's `node_modules` was left empty. Fix the cause, `rm -rf`
-the entry that did not arrive — the copy only takes a top-level entry that is
-absent — then re-run `djo hook post-start` in that workspace. Verified: deleting a
+exit 0 — and the workspace's `node_modules` was left empty. Fix the cause, then
+`rm -rf` the entry that did not arrive: a half-finished `cp` leaves a partial
+skeleton rather than nothing at all, and the copy only takes a top-level entry
+that is **absent**, so the re-run would skip the one it half-wrote and look like
+a pass. Then re-run `djo hook post-start` in that workspace. Verified: deleting a
 half-copied `node_modules` and running the copy again brought that one entry and
 skipped `.env`, which was already there.
 
@@ -480,13 +483,14 @@ jj log -r 'bookmarks(exact:"hooks-check")' --no-graph -T 'commit_id.short()'
 echo
 ```
 
-That last read is the flow's own: `djo remove` deletes the bookmark with the
-workspace, and `jj bookmark list` is the wrong reader for the result — a bookmark
-that was tracking a remote is only tombstoned by the deletion, so the listing
-still renders `<name>@origin` and cannot tell you the local one is gone. (A
-bookmark created here and never pushed has no `@origin` and simply disappears
-from the listing, so the listing proves nothing in that case either.) The revset
-can — it is what `new-work.sh` and `init.lua` read.
+That last read is the flow's own, and it asks whether the name still **resolves**
+rather than what a listing renders: `djo remove` deletes the bookmark with the
+workspace, and `jj bookmark delete` — what it runs, and the command the report
+names when one is left behind — only tombstones a bookmark a remote tracks, so
+`jj bookmark list` still renders `<name>@origin` and would report a deleted
+bookmark as kept. (A bookmark created here and never pushed has no `@origin` and
+simply disappears from the listing, so the listing proves nothing in that case
+either.) The revset can — it is what `new-work.sh` and `init.lua` read.
 
 ### Step 6: commit the change in that repo
 
@@ -554,8 +558,8 @@ worth knowing:
   `.worktrees/` in `main` are not copied, a top-level `node_modules/` is);
 - **the copy is by top-level entry, so anything not at the top of the tree is at
   the mercy of its top directory.** An entry whose name the new workspace already
-  has — which is every directory the repo commits, `apps` in `pmm-iris` included
-  — is skipped unless `--force`, which **deletes that top-level entry in the
+  has — which is every committed directory that holds an ignored path, `apps` in
+  `pmm-iris` included — is skipped unless `--force`, which **deletes that
   workspace and copies it again** from `main`: tracked files and `main`'s
   uncommitted edits included (verified: `--force` replaced a workspace's `apps`
   with `main`'s uncommitted version and removed a file that only the workspace
@@ -563,7 +567,10 @@ worth knowing:
   **never** copied on its own account, first run or re-run — only the `--force`
   re-copy of its top directory brings it, and that replaces the directory; a
   top-level one is copied once and skipped on the hook's next run, because by
-  then it is there.
+  then it is there. `--force` is a hand-run flag, not a hook flag: run `djo
+  copy-ignored --from main --force` in that one workspace; never add it to the
+  `copy` line — appending it there deletes a tracked top-level directory in every
+  new workspace, which is the first thing this bullet says.
 
 ## Behaviour change 2: a failed hook leaves no exit code
 

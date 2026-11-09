@@ -50,7 +50,6 @@ done
 
 export JWS_FILE=${JWS_FILE:-$HOME/.config/fish/functions/jws.fish}
 if [ ! -f "$JWS_FILE" ]; then
-  ran=$((ran + 1))
   fail "jws.fish is missing" "$JWS_FILE"
   printf '  the function is a developer file in ~/.config/fish/functions, not a repo file\n'
   exit 1
@@ -183,6 +182,15 @@ fi
 ran=$((ran + 1))
 if [ "$(grep -vc '^cwd=' "$tmp/djo.log" 2>/dev/null || true)" != 1 ]; then
   fail "a create runs dojjo exactly once, for the hooks" "$(cat "$tmp/djo.log" 2>/dev/null)"
+fi
+
+# Both closing lines, because between them they say where the workspace is and
+# how to undo it: a shim that printed one and not the other would leave the
+# person holding a workspace with no command to remove it by.
+ran=$((ran + 1))
+if ! grep -Fxq "jws: $tmp/w/feat-x ready (jj workspace 'feat/x', hooks run)" "$tmp/out" ||
+  ! grep -Fxq '     remove with: djo remove feat/x -y, or ctrl+space>d' "$tmp/out"; then
+  fail "a create prints both closing lines" "$(cat "$tmp/out")"
 fi
 
 # A create that was given a base revision starts the workspace there, and `-r`

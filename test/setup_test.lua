@@ -231,13 +231,47 @@ local function mkdirp(path)
   os.execute("mkdir -p " .. quote(path))
 end
 
+local function write_file(path, text)
+  local handle = assert(io.open(path, "w"))
+  handle:write(text)
+  handle:close()
+end
+
+-- Whether PATH exists, asked with `test -e` because a `.jj` is a directory and
+-- io.open opens one as happily as a file.
+local function exists(path)
+  local ok, _, code = os.execute("test -e " .. quote(path))
+  if type(ok) == "number" then return ok == 0 end
+  return ok == true
+end
+
+-- The nearest directory at or above PATH that holds a `.jj`, or nil. The
+-- fixture root is a fresh mktemp -d, but its ancestors are the machine's: /tmp
+-- on this machine is a jj workspace dojjo left behind, and a walk that reached
+-- it would answer for it rather than for the code.
+local function jj_above(path)
+  local dir = tostring(path):gsub("/+$", "")
+  while dir ~= "" do
+    if exists(dir .. "/.jj") then
+      return dir
+    end
+    dir = dir:match("^(.*)/[^/]+$") or ""
+  end
+  return nil
+end
+
 local TMP = assert(mktemp_dir(), "mktemp -d failed")
 local ROOT = TMP .. "/pmm-iris"
 local MAIN = ROOT .. "/main"
 local FEAT = ROOT .. "/feat-6c4"
 mkdirp(ROOT .. "/.jj/repo")
 mkdirp(MAIN)
-mkdirp(FEAT)
+-- The branch workspace's own `.jj/repo` is a *file* -- the relative path of the
+-- store it borrows -- which is what the wrapper shape really looks like. A bare
+-- directory would be shaped like no workspace at all, and the branch-workspace
+-- cases below would be walking something this flow never makes.
+mkdirp(FEAT .. "/.jj")
+write_file(FEAT .. "/.jj/repo", "../../.jj/repo\n")
 
 -- A directory in no wrapper, for the refusals. It is a fixture of its own
 -- rather than /tmp, because /tmp on this machine is a wrapper in its own right
@@ -245,6 +279,11 @@ mkdirp(FEAT)
 -- wrong reason.
 local BARE = TMP .. "/bare/inside"
 mkdirp(BARE)
+-- The fixture root has to be a directory in no wrapper, or every "in no wrapper"
+-- case below passes for the machine's reason rather than this code's: asserted
+-- once, before the first of them, so a failure here reads as the machine's shape
+-- rather than as a bug in the walk.
+eq("the fixture root has no .jj above it", jj_above(TMP), nil)
 
 -- jj's workspace list, as `main_workspace` reads it: one name, one tab, the
 -- root, one newline per row. The same command new-work.sh's done runs.
@@ -770,9 +809,14 @@ eq("work_done with no tab fails", ok_done_no_tab, false)
 contains("work_done's refusal names the tab", done_no_tab_message, "cannot tell which tab")
 eq("work_done with no tab opens nothing", #stub.layers, 0)
 
--- The fixture wrapper goes with the file: a mktemp -d per run, removed like the
--- shell tests' trap. TMP is this file's own, so nothing else is named.
-os.execute("rm -rf " .. quote(TMP))
+-- The fixture wrapper goes with the file on either way out: a run that failed
+-- is the one most likely to be re-run, and a mktemp tree left under it is litter
+-- nobody goes looking for. So the removal and the exit are one step, the removal
+-- first. TMP is this file's own, so nothing else is named.
+local function finish()
+  os.execute("rm -rf " .. quote(TMP))
+  if fails > 0 then os.exit(1) end
+  print("ok " .. count .. " assertions")
+end
 
-if fails > 0 then os.exit(1) end
-print("ok " .. count .. " assertions")
+finish()

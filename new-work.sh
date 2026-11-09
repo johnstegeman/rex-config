@@ -92,15 +92,19 @@ stopped rather than failed. A clean run prints nothing of its own, hands the
 five paths to Rex and lets the tab close itself.
 
 --bd-json, --workspaces, --bookmarks and --base-bookmarks read saved tool
-output instead of asking the tools, which is how the tests and dry runs work:
---bd-json stands in for bd, --workspaces with --bookmarks for both of the
-lookups --main would be read for (`jj workspace list`, one "name<TAB>root" row
-per workspace, and `jj bookmark list`, one local name per line), --base-bookmarks
-for the bookmark list bases reads, so a run given all four never touches --main
-at all. --origin-head is the same seam for the remote default itself, which is
-no longer asked of anything: give it, or the fixed names answer. PICK_SCREEN=1
-in the environment says the run has the float's terminal, which is how the
-screen's own paths are driven without one.
+output instead of asking the tools, which is how the tests and dry runs work.
+Each belongs to the subcommands that read that tool, and not to the rest:
+--bd-json stands in for bd in `beads`, `pick` and `done`; --workspaces and
+--bookmarks stand in for the two lookups `--main` would be read for (`jj
+workspace list`, one "name<TAB>root" row per workspace, and `jj bookmark list`,
+one local name per line) in `candidates` and `pick`, which read both, and
+--workspaces alone in `done`, which has no bookmark half; --base-bookmarks
+stands in for the bookmark list `bases` reads, in `bases`, `pick` and `done`.
+So a `pick` given all four never touches --main at all. --origin-head is the
+same seam for the remote default itself, which is no longer asked of anything:
+give it, or the fixed names answer. PICK_SCREEN=1 in the environment says the
+run has the float's terminal, which is how the screen's own paths are driven
+without one.
 
 The one screen asks everything at once: the ready beads with "✎  write a prompt
 instead" pinned on top, and the agent, the branch and the base in its header, a
@@ -412,7 +416,10 @@ cmd_branch_default() {
 # tab is what keeps one fixture serving both subcommands. The row named `default`
 # is jj's workspace at the wrapper itself -- the directory main and every branch
 # workspace sit in, which owns every directory no other workspace does -- and it
-# is no branch, so it is skipped rather than offered as one.
+# is no branch, so it is skipped rather than offered as one. Skipping it assumes
+# the wrapper layout this flow only works in, where the base workspace beside
+# the wrapper is `main`: there `default` is jj's leftover at the wrapper root
+# and never the thing to switch to, while a colocated repo has nothing else.
 #
 # A jj that cannot read the repository is a failed read, not an empty one: it
 # says so, naming what could not be read -- the directory jj was asked about, or
@@ -2258,7 +2265,14 @@ done_main_move() {
   # blocker -- the person is told main was not refreshed, and the audit still
   # prints every other reason it found. jj's message itself stays on stderr.
   if [ "$contained" = yes ]; then
-    if ( cd "$main" && jj bookmark set main -r "$base" ); then
+    # The directory is entered before jj is asked anything, and on --no-fetch
+    # nothing has entered it yet -- so an entry that fails here is the one
+    # failure this step can meet that is not jj's own. Left to the write it
+    # would be reported as jj refusing the bookmark, with a remedy that cannot
+    # work, so it is said as itself.
+    if ! ( cd "$main" ) 2>/dev/null; then
+      done_blocker "  main was not moved: $main could not be entered; the bookmark and the working copy are as they were"
+    elif ( cd "$main" && jj bookmark set main -r "$base" ); then
       moved=yes
     else
       done_blocker "  main was not moved: jj refused to move its bookmark; run jj bookmark set main -r $base in $main"
@@ -2534,7 +2548,9 @@ cmd_done() {
   # the subshell that reads it, the failure reads as a line number in this
   # script rather than as a place that does not exist. --main needs no guard of
   # its own any more: the fetch is the first thing that enters it, and names a
-  # place it cannot enter itself.
+  # place it cannot enter itself -- and on --no-fetch the reads below are the
+  # first entry instead, which report a directory they cannot enter as a failed
+  # read of it.
   [ -n "$workspaces" ] || [ -d "$cwd" ] || die "done: no such directory: $cwd"
   done_workspace
 
