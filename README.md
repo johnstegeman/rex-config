@@ -8,11 +8,11 @@ branch and the base the branch is created from. Accept what the header shows and
 Rex opens a tab for that branch in the project's own session, claims the bead,
 makes the worktree, and starts your agent inside it already working on the bead.
 
-The worktree is a **jj colocated workspace**, made by `gws`: the git worktree and
-the jj workspace of the same directory repo, with a branch attached and the
-project's post-start hooks run. rex-config knows none of that — it hands `gws` a
-branch, and for a new one the revision to make it from, and reads the new
-workspace's path back out of a file.
+The worktree is a **jj workspace**, made by `jws`: `jj workspace add` run from
+`main` so the new workspace inherits its sparse patterns, a bookmark for the
+branch, and the project's post-start hooks run by dojjo inside the new workspace.
+rex-config knows none of that — it hands `jws` a branch, and for a new one the
+revision to make it from, and reads the new workspace's path back out of a file.
 
 ```
 ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
@@ -24,7 +24,7 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
 
 1. `ctrl+space>n` runs the action `work_new`. It reads the focused terminal's
    directory, works out which project that is, and refuses (naming the reason)
-   if the directory is not in a git repository or the repository has no beads
+   if the directory is not in a jj wrapper or the repository has no beads
    database.
 2. Otherwise a floating picker opens, running `new-work.sh`, and everything is
    answered on one screen:
@@ -81,20 +81,23 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
    empty: the header's branch belongs to the bead the list leads with, which is
    not the bead you picked, so it is not offered. A name typed there is the
    branch; an empty answer cancels the pick. What that name means is decided
-   from the two lists the screen has already read — the branches with a
-   worktree, and the branches git knows — and it is one of three things: a
-   branch with a worktree, **switch**, and worktrunk moves you there without
-   anything being created; a local branch with no worktree, **attach**, and
-   `gws` puts a jj workspace on the branch as it is, with no revision to start
-   it from; neither, **create**, and `gws` makes the branch and the workspace,
-   from the base. The new tab is labelled with what you typed.
+   from the two lists the screen has already read — the workspaces `jj workspace
+   list` names, and the bookmarks `jj bookmark list` names — and it is one of
+   three things: a branch with a workspace, **switch**, and `jws --existing`
+   takes you there without anything being created; a bookmark with no workspace,
+   **attach**, and `jws --attach` puts a workspace on the branch as it is, with
+   no revision to start it from; neither, **create**, and `jws` makes the branch,
+   its bookmark and the workspace, from the base. The new tab is labelled with
+   what you typed. Nothing in that is a tool's opinion: `jj` is the only thing
+   asked which workspaces and which bookmarks exist, and dojjo never creates
+   anything at all.
 
    A name is checked before any tab is made — only a create can be refused for
    it — and `not a valid branch name` is said on the float, not in a tab.
-   That takes worktrunk's old shortcuts with it: `^`, `-` and `pr:<n>` /
-   `mr:<n>` are not branch names, and `@` is refused because it is the working
-   copy, a jj revision. A pull or merge request's head is still reachable the
-   manual way: fetch the branch, then pick its name, which makes it an attach.
+   That took worktrunk's old shortcuts with it — history: `^`, `-` and `pr:<n>` /
+   `mr:<n>` are not branch names now — and `@` is refused because it is the
+   working copy, a jj revision. A pull or merge request's head is still reachable
+   the manual way: fetch the branch, then pick its name, which makes it an attach.
 
    With no ready beads the list is the `✎` row alone and `no ready beads` is said
    on stderr. Nothing seeds the header's branch either, so a typed prompt is
@@ -116,17 +119,18 @@ ctrl+space>n  →  one screen: a bead, or a prompt you write, with the agent,
 
      ```
      GIT_TERMINAL_PROMPT=0                               # before anything else
-     wt switch <branch> --no-cd --format=json            # switch: the path is .path
-     gws <branch> <base> --path-file <f>                 # create: the path is in <f>
-     gws --attach <branch> --path-file <f>               # attach: the path is in <f>
-     cd <the path that reply or that file named> && <agent> <prompt>
+     jws --existing <branch> --path-file <f>             # switch: the path is in <f>
+     jws <branch> <base> --path-file <f>                 # create: the path is in <f>
+     jws --attach <branch> --path-file <f>               # attach: the path is in <f>
+     cd <the one path that file named> && <agent> <prompt>
      exec "$SHELL" -l                                    # the shell the agent exits to
      ```
 
      Exactly one of the three middle lines runs: the mode is one word the
      picker decided, and the tab neither works it out again nor asks the
-     repository a second time. Only a create is given a base; a switch and an
-     attach name a branch that already exists.
+     repository a second time. All three read the path back the same way, from
+     the one line `jws` wrote to the path file. Only a create is given a base; a
+     switch and an attach name a branch that already exists.
 
      Every value reaches that wrapper as a positional parameter, so no branch,
      prompt or agent name is ever parsed as shell text. A blank answer sends no
@@ -143,11 +147,17 @@ the project's. So the flow attaches to the project's session before it reads its
 tabs or creates the new one, and stays attached — nothing detaches afterwards,
 and attaching takes nothing away from the session you are looking at.
 
-`gws` owns the create and [worktrunk](https://worktrunk.dev) owns the switch.
-`gws` runs `jj workspace add --colocate` from `main` — so the new workspace
-inherits the full sparse pattern — attaches a git branch at its head, and then
-runs the project's post-start hooks by hand, because jj and not wt made the
-worktree.
+`jws` is the one tool that makes, attaches or switches a workspace, and it is
+the only thing in the flow that names [dojjo](https://github.com/tjarvstrand/dojjo)
+at all. The workspace itself is `jj`'s: `jj workspace add` from `main` — so the
+new workspace inherits the full sparse pattern — plus a bookmark for a create,
+and then the project's post-start hooks, run by `djo hook post-start` inside the
+new workspace because jj and not dojjo made it. Which workspaces exist is `jj
+workspace list`'s answer and nobody else's, so a switch and an attach are jj's
+answers too, never a tool's report. Both halves used to be worktrunk's — history
+now: nothing in the flow runs `wt`, and it asks git nothing at all. Not even the
+default branch: the base cycle opens on a conventional name, below, rather than
+on anything a `.git` could answer.
 
 When the agent exits — quit, crash, or a brainstorming that finished — the tab
 drops into your login shell in that worktree: the hooks' output and the
@@ -157,25 +167,33 @@ wrote can be run there. Exiting that shell closes the tab.
 ## The base
 
 A new branch starts from one **jj revision**, not from whatever this clone last
-checked out. Here that revision is `main@origin` — the remote's current state of
-the default branch, rather than this machine's copy of it. `origin/main` was the
-git spelling of the same thing; the `@remote` suffix says where a revision comes
-from now, so there is no second field that could disagree with it.
+checked out. The convention is `main@origin` — the remote's current state of the
+conventional default branch — though the cycle falls through to `master@origin`
+and then to `@` when the bookmarks do not render it (below), so the revision can
+be this machine's own copy.
+`origin/main` was the git spelling of the same thing; the `@remote` suffix says
+where a revision comes from now, so there is no second field that could disagree
+with it.
 
-The screen opens on `<default-branch>@origin`, with the default branch found the
-way git finds it. When this clone names no `origin/HEAD`, it falls through to a
-fixed name — and to the working copy when the bookmarks do not have either:
+The screen opens on `main@origin` — the remote's state of the conventional
+default branch — and falls through to `master@origin`, then to the working copy,
+when the bookmarks do not render that one. Nothing is asked of git to learn the
+name: a wrapper cut to jj alone has no `.git` to ask, and a clone that still has
+one is the layer this flow is deleting. Whether a clone's default branch is
+`main` or `master` is a convention, jj keeps no record of it, and reading a
+symref out of a `.git` that happens to be lying around would make the opening
+revision depend on a layer nothing else in the flow uses. So the opening rule is
+a fixed name, checked against the bookmarks:
 
-1. the branch `refs/remotes/origin/HEAD` points at, as `<that branch>@origin`;
-2. `main@origin`, when the bookmarks render it;
-3. `master@origin`, when the bookmarks render that one;
-4. `@`, the working copy, which is always there.
+1. `main@origin`, when the bookmarks render it;
+2. `master@origin`, when the bookmarks render that one;
+3. `@`, the working copy, which is always there.
 
-The bookmarks are asked about those two fixed names and about nothing else, so
-the opening answer survives even where no bookmark renders it: a clone whose
-`origin/HEAD` is `develop` opens on `develop@origin` either way, and so does a
-base you name in configuration. The revision is made in the tab, where `jj`
-answers for it and a fetch has already had its chance.
+A base you name in configuration (`base = "main@origin"`, or any other revision)
+opens on that instead, and it is kept verbatim even where nothing here resolves
+it. The bookmarks are asked about `main@origin` and `master@origin` and about
+nothing else. The revision is made in the tab, where `jj` answers for it and a
+fetch has already had its chance.
 
 `ctrl-r` cycles a short list from there: that opening answer, then `@`, then
 `main` and `master`, offered only where the bookmarks say they exist.
@@ -183,65 +201,70 @@ answers for it and a fetch has already had its chance.
 The base travels with a create and nothing else. A switch and an attach name a
 branch that already exists, so there is no revision to start one from.
 
-The tab is what fetches, and `gws` is what does it: given a revision, it runs
+The tab is what fetches, and `jws` is what does it: given a revision, it runs
 `jj git fetch` before it makes the workspace, with a 30-second cap when `timeout`
-or `gtimeout` is installed and unbounded otherwise. Nothing in the picker touches
-the network: a fetch behind the float could hang on a prompt nobody can see.
+or `gtimeout` is installed and unbounded otherwise. dojjo never fetches — there
+is no `jj git fetch` in it at all — so this is the only fetch in the flow.
+Nothing in the picker touches the network: a fetch behind the float could hang on
+a prompt nobody can see.
 `GIT_TERMINAL_PROMPT=0` is exported in the tab for the other program that
 reaches a remote there — the `git` a project's post-start hooks run — so a hook
 fails rather than waiting on a prompt nobody can answer.
 
-A failed fetch does not cost the work: one line on the pane — `gws: could not
+A failed fetch does not cost the work: one line on the pane — `jws: could not
 fetch; <branch> starts from <revision> as it is` — and the workspace is made from
 the revision as it resolves locally.
 
 One answer is not a revision at all: `base = false` opens the field on nothing
-(the header reads `base: none`), and `gws` is given no revision, so the new
+(the header reads `base: none`), and `jws` is given no revision, so the new
 workspace sits on `main`'s working copy.
 
 ## Requirements
 
-Creating a workspace is `gws`'s job, and `gws` is not a program on your `PATH`: it
-is a fish function in `~/.config/fish/functions/gws.fish`, and it is the one
-thing that knows how to make a jj colocated workspace. The tab's wrapper is a
-fish script for that reason. Before the screen opens, the picker refuses a repo
-that is not yet [ginit'd](#converting-a-repo-to-jj-workspaces), a machine without
-`jj`, and a fish without `gws`: a claimed bead in a pane that could not create
-anything is worse than a refusal.
+Creating a workspace is `jws`'s job, and `jws` is not a program on your `PATH`: it
+is a fish function in `~/.config/fish/functions/jws.fish`, and it is the one
+seam between this flow and [dojjo](https://github.com/tjarvstrand/dojjo). The
+workspace is jj's (`jj workspace add`); `jws` is what sequences it — the
+wrapper walk, the fetch, the workspace, `djo hook post-start` inside it, and the
+path the tab is handed — so the tab's wrapper is a fish script for that reason.
+
+Before the screen opens, the picker refuses a repo that is not yet
+[in the wrapper shape](#converting-a-repo-to-jj-workspaces) — the one `jinit`
+makes and `jclone` reproduces — a machine without `jj` or `djo`, and a fish
+without `jws`: a claimed bead in a pane that could not create anything is worse
+than a refusal.
 
 On the login shell's `PATH` (Rex actions run with a minimal `PATH`, so these are
 looked up through your shell):
 
 | Tool | Why |
 |---|---|
-| `wt` | [worktrunk](https://worktrunk.dev), for switching to a worktree that already exists, and for the hooks a jj-made workspace needs |
-| `jj` | the base cycle, and the workspace itself |
-| `fish` | `gws` is a fish function, and the tab's wrapper is fish |
-| `jq` | the picker's JSON hand-back, the tab's worktree path, and bead filtering |
+| `jj` | the workspaces, the bookmarks, the base cycle, and the workspace itself |
+| `djo` | [dojjo](https://github.com/tjarvstrand/dojjo) (0.2.2), for the post-start hooks a new workspace runs and for the teardown (`djo remove`) |
+| `fish` | `jws` is a fish function, and the tab's wrapper is fish |
+| `jq` | the picker's JSON hand-back and its bead filtering |
 | `fzf` | the one screen: the ready list, the preview, the typed prompt and the keys (tested against 0.74.5) |
 | `gum` | every field the screen opens: the `✎` row's, `ctrl-b`'s and the bead-less branch field (tested against 2.0.2) |
 | `bd` | beads, for `bd ready` and claiming the picked bead |
 | your agent | default `pi`; anything that takes a prompt argument works |
 | `bat` | optional, for the bead preview |
 
-`git` and `bash` are the exceptions to that: they run under Rex's own `PATH` —
-the picker is started by its `#!/usr/bin/env bash` shebang — so they only need
-to be where Rex can find them.
-
-| Tool | Why |
-|---|---|
-| `git` | project resolution, branch-name checks, the branch candidate list and the base cycle |
-| `bash` | `new-work.sh` is a bash script (`pipefail`, process substitution) |
+`bash` is the exception to that: it runs under Rex's own `PATH` — the picker is
+started by its `#!/usr/bin/env bash` shebang, and `new-work.sh` is a bash script
+(`pipefail`, process substitution) — so it only needs to be where Rex can find
+it. `git` is not required and is not asked anything: the base cycle opens on
+`main@origin`, then `master@origin`, then `@`, decided from the bookmarks alone
+([The base](#the-base)).
 
 Also needed:
 
 - **beads in the project.** Beads is a hard requirement: a repository with no
   beads database is refused rather than run without one, because the whole flow
   is bead-driven.
-- **a ginit'd repo.** `gws` needs the layout `ginit` makes: a wrapper with
-  `.jj/repo` as a directory **beside** its `main` worktree, because `gws` runs
-  `jj workspace add` from `main` so the new workspace inherits its sparse
-  patterns. A repo without one — including a clone `jj git init`ed where it
+- **a repo in the wrapper shape.** `jws` needs the layout `jinit` makes: a
+  wrapper with `.jj/repo` as a directory **beside** its `main` worktree, because
+  `jws` runs `jj workspace add` from `main` so the new workspace inherits its
+  sparse patterns. A repo without one — including a clone `jj git init`ed where it
   stands, whose `.jj/repo` is inside the worktree rather than beside a `main` —
   is refused rather than given an ordinary git worktree. [Converting a repo to
   jj workspaces](#converting-a-repo-to-jj-workspaces) is how it gets one.
@@ -277,6 +300,16 @@ One key each way: `ctrl+space>n` starts a branch, and `ctrl+space>d` tears one
 down ([Finishing: ctrl+space>d](#finishing-ctrlspaced)). The plugin finds
 `new-work.sh` beside its own `init.lua`, so there is nothing else to point at.
 
+One thing is **not** in this repository, and a new machine has to be given it by
+hand: `jws`, `jinit` and `jclone` are fish functions that live in
+`~/.config/fish/functions` (`jws.fish`, `jinit.fish`, `jclone.fish`), unversioned
+like the `gws`/`ginit`/`gclone` they sit beside. Copy them across from the
+machine that has them. Without `jws` the picker refuses every **interactive**
+launch (`jws is not a fish function`) — `--dry-run` makes no workspace and is
+the one launch that skips that preflight — and `bash test/run.sh` fails on
+`test/jws_test.sh` rather than skipping it: the suite is written for the machine
+that has them.
+
 ## Options
 
 Every option is optional; these are the defaults.
@@ -288,10 +321,10 @@ require("rex-config").setup{
   agent_args = {},                         -- extra arguments before the prompt
   bead_prompt = "/brainstorming for bead {id}",  -- {id}, {title}, {branch}, {project}
   no_bead_prompt = "/brainstorming",       -- used when the flow ran without a bead
-  base = nil,                              -- the base cycle's first entry: nil =
-                                           -- the clone's own default, resolved;
-                                           -- a string opens on that revision;
-                                           -- false opens on no revision at all
+  base = nil,                              -- nil = the conventional opening base
+                                           -- (main@origin, then master@origin,
+                                           -- then @); a string opens on that
+                                           -- revision; false opens on none
   bounds = { 0.15, 0.1, 0.7, 0.8 },        -- picker float, fractions of the window
   script = "/…/rex-config/new-work.sh",  -- new-work.sh beside init.lua (the default)
 }
@@ -325,7 +358,7 @@ you chose. Nothing else is remembered — not the base, not the branch.
 
 `base` is the cycle's first entry and nothing more. A string opens the field on
 that revision, so `base = "@"` starts a create from the working copy; `false`
-opens it on no revision at all and `gws` is given none; leaving it unset follows
+opens it on no revision at all and `jws` is given none; leaving it unset follows
 the chain in [The base](#the-base). `ctrl-r` still cycles off whatever the field
 opens on, so the option sets the starting answer rather than pinning it. It is
 consulted again only for a hand-run `rex do work_new_go` that says nothing about
@@ -350,36 +383,40 @@ the branch name exactly as typed (`bug/58h`).
 - The main worktree is never a target: every tab is created in the project's
   session with the main worktree as its starting directory, and `bd` is always
   run there, which is where the database is reachable.
-- Which directory that is comes from **jj's own workspace name**: the workspace
-  called `main` in `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'` is
-  the main worktree, and worktrunk's `main` flag in `wt list --format=json` is
-  only the fallback, for a repository with no workspace called `main`. worktrunk
-  can flag the wrong one — in a bare-rooted wrapper whose worktrees are all
-  detached (`pi-rex`) it called a branch workspace main — while `main` is the
-  name everything here already means by "main": `ginit` creates it, `gws` adds
-  workspaces beside it, and the refusals in [Finishing](#finishing-ctrlspaced)
-  compare against it. That one answer is the picker's starting directory, where
-  `bd` is asked, and the directory `work_done` hands over as `--main`.
+- Which directory that is comes from **jj's own workspace name**, and from
+  nothing else: the workspace called `main` in
+  `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'` is the main worktree.
+  (History: worktrunk's `main` flag was the fallback, and it could flag the wrong
+  one — in a bare-rooted wrapper whose worktrees are all detached (`pi-rex`) it
+  called a branch workspace main.) A wrapper with no `main` row is refused by
+  name instead of being looked for anywhere else, and `main` is the name
+  everything here already means by "main": `jinit` and `jclone` create it, `jws`
+  adds workspaces beside it, and the refusals in
+  [Finishing](#finishing-ctrlspaced) compare against it. That one answer is the
+  picker's starting directory, where `bd` is asked, and the directory
+  `work_done` hands over as `--main`.
 - Switching the key twice for the same branch selects the tab that is already
   there. One tab, one worktree, one claim.
 - A created or attached workspace sits beside `main`, in the repo's wrapper
-  directory — the one holding `.git` — named from the branch with its slashes
-  flattened: `feat/pxp` → `feat-pxp`.
+  directory — the one holding `.jj/repo` as a directory — named after the branch,
+  in a directory that is the branch with its slashes flattened:
+  `feat/pxp` → `feat-pxp`.
 
 ## Failure behaviour
 
 Before the screen opens:
 
-- Not a git repository, or no beads database: the picker never opens; the error
+- Not a jj wrapper, or no beads database: the picker never opens; the error
   names the directory.
-- The repo is not ginit'd — no `.jj/repo` as a directory in the directory above
-  the main worktree: the picker refuses in one line and names `ginit`, and no
-  bead is claimed: `pick: /… is not ginit'd — gws needs a wrapper with .jj/repo
-  as a directory beside the main worktree; run ginit first`.
-- A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `wt`, `jq`,
-  `jj`, or a fish with no `gws`: the float names the missing piece and waits for
+- The repo is not in the wrapper shape — no `.jj/repo` as a directory in the
+  directory above the main worktree: the picker refuses in one line and names
+  `jinit` and `jclone`, and no bead is claimed: `pick: /… is not a wrapper — jws
+  needs a wrapper with .jj/repo as a directory beside the main worktree; run
+  jinit or jclone to make one`.
+- A tool the run cannot do without is missing — `fzf`, `gum`, `bd`, `jq`, `jj`,
+  `djo`, or a fish with no `jws`: the float names the missing piece and waits for
   a keypress instead of vanishing (`jj not found on PATH — press any key`,
-  `gws is not a fish function — add it to ~/.config/fish/functions — press any
+  `jws is not a fish function — add it to ~/.config/fish/functions — press any
   key`).
 
 At the screen:
@@ -398,23 +435,29 @@ At the screen:
 
 In the tab:
 
-- The fetch fails (offline, a remote that is gone, a credential prompt): `gws`
+- The fetch fails (offline, a remote that is gone, a credential prompt): `jws`
   says in one line that the branch starts from the base as it is, and the work
   starts anyway. A fetch is a freshening, not a precondition.
-- `gws` fails — a revision jj cannot resolve, a directory that is already there,
-  no `main` workspace: its own output stays in the tab, then
-  `rex-config: gws <branch> failed (exit <status>); not starting <agent>`, and
+- `jws` fails — a revision jj cannot resolve, a directory that is already there,
+  no `main` workspace, no `djo`: its own output stays in the tab, then
+  `rex-config: jws <branch> failed (exit <status>); not starting <agent>`, and
   you are left in a login shell in the main worktree. The bead stays claimed,
   since the tab is there too; `bd unclaim <id>` releases it.
-- `gws` succeeds but the path file holds no path, or cannot be read:
-  `rex-config: could not read the worktree path of <branch> from the gws path
+- `jws` succeeds but the path file holds no path, or cannot be read:
+  `rex-config: could not read the workspace path of <branch> from the jws path
   file; not starting <agent>`, and the same login shell.
-- `wt switch` fails (a bad ref, a dirty worktree, a failing hook):
-  `rex-config: wt switch <branch> failed (exit <status>); not starting <agent>`,
-  with its output above it, and the same login shell.
-- `jq` is missing, or worktrunk's reply has no path in it:
-  `rex-config: could not read the worktree path of <branch> from the switch
-  reply (jq missing, or no path in it); not starting <agent>`.
+- `jws --existing` refuses a name jj does not list — the workspace vanished
+  between the picker and the tab: one line, no workspace made, no agent. A
+  switch is the one mode whose name could be stale, and refusing is the answer
+  rather than recreating it onto a bookmark that would then collide.
+- **A post-start hook fails.** dojjo prints the failing hook and the log path on
+  the pane and still exits 0, so the workspace is made and the agent starts
+  anyway: this is the one failure no exit status carries, and nothing else will
+  tell you. The log is in `<wrapper>/../.jj/djo/logs` — beside the wrapper, not
+  inside it — because dojjo resolves the shared `.jj` through
+  `<workspace>/.jj/repo`'s relative text without resolving it against the
+  workspace. Look there when a repo's setup seems not to have run, and convert
+  that repo's hook config ([the runbook](docs/dojjo-conversion-runbook.md)).
 - The tab was made but the app could not be switched to it: the error says the
   tab was created and names what failed. The tab is still there.
 - The tab could not be made at all: the error names what Rex said, and — since
@@ -424,7 +467,7 @@ In the tab:
 ## Finishing: ctrl+space>d
 
 `ctrl+space>d` is the same motion in reverse: one press tears down the worktree,
-the branch, the jj workspace and the tab the focused pane is in. It runs the
+its bookmark, the jj workspace and the tab the focused pane is in. It runs the
 action `work_done` — the other key in the `New work` category, beside
 `work_new` — which reads that pane's directory and the project it belongs to and
 opens a float: `new-work.sh done`, started in the main worktree, because the
@@ -436,14 +479,15 @@ root in `jj workspace list` that is that directory or a directory of it,
 compared as whole path segments so that `feat-6c41` is never read as
 `feat-6c4`. The workspace gives the branch the tab is named after and the
 directory that is about to go. Which worktree is *main* comes from that same
-listing too — the row named `main` — and not from worktrunk's `main` flag,
-which arrives as `--main`: in a bare-rooted wrapper, where every worktree is
-detached at the same commit, worktrunk has flagged a leftover branch workspace
-and not the real `main`, so protecting its answer would protect the wrong
-directory. The main worktree, the wrapper root and jj's own `main` row are one
-protected set, and so is a workspace and a worktree that disagree — a jj row
-with no worktree at its root, or a worktree no row claims — because removing
-one half of that is the state nobody unpicks from a float.
+listing too — the row named `main`. `--main` arrives as Rex's own answer to
+the same question, and the two are compared rather than one trusted: a
+disagreement is refused before the fetch, because a repo whose two readings
+disagree is one this flow cannot tell how to act in. (History: `--main` used to
+be worktrunk's `main` flag, which in a bare-rooted wrapper of detached
+worktrees could name a leftover branch workspace instead of the real `main`.)
+The main worktree, the wrapper root and jj's own `main` row are one protected
+set, and they are compared by path, so a repo whose main workspace has another
+name is still protected.
 
 The audit removes nothing, and beyond the fetch its only writes are the two
 `main` moves below. It fetches first — `jj git fetch`, capped at 30 seconds
@@ -454,8 +498,7 @@ reports merged work as unmerged. A fetch that fails is itself a refusal, naming
 that nothing could be compared. Then:
 
 - **whether the branch is merged.** The base is the picker's own opening base —
-  the chain in [The base](#the-base), rendered as one jj revision:
-  `refs/remotes/origin/HEAD`'s branch as `<branch>@origin`, then `main@origin`,
+  the chain in [The base](#the-base), rendered as one jj revision: `main@origin`,
   then `master@origin`, then `@` — and what the branch has that base does not is
   read as *content*: `jj diff --summary -r '<base>..@'`. Content rather than
   ancestry, because a squash or a rebase merge leaves that diff empty while
@@ -493,48 +536,38 @@ or not, since neither of them removes anything.
 With nothing in the way the audit prints no block and asks no question. It hands
 five keys back to the action `work_done_go` — the project, the wrapper, the main
 worktree, the workspace's name and its directory — and the teardown itself is
-four steps. `wt remove '<path>' --foreground -y --format=json`, run from the
-main worktree, takes the worktree away — and, when the worktree has a branch,
-the branch with it. In a jj wrapper it usually has none: `gws` adds workspaces
-with `jj workspace add` and nothing attaches a branch to them, so there is
-nothing for worktrunk to delete and its reply's `branch_outcome` says
-`not_attempted`, which this flow reads as a completed teardown. `deleted` is
-the other complete answer; anything else — `retained_unmerged`, or a reply that
-says nothing — is reported. A bookmark or a branch ref that survives the
-removal is not a failure here and is not this flow's business: the finishing
-skill's Step 8 owns bookmarks, so the teardown neither deletes nor reports
-one. The project's own `post-remove` hook — the
-`jj workspace forget {{ branch }}` line `ginit` seeds into
-`main/.config/wt.toml` — is the fast path that forgets the jj workspace, and it
-is not a guarantee: worktrunk cannot even expand that line for a detached
-worktree, which is all `jj workspace add` (and so `gws`) creates, because there
-is no `branch` variable to interpolate there. So the row is waited for rather
-than assumed, and a row the wait still finds is forgotten by the flow itself —
-the same `jj workspace forget '<workspace>'`, from the main worktree — before
-`wt list` has to stop showing the directory. The tab is closed by the script
-rather than by the action, and last of all: `cd` to the main worktree — the
-script's own directory is gone by now — then
+one command and three reads. `djo remove '<workspace>' -y`, run from the main
+worktree, is the whole of it: dojjo deletes the directory, forgets the workspace
+row and deletes the bookmark in one command, and `-y` because nobody is there to
+answer a prompt. No `--keep-bookmark`: the branch is merged and goes with the workspace
+it was named for. dojjo has no merged check of its own, so a refusal is its own
+line and the audit above is the only judgement in the flow.
+
+Nothing in that is taken on trust. The **row** is read back from
+`jj --ignore-working-copy workspace list` — from the op log, because a post-start
+hook may still hold the working-copy lock — and a row that outlives a bounded
+wait (up to ten reads over about two seconds) is forgotten by the flow itself,
+`jj workspace forget '<workspace>'` from the main worktree, before being
+reported. The **directory** is checked with `test ! -d`. And the **bookmark** is
+read with a jj revset, `bookmarks(exact:"<name>")`, rather than a
+`jj bookmark list`: deleting a bookmark a remote tracks only tombstones it, so a
+listing goes on printing the name and cannot tell a deleted bookmark from a kept
+one.
+
+The tab is closed by the script rather than by the action, and last of all: `cd`
+to the main worktree — the script's own directory is gone by now — then
 `rex window close -s <session> <window>`, as its final statement.
 `work_done_go` closes nothing, because the block that closing would kill is the
 one whose script asked for the close.
 
-Four flags are left off, and the reason is that order. `-f`, `-D` and `--reap`
-exist for the working copy with changes in it, the branch that is not merged and
-the program still running in the tab — the three the audit has already refused —
-and a refusal worktrunk makes on its own terms is the report. `--no-hooks` is
-the one flag with no counterpart in the audit: the hook is the flow's fast path
-to the same forget it can make itself, so skipping it would only cost a command.
-`--foreground` is passed for what it does do, which is make the removal itself
-block, so its exit code and its `branch_outcome` are final by the time they are
-read. What it does not do is wait for `post-remove`, because worktrunk runs its
-post-* hooks in the background — so the workspace listing is read, waited on and
-read again, up to ten reads over about two seconds, and only a row still there
-at the end of that is worth forgetting: `jj workspace forget '<workspace>'`, run
-from the main worktree, then the listing is read once more, and only a row that
-survives the flow's own forget is reported as a leftover. A hook that did its
-job costs no extra command. The listing is read from the op log
-(`jj --ignore-working-copy workspace list`), not from the working copy, so the
-hook holding the working-copy lock cannot block the read.
+The flags that are left off are worktrunk's — `-f`, `-D`, `--reap` and
+`--no-hooks` — and none of them has a counterpart here: the first three exist
+for the working copy with changes in it, the branch that is not merged and the
+program still running in the tab, all of which the audit has already refused,
+and `--no-hooks` would skip dojjo's own remove hooks, which are dojjo's to run.
+The row is read from the op log (`jj --ignore-working-copy workspace list`),
+not from the working copy, so a hook holding the working-copy lock cannot block
+the read.
 
 A refusal is a screen rather than a failure: one block naming everything in the
 way, in the order the audit asked, then `nothing was removed; press any key`,
@@ -545,12 +578,12 @@ paragraph of its own.
 
 - **The two answers disagree about which worktree is main.** `jj says the main
   workspace is <path>, --main says <path>: the two answers disagree about which
-  worktree is main, so nothing was done` — jj's `main` row against the main
-  worktree worktrunk flagged. This one is refused before the fetch, so nothing
-  was fetched, moved or removed either: a repo whose two answers disagree is one
-  this flow cannot tell how to act in. Compare `jj workspace list` with
-  `wt list` and fix whichever of the two is wrong before pressing the key
-  again.
+  worktree is main, so nothing was done` — jj's `main` row against the answer
+  Rex's own read of that row produced. This one is refused before the fetch, so
+  nothing was fetched, moved or removed either: a repo whose two readings
+  disagree is one this flow cannot tell how to act in. Compare `jj workspace
+  list` in the two directories and fix whichever is wrong before pressing the
+  key again.
 - **Changes not merged into the base.** `changes not merged into <base>: 3
   changes, 4 paths` — the base is the one resolved above, `main@origin` in a
   clone whose default branch is `main` — and the paths are listed underneath,
@@ -572,104 +605,47 @@ paragraph of its own.
   not moved: it is not empty; run jj new <base> in <main>`.
 
 A removal that has happened can still be followed by a report, on the float that
-stays up. These two are the flow's own cases; an unreadable `jj` listing, an
-unreadable worktrunk listing, and a path `wt list` still shows are reported here
-too, and the list is not meant to be exhaustive:
+stays up. These three are the flow's own cases; a `jj` listing that cannot be
+read, a directory check that could not be run, and a bookmark read that fails are
+reported here too, and the list is not meant to be exhaustive:
 
-- **A branch worktrunk kept.** `the branch feat/6c4 was kept (retained_unmerged):
-  run wt remove -D 'feat/6c4'`. The command names the branch rather than the
-  path, because the worktree is gone by the time this line is read. The flow
-  does not run `-D`: if worktrunk and the audit disagree about merged, that is
-  yours to settle.
+- **A bookmark dojjo kept.** `the bookmark feat/6c4 was kept: run jj bookmark
+  delete 'feat/6c4'`. `djo remove` deletes the bookmark with the workspace, so a
+  bookmark that still resolves is a teardown that did not finish — and dojjo has
+  no merged check, so this is the *only* "kept" case the flow has. The command
+  is named rather than run: finishing the job by hand is the person's call.
+- **A directory that is still there.** `<path> is still there: run djo list -f in
+  <main>` — dojjo's own listing is the thing that says what it thinks it removed.
 - **A jj row that survived the flow's own forget.** `the jj workspace feat/6c4
-  is still registered: run jj workspace forget 'feat/6c4'`. The seeded hook ends
-  in `|| true` and runs in the background, so it is waited for first: a row it
-  cleared a moment later is not reported at all. A row the wait still finds is
-  forgotten by the flow itself and read again, so this line means the forget
-  failed or the row outlasted it.
+  is still registered: run jj workspace forget 'feat/6c4'`. The row is waited
+  for first, so one that went a moment later is not reported at all. A row the
+  wait still finds is forgotten by the flow itself and read again, so this line
+  means the forget failed or the row outlasted it.
 
-Neither of those closes the tab. The directory is gone either way, and the
-command on the screen is the last thing left to type.
+None of those closes the tab. The directory is gone either way, and the command
+on the screen is the last thing left to type.
 
 ## Converting a repo to jj workspaces
 
-Creating work needs a repo that is ginit'd: a jj directory repo at the wrapper,
-`main` as a full-sparse workspace beside it, and `ginit`'s seed files in the
-tree. `ginit` builds that from nothing — an empty remote, and a directory it
-makes itself — so it cannot be re-run over a repo that already has a `.git` at
-its wrapper and worktrees beside it. What is needed instead is ginit's own step,
-by hand, in the order that works.
+Creating work needs a repo in the wrapper shape: a jj directory repo at the
+wrapper, `main` as a full-sparse workspace beside it, and hook config in the tree
+every new workspace is cut from. `jinit` builds that shape from an empty remote
+and `jclone` from an existing one, and neither can be re-run over a repo that
+already has a `.git` at its wrapper and worktrees beside it.
 
-Run all of this from the wrapper — the directory holding `.git`, `main` and the
-worktrees — with nothing uncommitted in any of them.
+**That conversion is a runbook, not a section here:**
+[`docs/dojjo-conversion-runbook.md`](docs/dojjo-conversion-runbook.md). It covers
+every repo this flow is meant for, both routes (rebuild the working copy with
+`jclone`, or clean it up in place), the `[hooks.post-start]` rewrite a
+worktrunk-shaped `.config/wt.toml` needs, deleting the old forget hook, and the
+per-repo check at the end — a throwaway `jws` create whose hooks really ran, and a
+`djo remove` that leaves no workspace row and no bookmark.
 
-1. **Commit the seed files first.** `main` needs what `ginit` would have written
-   there: the post-start `copy-ignored` hook and the post-remove
-   `jj workspace forget {{ branch }}` hook in `.config/wt.toml`, the
-   `.worktreeinclude`, and the ignore lines `.env` and `.worktrees/`. `ginit`
-   writes all three in its second step — those two files and the `.gitignore`
-   lines — so copy them from there. They have to be committed to `main` **before**
-   `main` is re-created, because the hooks have to be in the tree the new
-   workspace gets.
-2. **Remove the existing worktrees; do not adopt them.** `jj workspace add`
-   refuses a directory that has anything in it, and an ordinary git worktree
-   left behind in a converted repo is a hazard: a `jj` command run inside one
-   resolves the *wrapper* as the workspace and snapshots that whole directory
-   into the empty default one. The branch stays; only the working copy goes.
-
-   ```bash
-   git worktree list                     # what is there
-   git worktree remove --force feat-pxp  # one line per worktree
-   ```
-
-3. **Keep the beads database out of jj's object store.** `.beads/` sits at the
-   wrapper root, and the first `jj git init` snapshots whatever is there, so the
-   embedded Dolt database and `.beads.gate.lock` would land in `.git` as objects
-   before the inert workspace is abandoned. One line, **before** the `jj git
-   init` in step 4, keeps them out:
-
-   ```bash
-   printf '.beads/\n.beads.gate.lock\n' >> .git/info/exclude
-   ```
-
-4. **Re-create `main` in ginit's order.**
-
-   ```bash
-   jj git init --git-repo .git .
-   git worktree remove --force main
-   jj workspace add --colocate main
-   git -C main checkout main
-   jj bookmark track main@origin || true
-   jj sparse set --clear
-   jj new "root()" -m 'default workspace: intentionally empty (see ginit)'
-   wt -C main -y hook post-start
-   ```
-
-   The order is the point. `jj workspace add` copies the sparse patterns of the
-   workspace it runs from, so `main` has to be added before
-   `jj sparse set --clear` empties the default workspace — otherwise the new
-   `main` is as empty as the workspace at the wrapper. The `jj sparse set
-   --clear` and the `jj new "root()"` are what make that wrapper workspace
-   inert once its worktree is gone, and the last line runs the post-start hooks
-   by hand, because jj and not wt made this worktree.
-5. **Check it with the flow itself**, which are the two checks no script here
-   can make. In `main`:
-   - **a create.** Press `ctrl+space>n` and pick a branch name that does not
-     exist yet, so the pick is a create: the tab lands in a jj workspace with
-     the branch attached and the hooks run — `jj workspace list` from `main`
-     names the new one — and the agent starts in it. `^C` kills the agent and
-     the pane stays a shell in that workspace.
-   - **a switch to what that made.** Pick the same branch a second time and the
-     tab must *switch* to the worktree that is already there rather than make
-     anything: it is worktrunk's switch, and this is the exercise that proves it
-     accepts a workspace jj created (on a scratch wrapper it answers
-     `{"action":"existing","branch":"feat/zz","path":"…/feat-zz"}`, exit 0, to
-     `wt -C <main> switch feat/zz --no-cd --format=json`). Through the flow the
-     tab lands in that directory and `jj workspace list` names no second one.
-     Close the tab the create left open first — exit the shell it left, or close
-     the window: with a tab already open on the branch the pick finds it and
-     shows it again, so the wrapper never runs and `wt switch` is never made.
-     The check has passed only if a switch really happened.
+The one fact worth knowing before you start: `jj workspace add` refuses a
+directory that has anything in it, so an existing worktree is removed rather than
+adopted — leaving one behind is a hazard, because a `jj` command run inside it
+resolves the *wrapper* as the workspace and snapshots the whole directory into the
+inert default one.
 
 ## Layout
 
@@ -689,10 +665,16 @@ bash test/run.sh
 ```
 
 The Lua tests stub the `rex` global, so they need no Rex server, and the shell
-tests read saved tool output instead of asking `bd`, `fzf`, `wt` or the
+tests read saved tool output instead of asking `bd`, `fzf`, `jj` or the
 repository, drive the screen's own subcommands (`composer header`, `cycle-agent`,
 `cycle-base`, `fzf-answer`) through pipes, and pipe the branch answer instead of
 typing it at the prompt. The screen's own paths — the ones that exist only where
 stdin is a terminal — are run with `PICK_SCREEN=1`, the script's answer for a run
 with no terminal to hand, so they are the script itself rather than a patched
 copy of it, with `fzf` and `gum` stand-ins answering for the person.
+
+`test/jws_test.sh`, `test/jinit_test.sh` and `test/jclone_test.sh` read the three
+fish functions from `~/.config/fish/functions` (override with `JWS_FILE`,
+`JINIT_FILE`, `JCLONE_FILE`), and fail — rather than skipping — on a machine
+that does not have them: they are the deliverable, and a suite that quietly
+skipped its own subject would be worse than one that is red.

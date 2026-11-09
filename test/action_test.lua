@@ -200,13 +200,56 @@ local rex_stub = fresh_rex()
 local M = dofile(here .. "/../init.lua")
 M.setup{}
 
--- The project every test uses: a worktrunk repository whose main worktree is
--- main/, with a beads database reachable from it.
+-- The project every test uses, on disk: project_for finds the wrapper by walking
+-- for `.jj/repo` as a directory, so the fixture is a real one -- a mktemp -d per
+-- run, removed with the file as setup_test.lua's is -- with main and the branch
+-- workspace beneath it.
+local function mktemp_dir()
+  local pipe = io.popen("mktemp -d 2>/dev/null")
+  if pipe == nil then return nil end
+  local path = pipe:read("l")
+  pipe:close()
+  if path == nil or path == "" then return nil end
+  return (path:gsub("/+$", ""))
+end
+
+-- One shell word, whatever the path holds, so a TMPDIR with a space in it is a
+-- directory rather than two arguments. Quoted here rather than through the
+-- module's own shell_quote, so the fixture does not lean on the code under test.
+local function quote(text) return "'" .. tostring(text):gsub("'", "'\\''") .. "'" end
+
+local function mkdirp(path)
+  os.execute("mkdir -p " .. quote(path))
+end
+
 local PROJECT = "pmm-iris"
-local ROOT = "/x/pmm-iris"
-local MAIN = "/x/pmm-iris/main"
+local TMP = assert(mktemp_dir(), "mktemp -d failed")
+local ROOT = TMP .. "/" .. PROJECT
+local MAIN = ROOT .. "/main"
 local BRANCH = "bug/58h"
+local WORKTREE = ROOT .. "/bug-58h"
 local BEAD = "pmm-iris-58h"
+mkdirp(ROOT .. "/.jj/repo")
+mkdirp(MAIN)
+mkdirp(WORKTREE)
+
+-- jj's workspace list, as project_for and the done flow read it: one name, one
+-- tab, the root, one newline per row.
+local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- jj's answer as that template prints it. A non-zero code is jj refusing -- a
+-- failed read rather than a listing without the row -- and its line is on stderr
+-- the way a real jj's is.
+local function jj_rows(stdout, code)
+  code = code or 0
+  return { ok = code == 0, code = code, stdout = code == 0 and stdout or "",
+    stderr = code == 0 and "" or stdout }
+end
+
+-- The fixture's rows: the wrapper's default workspace, main, and the branch
+-- workspace the tab is in.
+local JJ_ROWS = "default\t" .. ROOT .. "\nmain\t" .. MAIN
+  .. "\n" .. BRANCH .. "\t" .. WORKTREE .. "\n"
 
 -- What the picker hands back for a new branch on that bead.
 local function payload(overrides)
@@ -238,6 +281,14 @@ local function exec_for(stub, name)
     if program(call) == name then return call end
   end
   return {}
+end
+
+-- What the first call that ran NAME was handed: the program itself, or the
+-- command text a login-shell probe gave the shell. nil when it never ran, so an
+-- absent call reads as a failed assertion instead of a crash.
+local function command_for(stub, name)
+  local call = exec_for(stub, name)
+  return call.argv and program(call)
 end
 
 -- The one recorded rex.call for a method, and how many there were. The request
@@ -473,18 +524,9 @@ end
 -- whose stub already answers per block.
 local function done_stub(by_block)
   local stub = tab_stub(by_block)
-  -- The project is the fixture's, so project_for's two questions answer here as
-  -- they do in setup_test.lua.
-  stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pmm-iris/.git\n", stderr = "" }
-  stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "wt list", stderr = "" }
-  stub.json_replies = {
-    ["wt list"] = { items = { { worktree = { path = MAIN, main = true } } } },
-  }
-  stub.json.decode = function(text)
-    local value = stub.json_replies[text]
-    if value == nil then return nil, "rex.json.decode: text is not valid JSON" end
-    return value
-  end
+  -- The project is the fixture's, so project_for finds the wrapper and the main
+  -- workspace it holds, as it does in setup_test.lua.
+  stub.exec_replies[WORKSPACES] = jj_rows(JJ_ROWS)
   -- The float itself: one layer, recorded, because the argv it is opened with
   -- is the whole of what this action decides.
   stub.layers = {}
@@ -497,7 +539,7 @@ end
 
 do
   local stub = done_stub({
-    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:one"] = { foreground = { name = "fish", cwd = WORKTREE } },
     ["block:two"] = { foreground = { name = "node" } },
   })
   local ok = pcall(M.work_done,
@@ -506,7 +548,7 @@ do
   eq("the audit names the tab it will close, and what that tab is running",
     stub.layers[1].layout.block.options.command,
     { M.options.script, "done", "--main", MAIN, "--root", ROOT, "--project", PROJECT,
-      "--cwd", "/x/pmm-iris/bug-58h", "--session", "session:iris",
+      "--cwd", WORKTREE, "--session", "session:iris",
       "--window", "window:tab", "--running", "node" })
 end
 
@@ -515,7 +557,7 @@ end
 -- work.
 do
   local stub = done_stub({
-    ["block:one"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/bug-58h" } },
+    ["block:one"] = { foreground = { name = "fish", cwd = WORKTREE } },
     ["block:two"] = function() error("no process") end,
   })
   local ok = pcall(M.work_done,
@@ -529,62 +571,59 @@ end
 
 -- work_done_go() ----------------------------------------------------------------
 --
--- The audit's answer, carried out: one removal through the login shell in the main
--- worktree, then the reads that decide whether it happened -- the branch worktrunk
--- reported, the jj row the seeded hook may have left behind, and the worktree
--- listing. The removal's reply is read from test/fixtures, where each file holds
--- worktrunk's own reply shape -- an array, one entry per removal -- as measured on
--- the installed wt; the value rex.json.decode makes of that text is written beside
--- it. Each case gives the removal its own reply and says what the documents decode
--- to; a command the flow did not run has no reply at all, so a wrong argv fails
--- here instead of answering plausibly.
+-- The audit's answer, carried out: one removal through the login shell in the
+-- main worktree -- dojjo forgets the workspace, deletes its directory and
+-- deletes its bookmark -- and then the three reads that decide whether it
+-- happened: the jj workspace row, the directory itself, and the bookmark. Each
+-- is read rather than inferred from an exit code, and each has its own one line
+-- when it disagrees. A command the flow did not run has no reply at all, so a
+-- wrong argv fails here instead of answering plausibly.
 
-local REMOVE = "wt remove '/p/demo/feat-6c4' --foreground -y --format=json"
--- Read from the op log rather than the working copy: the background post-remove
--- hook is running `jj workspace forget` in the same repository, and a plain read
--- waits on the working-copy lock that hook holds.
-local WORKSPACES = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
-local WORKTREES = "wt list --format=json"
+-- -y because nobody is there to answer a prompt, and no --keep-bookmark because
+-- the branch is merged and goes with the workspace it named. The workspace is
+-- what dojjo takes, so it is the workspace that is quoted -- the path never
+-- reaches a shell at all.
+local REMOVE = "djo remove 'feat/6c4' -y"
+-- The workspace read is WORKSPACES, defined with the project fixture above: it
+-- reads the op log rather than the working copy, because another jj in the same
+-- repository may hold that lock. The bookmark read is the same way round for the
+-- same reason.
+-- The bookmark itself is read as a live target rather than as a name in a
+-- listing: `jj bookmark delete` -- which is what dojjo's remove does -- only
+-- marks a remote-tracked bookmark deleted, so `jj bookmark list` goes on printing
+-- its name and a listing cannot tell a deleted bookmark from a kept one. A revset
+-- that resolves to no commit can.
+local BOOKMARK = [[jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"feat/6c4")' -T 'commit_id ++ "\n"']]
+-- The listing a tombstone still shows up in: a command this action must not read,
+-- kept here so a case can answer it and prove it was never asked.
+local BOOKMARKS_LIST = [[jj bookmark list -T 'name ++ "\n"']]
 -- What the flow runs itself when the wait still finds the row: one `jj
 -- workspace forget` for the workspace, its name quoted like every other word
 -- handed to the shell.
 local FORGET = "jj workspace forget 'feat/6c4'"
+-- The directory check is not a shell line: it is one `test` argv, so the path is
+-- never parsed as text and needs no quoting.
+local DIRECTORY = "test"
 
--- One fixture, exactly as worktrunk wrote it.
-local function fixture(name)
-  local file = assert(io.open(here .. "/fixtures/" .. name, "rb"))
-  local text = file:read("*a")
-  file:close()
-  return text
-end
-
--- A successful exit for the command whose text it is.
-local function reply(text)
-  return { code = 0, stdout = text, stderr = "" }
-end
-
--- The three removals a worktree can have: an attached branch worktrunk deleted,
--- one it kept because the work was unmerged, and the detached workspace a jj
--- wrapper produces, which has no branch to delete. `branch` is null in the last
--- one, which is nil here, because rex.json.decode turns null into nil.
-local REMOVED = fixture("wt-remove-deleted.json")
-local RETAINED = fixture("wt-remove-retained.json")
-local DETACHED = fixture("wt-remove-detached.json")
-
-local DELETED_ENTRY = { kind = "worktree", branch = "feat/x", path = "/p/demo/feat-x",
-  branch_outcome = "deleted" }
-local RETAINED_ENTRY = { kind = "worktree", branch = "feat/x", path = "/p/demo/feat-x",
-  branch_outcome = "retained_unmerged" }
-local DETACHED_ENTRY = { kind = "worktree", path = "/p/demo/feat-6c4",
-  branch_outcome = "not_attempted" }
-
--- The two listings a completed teardown leaves.
+-- What dojjo and the three checks answer on a teardown that finished: dojjo's
+-- own exit, a directory already gone, and two listings without the workspace in
+-- them. The two after that are what a teardown that did not finish leaves.
+local REMOVED = { code = 0, stdout = "", stderr = "" }
+local GONE = { code = 0, stdout = "", stderr = "" }
+local MISSING = { code = 1, stdout = "", stderr = "" }
 local WORKSPACES_CLEAR = {
   code = 0, stdout = "default\t/p/demo\nmain\t/p/demo/main\n", stderr = "",
 }
-local WORKTREES_CLEAR = { code = 0,
-  stdout = '{"items":[{"branch":"main","worktree":{"path":"/p/demo/main","main":true}}]}',
-  stderr = "" }
+-- The bookmark read's two answers: a commit id while the bookmark is there, and
+-- nothing at all once it is gone -- which is also what a tombstone leaves, since
+-- a deleted bookmark resolves to no commit.
+local BOOKMARK_GONE = { code = 0, stdout = "", stderr = "" }
+local BOOKMARK_LIVE = {
+  code = 0, stdout = "7281e13e7df372cd62d2d6bc8286ef06091b0f82\n", stderr = "",
+}
+-- A workspace row the flow still sees: the removal exited 0 and the row is
+-- nevertheless there.
+local ROW_LEFT = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
 
 -- The audit's hand-back: the five keys, as the float sends them back.
 local function removal(overrides)
@@ -594,31 +633,16 @@ local function removal(overrides)
   return args
 end
 
--- The three reads answer with the clear fixtures unless the case says otherwise,
--- and json.decode answers the documents by the text it is handed -- a reply whose
--- text is not in the table decodes to nothing, so a case has to say what it
--- reads rather than let an unread document pass as an empty one.
-local function go_stub(by_command, documents)
+-- The four reads answer with the clear replies unless the case says otherwise.
+-- rex.json.decode is left as the stub's own refusal: this action reads no
+-- document at all any more, so a decode is a fault in the code, not an answer.
+local function go_stub(by_command)
   local stub = fresh_rex()
-  stub.exec_replies[REMOVE] = reply(REMOVED)
+  stub.exec_replies[REMOVE] = REMOVED
   stub.exec_replies[WORKSPACES] = WORKSPACES_CLEAR
-  stub.exec_replies[WORKTREES] = WORKTREES_CLEAR
+  stub.exec_replies[DIRECTORY] = GONE
+  stub.exec_replies[BOOKMARK] = BOOKMARK_GONE
   for command, value in pairs(by_command or {}) do stub.exec_replies[command] = value end
-  stub.json_replies = {
-    [REMOVED] = { DELETED_ENTRY },
-    [RETAINED] = { RETAINED_ENTRY },
-    [DETACHED] = { DETACHED_ENTRY },
-    [WORKTREES_CLEAR.stdout] = { items = { { branch = "main",
-      worktree = { path = "/p/demo/main", main = true } } } },
-  }
-  for text, value in pairs(documents or {}) do stub.json_replies[text] = value end
-  stub.json.decode = function(text)
-    local value = stub.json_replies[text]
-    if value == nil then
-      return nil, "rex.json.decode: text is not valid JSON"
-    end
-    return value
-  end
   return stub
 end
 
@@ -631,19 +655,35 @@ local function runs(stub, name)
   return count
 end
 
--- The clean path: one removal, then the two verifications, and nothing else.
+-- The clean path: one removal, then the three verifications, and nothing else.
 do
   local stub = go_stub()
   local ok, result = pcall(M.work_done_go, {}, removal())
   eq("a complete removal succeeds", ok, true)
   eq("a complete removal returns nothing", result, nil)
-  eq("the removal runs first, then the two verifications", stub.events,
-    { REMOVE, WORKSPACES, WORKTREES })
+  eq("the removal runs first, then the three verifications", stub.events,
+    { REMOVE, WORKSPACES, DIRECTORY, BOOKMARK })
+  -- The removal's three properties said out loud, rather than the stub's key
+  -- compared with itself: `-y` because nobody is there to answer, and no
+  -- --keep-bookmark because the merged branch goes with the workspace.
+  contains("the removal is dojjo's own remove", command_for(stub, REMOVE), "djo remove")
+  contains("the removal answers dojjo's prompt", command_for(stub, REMOVE), " -y")
+  eq("the removal does not ask dojjo to keep the bookmark",
+    tostring(command_for(stub, REMOVE)):find("keep-bookmark", 1, true), nil)
   eq("the removal runs in the main worktree", exec_for(stub, REMOVE).cwd, "/p/demo/main")
-  -- Both verifications run there too: the pane's own directory is the one the
+  -- The verifications run there too: the pane's own directory is the one the
   -- removal just unlinked, so a process started in it may not even exec.
   eq("the jj read runs in the main worktree", exec_for(stub, WORKSPACES).cwd, "/p/demo/main")
-  eq("the worktree read runs in the main worktree", exec_for(stub, WORKTREES).cwd, "/p/demo/main")
+  eq("the directory check is one test argv, path and all",
+    exec_for(stub, DIRECTORY).argv, { "test", "!", "-e", "/p/demo/feat-6c4" })
+  eq("the directory check runs in the main worktree", exec_for(stub, DIRECTORY).cwd, "/p/demo/main")
+  eq("the bookmark read runs in the main worktree", exec_for(stub, BOOKMARK).cwd, "/p/demo/main")
+  contains("the bookmark read asks jj for a live target",
+    command_for(stub, BOOKMARK), [[bookmarks(exact:"feat/6c4")]])
+  -- Not the listing: a tombstone keeps printing its name there, so a listing
+  -- cannot tell a deleted bookmark from a kept one.
+  eq("the bookmark read is not a listing",
+    tostring(command_for(stub, BOOKMARK)):find("bookmark list", 1, true), nil)
   -- The block that would be closed is the one whose script called this action, so
   -- this action makes no rex.call at all: there is nothing it could close.
   eq("a complete removal closes nothing", #stub.calls, 0)
@@ -651,101 +691,174 @@ do
   eq("a clean teardown never sleeps", runs(stub, "sleep"), 0)
 end
 
--- A branch worktrunk kept is a failure, reported with the one command that would
--- finish the job: -D is the person's to run, never the flow's. The command names
--- the *branch*, because the worktree's path is gone by the time this line is read.
-do
-  local stub = go_stub({ [REMOVE] = reply(RETAINED) })
-  local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("a kept branch fails", ok, false)
-  contains("the kept branch names the branch", said, "feat/x")
-  contains("the kept branch says what worktrunk did", said, "retained_unmerged")
-  contains("the kept branch names the command that would finish it", said,
-    "wt remove -D 'feat/x'")
-  eq("a kept branch verifies nothing", #stub.exec_calls, 1)
+-- Nothing in this action is worktrunk's any more: no word of an argv it runs is
+-- the tool the flow used to shell out to. A word, not a substring of the joined
+-- line -- a workspace under a path with `wt` in it is nobody's worktrunk -- but
+-- an argv element can be a whole shell line (`sh -lc '… wt …'`), so each one is
+-- cut into the words a shell would see before it is read. The separators are
+-- the ones a shell breaks a command line on, `=` included, so an assignment
+-- spelled `x=wt` is caught too.
+local function names_worktrunk(call)
+  for _, argument in ipairs(call.argv or {}) do
+    local text = tostring(argument)
+    if text:find("worktrunk", 1, true) then
+      return true
+    end
+    for word in text:gmatch("[^%s;|&()<>=]+") do
+      if word == "wt" then
+        return true
+      end
+    end
+  end
+  return false
 end
 
--- A detached worktree is the jj wrapper's normal case: `gws` adds workspaces with
--- `jj workspace add` and nothing attaches a branch, so worktrunk has no branch to
--- delete and says `not_attempted`. Nothing was left behind, so the teardown is
--- complete -- and it still verifies both stores and closes nothing.
+-- The scan has to reach inside a shell line, and it has to leave a path that
+-- merely holds the letters alone: both said here, on the reader itself, so a
+-- scan that went back to whole-argument comparisons fails this instead of
+-- quietly passing every case below.
+eq("the worktrunk scan reads the words of a shell line",
+  names_worktrunk({ argv = { "sh", "-lc", "wt step copy-ignored && echo done" } }), true)
+eq("the worktrunk scan is not fooled by a path that holds the letters",
+  names_worktrunk({ argv = { "sh", "-lc", "/p/demo-wt/main done" } }), false)
+
 do
-  local stub = go_stub({ [REMOVE] = reply(DETACHED) })
+  local stub = go_stub()
+  pcall(M.work_done_go, {}, removal())
+  local stray = {}
+  for _, call in ipairs(stub.exec_calls) do
+    if names_worktrunk(call) then
+      stray[#stray + 1] = table.concat(call.argv, " ")
+    end
+  end
+  eq("nothing the action runs names worktrunk", stray, {})
+end
+
+-- dojjo deletes the bookmark with the workspace, so a bookmark that still
+-- resolves after the removal is the one thing left to report: the flow does not
+-- delete it, and the command that would is the person's to run. dojjo has no
+-- merged check, so a bookmark left behind is the only "kept" case there is.
+do
+  local stub = go_stub({ [BOOKMARK] = BOOKMARK_LIVE })
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a bookmark dojjo left behind fails", ok, false)
+  contains("the kept bookmark is named", said, "the bookmark feat/6c4 was kept")
+  contains("the kept bookmark names the command that would finish it", said,
+    "run jj bookmark delete 'feat/6c4'")
+  eq("a kept bookmark closes nothing", #stub.calls, 0)
+end
+
+-- The tombstone a remote-tracked bookmark leaves behind, which is the case that
+-- makes the live-target read the only correct one: `jj bookmark delete` -- what
+-- dojjo's remove does -- only marks the bookmark deleted, and `jj bookmark list`
+-- goes on printing its name (twice: the deleted local one and the remote one). A
+-- listing therefore reports a perfectly finished teardown as a kept bookmark, in
+-- a line whose remedy cannot work -- `jj bookmark delete` answers "no matching
+-- bookmarks". Nothing resolves, so nothing was kept.
+do
+  local stub = go_stub({
+    [BOOKMARK] = BOOKMARK_GONE,
+    -- What the tombstone leaves in the listing, answered only so that reading it
+    -- would be a failure of this case rather than a missing reply.
+    [BOOKMARKS_LIST] = { code = 0, stdout = "feat/6c4\nfeat/6c4\nmain\n", stderr = "" },
+  })
   local ok, result = pcall(M.work_done_go, {}, removal())
-  eq("a detached workspace is a complete teardown", ok, true)
-  eq("a detached teardown returns nothing", result, nil)
-  eq("a detached teardown still verifies both stores", stub.events,
-    { REMOVE, WORKSPACES, WORKTREES })
-  eq("a detached teardown closes nothing", #stub.calls, 0)
+  eq("a tombstone does not fail a finished teardown", ok, true)
+  eq("a torn-down branch returns nothing", result, nil)
+  eq("the tombstone's listing is never read",
+    exec_for(stub, BOOKMARKS_LIST).argv, nil)
 end
 
--- An entry with no branch_outcome at all is a failure, not a pass (Review Focus
--- 3): worktrunk said nothing about the branch, and nothing is not deleted. With
--- no branch named either, the report falls back to the workspace's own name.
+-- A bookmark read that cannot be run is a failure, not a proof that nothing is
+-- left: a check that answered "no bookmark" because it could not see the
+-- repository would pass a teardown that kept one.
 do
-  local bare = '[{"removed":true}]'
-  go_stub({ [REMOVE] = reply(bare) }, { [bare] = { { removed = true } } })
+  go_stub({ [BOOKMARK] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
   local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("a reply without branch_outcome fails", ok, false)
-  contains("the missing outcome is said out loud", said, "worktrunk said nothing")
-  contains("the missing outcome falls back to the workspace's name", said,
-    "wt remove -D 'feat/6c4'")
+  eq("a bookmark read that failed fails the teardown", ok, false)
+  contains("the bookmark read failure is named", said,
+    "could not read the bookmark of feat/6c4")
+  contains("the bookmark read failure carries jj's line", said, "no jj repo here")
 end
 
--- An empty reply is neither shape worktrunk documents. The removal happened and
--- the answer about it did not, so there is no branch to report and none to name
--- a command for: the kept-branch line would claim worktrunk kept something it
--- never mentioned, so this has a line of its own (Review Focus: an empty array).
+-- A name jj's own revset syntax would choke on: the quote and the backslash
+-- are escaped inside the string literal, so jj parses the revset instead of
+-- failing on it -- and a failure there is reported as a failed read rather than
+-- read as a kept bookmark.
 do
-  local empty = '[]'
-  local stub = go_stub({ [REMOVE] = reply(empty) }, { [empty] = {} })
+  local name = 'odd"name'
+  local path = '/p/demo/odd"name'
+  local remove = [[djo remove 'odd"name' -y]]
+  local listing = 'main\t/p/demo/main\n'
+  local bookmark = [[jj --ignore-working-copy log --no-graph -r 'bookmarks(exact:"odd\"name")' -T 'commit_id ++ "\n"']]
+  local stub = go_stub({
+    [remove] = REMOVED,
+    [WORKSPACES] = { code = 0, stdout = listing, stderr = "" },
+    [DIRECTORY] = GONE,
+    [bookmark] = BOOKMARK_GONE,
+  })
+  local ok, result = pcall(M.work_done_go, {}, removal{ workspace = name, path = path })
+  eq("a name holding a quote is torn down", ok, true)
+  eq("a name holding a quote returns nothing", result, nil)
+  eq("the bookmark revset escapes the name's own quote",
+    exec_for(stub, bookmark).argv ~= nil, true)
+end
+
+-- And the same read with nothing to run it: a shell that could not start jj has
+-- no exit code and no jj line to carry, so the reason the exec gave is what the
+-- report names -- and it still fails rather than reading as "no bookmark".
+do
+  local stub = go_stub()
+  stub.exec_replies[BOOKMARK] = nil
   local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("an empty reply fails", ok, false)
-  contains("an empty reply says no removal was named", said, "named no removal")
-  contains("an empty reply names the listing to read", said, "wt list --format=json")
-  eq("an empty reply verifies nothing", #stub.exec_calls, 1)
+  eq("a bookmark read that could not run fails the teardown", ok, false)
+  contains("the bookmark read that could not run is named", said,
+    "could not read the bookmark of feat/6c4")
+  contains("the reason the bookmark read could not run is carried", said,
+    "executable file not found in PATH")
 end
 
--- A bare object is the single-entry shape read the same way as the array: it is
--- what the reply has been seen to be, and reading it as no removal would fail a
--- removal that finished.
+-- And the directory itself, which is what a person looks for when they doubt the
+-- removal: `test ! -e` is the whole of that check -- `-e` and not `-d`, since
+-- anything at all left at the path is a leftover -- and it is an argv rather
+-- than a shell line, so the path is one word whatever it holds.
 do
-  local bare = '{"branch_outcome":"deleted"}'
-  local stub = go_stub({ [REMOVE] = reply(bare) }, { [bare] = { branch_outcome = "deleted" } })
-  local ok, result = pcall(M.work_done_go, {}, removal())
-  eq("a bare object with a deleted branch is a complete teardown", ok, true)
-  eq("a bare object returns nothing", result, nil)
-  eq("a bare object still verifies both stores", stub.events,
-    { REMOVE, WORKSPACES, WORKTREES })
-end
-
--- `not_attempted` is complete only with no branch: with one named, worktrunk was
--- asked to delete a branch and did not, which is the kept branch it is.
-do
-  go_stub({ [REMOVE] = reply(REMOVED) }, { [REMOVED] = {
-    { branch = "feat/x", branch_outcome = "not_attempted" } } })
+  local stub = go_stub({ [DIRECTORY] = MISSING })
   local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("not_attempted with a branch fails", ok, false)
-  contains("not_attempted with a branch names the branch", said, "wt remove -D 'feat/x'")
-  contains("not_attempted with a branch says what worktrunk did", said, "not_attempted")
+  eq("a directory still there fails", ok, false)
+  contains("the surviving directory is named", said, "/p/demo/feat-6c4 is still there")
+  contains("the surviving directory names the listing to read", said,
+    "run djo list -f in /p/demo/main")
+  eq("a surviving directory never reads the bookmark",
+    exec_for(stub, BOOKMARK).argv, nil)
 end
 
--- The seeded hook ends in || true, so the jj row is verified rather than
--- trusted -- and, because worktrunk's post-* hooks are background hooks, the
--- first read can be too early on a healthy teardown. The wait is what the next
--- cases turn on; the sleep is stubbed, so they cost nothing to run.
+-- A check that cannot be run is not a proof of absence either.
+do
+  local stub = go_stub()
+  stub.exec_replies[DIRECTORY] = nil
+  local ok, said = pcall(M.work_done_go, {}, removal())
+  eq("a directory check that could not run fails", ok, false)
+  contains("the failure says the check could not be run", said,
+    "could not check whether /p/demo/feat-6c4 is still there")
+end
 
--- The hook is a fast path and not a guarantee, so a row the wait still names is
--- forgotten by the flow itself: once, from the main worktree, with the name
+-- dojjo's own remove is synchronous, so the row should already be gone -- but
+-- the exit code is not what this believes. The row is, so it is read again after
+-- a bounded wait, and only a row still there at the end of it is a leftover. The
+-- wait is what the next cases turn on; the sleep is stubbed, so they cost
+-- nothing to run.
+
+-- The fallback is the belt to dojjo's braces: a row the wait still names is
+-- forgotten by the flow itself, once, from the main worktree, with the name
 -- quoted like every other word the shell is handed.
-
 do
   -- The row never goes on its own; only the flow's own forget ends it.
   local forgot = false
   local stub = go_stub({
     [WORKSPACES] = function()
       if forgot then return WORKSPACES_CLEAR end
-      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+      return ROW_LEFT
     end,
     [FORGET] = function()
       forgot = true
@@ -754,17 +867,17 @@ do
   })
   stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
   local ok, result = pcall(M.work_done_go, {}, removal())
-  eq("a row no hook clears is forgotten by the flow", ok, true)
+  eq("a row nothing else clears is forgotten by the flow", ok, true)
   eq("a forgotten row returns nothing", result, nil)
   local forget = exec_for(stub, FORGET)
   eq("the forget names the workspace as one quoted word",
-    forget.argv and program(forget), FORGET)
+    command_for(stub, FORGET), FORGET)
   eq("the forget is run once", runs(stub, FORGET), 1)
   eq("the forget runs in the main worktree", forget.cwd, "/p/demo/main")
-  eq("the row is re-read after the forget, then the worktrees asked",
-    { stub.events[#stub.events - 2], stub.events[#stub.events - 1],
-      stub.events[#stub.events] },
-    { FORGET, WORKSPACES, WORKTREES })
+  eq("the row is re-read after the forget, then the directory and bookmarks asked",
+    { stub.events[#stub.events - 3], stub.events[#stub.events - 2],
+      stub.events[#stub.events - 1], stub.events[#stub.events] },
+    { FORGET, WORKSPACES, DIRECTORY, BOOKMARK })
   eq("a forgotten row closes nothing", #stub.calls, 0)
 end
 
@@ -773,7 +886,7 @@ end
 -- jj row is asked.
 do
   local stub = go_stub({
-    [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
+    [WORKSPACES] = ROW_LEFT,
     [FORGET] = { code = 1, stdout = "", stderr = "jj: workspace is locked\n" },
   })
   stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
@@ -793,20 +906,20 @@ do
   -- nothing is slept for it.
   eq("the wait reads ten times", runs(stub, WORKSPACES), 11)
   eq("every wait read after the first waits first", runs(stub, "sleep"), 9)
-  eq("a surviving jj row stops before the worktrees are asked",
-    exec_for(stub, WORKTREES).argv, nil)
+  eq("a surviving jj row stops before the directory is checked",
+    exec_for(stub, DIRECTORY).argv, nil)
 end
 
 -- And the other way round, which is the narrower window this whole mechanism
--- exists for: the background hook clears the row in the gap before the flow's
--- own forget, so that forget fails against a workspace that is already gone.
--- The row is what is believed, so this is a finished teardown, not a leftover.
+-- exists for: the row clears in the gap before the flow's own forget, so that
+-- forget fails against a workspace that is already gone. The row is what is
+-- believed, so this is a finished teardown, not a leftover.
 do
   local forgot = false
   local stub = go_stub({
     [WORKSPACES] = function()
       if forgot then return WORKSPACES_CLEAR end
-      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
+      return ROW_LEFT
     end,
     [FORGET] = function()
       forgot = true
@@ -826,7 +939,7 @@ end
 -- is checked, not the exit code of the command the flow ran to clear it.
 do
   local stub = go_stub({
-    [WORKSPACES] = { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" },
+    [WORKSPACES] = ROW_LEFT,
     [FORGET] = { code = 0, stdout = "", stderr = "" },
   })
   stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
@@ -836,30 +949,25 @@ do
     "jj workspace forget 'feat/6c4'")
   eq("a row that survived is re-read after the forget",
     runs(stub, "sleep"), runs(stub, WORKSPACES) - 2)
-  eq("a row that survived stops before the worktrees are asked",
-    exec_for(stub, WORKTREES).argv, nil)
 end
 
--- The background hook on a healthy run: the row is still there for the first
--- read and gone by the next one. That is not a failure -- the wait is what
--- keeps a false "still registered" off the screen -- and it closes nothing.
+-- A row that is still there for the first read and gone by the next: the wait is
+-- what keeps a false "still registered" off the screen, and it closes nothing.
 do
   local reads = 0
   local stub = go_stub({ [WORKSPACES] = function()
     reads = reads + 1
-    if reads == 1 then
-      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
-    end
+    if reads == 1 then return ROW_LEFT end
     return WORKSPACES_CLEAR
   end })
   stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
   local ok, result = pcall(M.work_done_go, {}, removal())
-  eq("a row the hook clears a moment later is not a failure", ok, true)
+  eq("a row cleared a moment later is not a failure", ok, true)
   eq("a row that cleared returns nothing", result, nil)
   eq("the wait reads the list again after the sleep", stub.events,
-    { REMOVE, WORKSPACES, "sleep", WORKSPACES, WORKTREES })
+    { REMOVE, WORKSPACES, "sleep", WORKSPACES, DIRECTORY, BOOKMARK })
   eq("a row that cleared is read exactly twice", reads, 2)
-  eq("a row the hook cleared is never forgotten by the flow", runs(stub, FORGET), 0)
+  eq("a row that cleared is never forgotten by the flow", runs(stub, FORGET), 0)
   eq("a row that cleared closes nothing", #stub.calls, 0)
 end
 
@@ -869,9 +977,7 @@ do
   local reads = 0
   local stub = go_stub({ [WORKSPACES] = function()
     reads = reads + 1
-    if reads == 1 then
-      return { code = 0, stdout = "feat/6c4\t/p/demo/feat-6c4\n", stderr = "" }
-    end
+    if reads == 1 then return ROW_LEFT end
     return { code = 1, stdout = "", stderr = "jj: workspace is locked\n" }
   end })
   stub.exec_replies["sleep"] = { code = 0, stdout = "", stderr = "" }
@@ -883,72 +989,64 @@ do
   eq("a failed read ends the wait", reads, 2)
 end
 
--- And the worktree itself.
+-- A listing that cannot be read at all is a failure, not a proof of absence: a
+-- check that answered "nothing there" because it could not see the list would
+-- pass a removal that did not happen.
 do
-  local still = '{"items":[{"branch":"feat/6c4","worktree":{"path":"/p/demo/feat-6c4"}}]}'
-  go_stub({ [WORKTREES] = { code = 0, stdout = still, stderr = "" } },
-    { [still] = { items = { { branch = "feat/6c4",
-      worktree = { path = "/p/demo/feat-6c4" } } } } })
+  local stub = go_stub({ [WORKSPACES] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
   local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("a worktree still listed fails", ok, false)
-  contains("the surviving worktree is named", said, "/p/demo/feat-6c4")
+  eq("a jj listing that failed fails the teardown", ok, false)
+  contains("the jj listing failure is named", said, "could not list jj workspaces")
+  eq("nothing below a failed listing is asked", exec_for(stub, DIRECTORY).argv, nil)
 end
 
--- Worktrunk refused outright: its own first line is the report, and the rest of
--- its output is not.
+-- dojjo refused outright: its own first line is the report, and the rest of its
+-- output is not. Nothing is verified, because nothing was removed.
 do
-  go_stub({ [REMOVE] = {
-    code = 1, stdout = "", stderr = "cannot remove: worktree is in use\nand another line\n",
+  local stub = go_stub({ [REMOVE] = {
+    code = 1, stdout = "", stderr = "no workspace named feat/6c4\nand another line\n",
   } })
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a failed removal fails", ok, false)
-  contains("the failure carries worktrunk's line", said, "worktree is in use")
+  contains("the failure carries dojjo's line", said, "no workspace named feat/6c4")
+  contains("the failure names the workspace and its directory",
+    said, "could not remove the workspace feat/6c4 (/p/demo/feat-6c4)")
   eq("only the first line is carried", tostring(said):find("another line", 1, true), nil)
+  eq("a failed removal verifies nothing", #stub.exec_calls, 1)
 end
 
--- A worktrunk that never ran is its own failure rather than an exit code: a login
+-- A dojjo that never ran is its own failure rather than an exit code: a login
 -- shell with nothing on PATH says so.
 do
   local stub = go_stub()
   stub.exec_replies[REMOVE] = nil
   local ok, said = pcall(M.work_done_go, {}, removal())
   eq("a removal that could not run fails", ok, false)
-  contains("the failure says worktrunk could not be run", said, "could not run worktrunk")
+  contains("the failure says djo could not be run", said, "could not run djo")
 end
 
--- A listing that cannot be read is a failure, not a proof of absence: a check
--- that answered "nothing there" because it could not see the list would pass a
--- removal that did not happen.
+-- A workspace name with a space and an apostrophe is one argument to dojjo, not
+-- three (Review Focus 2): the word is single-quoted, and an apostrophe inside it
+-- is closed, escaped and reopened. The path needs no quoting at all any more --
+-- it is one argv element of the directory check.
 do
-  go_stub({ [WORKSPACES] = { code = 1, stdout = "", stderr = "no jj repo here\n" } })
-  local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("a jj listing that failed fails the teardown", ok, false)
-  contains("the jj listing failure is named", said, "could not list jj workspaces")
-end
-
-do
-  local stub = go_stub()
-  stub.exec_replies[WORKTREES] = { code = 0, stdout = "not json", stderr = "" }
-  local ok, said = pcall(M.work_done_go, {}, removal())
-  eq("an unreadable worktrunk listing fails the teardown", ok, false)
-  contains("the unreadable listing is named", said, "could not read the worktrunk listing")
-end
-
--- A path with a space and an apostrophe is one argument, not three (Review Focus
--- 2): the word is single-quoted, and an apostrophe inside it is closed, escaped
--- and reopened.
-do
-  eq("a quoted path keeps its apostrophe", M.shell_quote("/p/demo/it's here"),
+  eq("a quoted name keeps its apostrophe", M.shell_quote("/p/demo/it's here"),
     "'/p/demo/it'\\''s here'")
-  eq("a plain path is one quoted word", M.shell_quote("/p/demo/feat-6c4"),
-    "'/p/demo/feat-6c4'")
+  eq("a plain name is one quoted word", M.shell_quote("feat/6c4"), "'feat/6c4'")
 
-  local awkward = "wt remove '/p/demo/it'\\''s here' --foreground -y --format=json"
-  local stub = go_stub({ [awkward] = reply(REMOVED) })
-  local ok = pcall(M.work_done_go, {}, removal{ path = "/p/demo/it's here" })
-  eq("the removal quotes the path as one word", ok, true)
-  eq("the quoted path is what the login shell ran",
+  local awkward = "djo remove 'feat/6c4-it'\\''s' -y"
+  -- The bookmark read carries the same name inside a revset, so it is quoted the
+  -- same way: one shell word, apostrophe and all.
+  local awkward_bookmark = "jj --ignore-working-copy log --no-graph -r "
+    .. [['bookmarks(exact:"feat/6c4-it'\''s")' -T 'commit_id ++ "\n"']]
+  local stub = go_stub({ [awkward] = REMOVED, [awkward_bookmark] = BOOKMARK_GONE })
+  local ok = pcall(M.work_done_go, {},
+    removal{ workspace = "feat/6c4-it's", path = "/p/demo/it's here" })
+  eq("the removal quotes the workspace as one word", ok, true)
+  eq("the quoted workspace is what the login shell ran",
     stub.exec_calls[1] and program(stub.exec_calls[1]), awkward)
+  eq("the path reaches the directory check as one word",
+    exec_for(stub, DIRECTORY).argv, { "test", "!", "-e", "/p/demo/it's here" })
 end
 
 -- The hand-back is also a `rex do` entry point, where an --args object is not
@@ -961,6 +1059,16 @@ do
   contains("the failure says what the removal needs", said, "work_done_go needs")
   contains("the failure names the key that is missing", said, "path")
   eq("a hand-back with an empty path removes nothing", #stub.exec_calls, 0)
+end
+
+do
+  local stub = go_stub()
+  local args = removal()
+  args.workspace = nil
+  local ok, said = pcall(M.work_done_go, {}, args)
+  eq("a hand-back with no workspace fails", ok, false)
+  contains("the failure names the workspace", said, "no workspace")
+  eq("a hand-back with no workspace removes nothing", #stub.exec_calls, 0)
 end
 
 -- work_done_go()'s declaration ---------------------------------------------------
@@ -1010,7 +1118,7 @@ eq("new_tab_argv for an existing worktree",
   { "fish", "-c", WRAPPER, "switch", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
 
 -- A create with no base answered and none configured: the picker resolves the
--- default itself, so the wrapper is told nothing and passes gws no base word.
+-- default itself, so the wrapper is told nothing and passes jws no base word.
 eq("new_tab_argv for a new branch",
   M.new_tab_argv(PROJECT, { branch = BRANCH, worktree = "create", bead = BEAD, title = "Diff" }),
   { "fish", "-c", WRAPPER, "create", BRANCH, "", "pi", "/brainstorming for bead " .. BEAD })
@@ -1524,7 +1632,7 @@ end
 -- The no-revision sentinel is false, and it has to stay false all the way: a
 -- configuration naming a base must not undo the picker's answer, and a
 -- declaration that turned it into the string "false" would send `false` to
--- gws as the base revision.
+-- jws as the base revision.
 do
   local saved = M.options.base
   M.options.base = "main"
@@ -1538,5 +1646,14 @@ do
   M.options.base = saved
 end
 
-if fails > 0 then os.exit(1) end
-print("ok " .. count .. " assertions")
+-- The fixture wrapper goes with the file on either way out: a run that failed
+-- is the one most likely to be re-run, and a mktemp tree left under it is litter
+-- nobody goes looking for. So the removal and the exit are one step, the removal
+-- first. TMP is this file's own, so nothing else is named.
+local function finish()
+  os.execute("rm -rf " .. quote(TMP))
+  if fails > 0 then os.exit(1) end
+  print("ok " .. count .. " assertions")
+end
+
+finish()

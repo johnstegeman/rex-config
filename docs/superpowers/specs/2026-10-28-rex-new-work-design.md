@@ -1,7 +1,11 @@
 # rex-config: `ctrl+space>n` — start new work from a bead
 
 **Date:** 2026-10-28
-**Status:** design, approved in conversation
+**Status:** design, approved in conversation. **Historical:** the tooling this
+document names has moved twice since — worktrunk (`wt`) gave way to jj workspaces
+(`2026-11-03-rex-jj-workspaces-design.md`) and then to `jws`/dojjo
+(`2026-11-06-dojjo-workspace-cut-design.md`). Every `wt` here is what the flow
+used *then*; read the later two for what it does now.
 **Owner:** John Stegeman
 
 ## Intent
@@ -76,9 +80,9 @@ directory, as a tab in the project's own session.
   (the user creates it and treats it as home) and one tab per worktree in
   flight.
 - **`ctrl+space>n`** is the key (`n` for new).
-- **Tab first, then `wt switch`.** The tab is created before the worktree
-  exists, and the switch happens inside it, so the pane ends up in the right
-  directory.
+- **Tab first, then `wt switch` (history — see the status line).** The tab is
+  created before the worktree exists, and the switch happens inside it, so the
+  pane ends up in the right directory.
 - **Bead-driven branch names.** A picked bead defaults the branch name to
   `<prefix>/<short-id>` — `bug/58h`, `feat/58h`. With no bead, the name is typed
   freely.
@@ -187,7 +191,7 @@ agent exits.
 |---|---|---|
 | Project root | parent of `--git-common-dir` | `~/Projects/_pmm/pmm-iris` |
 | Project name / session label | basename of project root | `pmm-iris` |
-| Main worktree | `wt list` where `worktree.main` | `~/Projects/_pmm/pmm-iris/main` |
+| Main worktree | `wt list` where `worktree.main` (history) | `~/Projects/_pmm/pmm-iris/main` |
 | Tab label | branch name as typed | `bug/58h` |
 
 A project session that doesn't exist is created with one `main` tab, so the

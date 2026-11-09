@@ -2,10 +2,10 @@
 # `new-work.sh branch-default`, `new-work.sh candidates` and `new-work.sh bases`.
 #
 # branch-default turns a bead's issue_type and id into the branch name the
-# picker offers; candidates collects the branch names that already exist so the
-# picker can offer them too. bases resolves the jj revision a new workspace is
-# started from and the short cycle of revisions around it. All three run
-# without fzf.
+# picker offers; candidates collects the branch names that already exist -- the
+# workspaces jj lists and the local bookmarks -- so the picker can offer them
+# too. bases resolves the jj revision a new workspace is started from and the
+# short cycle of revisions around it. All three run without fzf.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -37,8 +37,8 @@ branch_default() {
     fail "branch-default $type $id" "want $want, got $got"
     return
   fi
-  # The picker hands this straight to `wt switch --create`, so it has to be a
-  # ref git will accept.
+  # The picker hands this to `jws` as the branch it makes the workspace and its
+  # bookmark from, so it has to be a name both jj and git accept.
   if ! git check-ref-format "refs/heads/$got"; then
     fail "branch-default $type $id" "$got is not a valid git ref name"
   fi
@@ -78,27 +78,22 @@ fi
 run_branch_default_missing --id pmm-iris-a4l
 run_branch_default_missing
 
-# Existing branch names, one per line: worktree branches first, then local
-# branches, de-duplicated in that order, and never a ref ending in /HEAD.
-cat >"$tmp/refs" <<'EOF'
-feat/abc123
-main
-origin/HEAD
-johnstegeman/k1ier
-fix/cleanup
-EOF
-
+# Existing branch names, one per line: the branches a jj workspace is already on
+# first, then the local bookmarks with no workspace of their own, de-duplicated in
+# that order. The listing is the same "name<TAB>root" rendering `done --workspaces`
+# reads, so one fixture serves both subcommands, and a bookmark is a name alone.
+# The `default` row of the listing is jj's own workspace at the wrapper and is
+# never a branch, so feat/6c4, feat/6c4-sub and main are the whole first half.
 cat >"$tmp/candidates.expected" <<'EOF'
+feat/6c4
+feat/6c4-sub
 main
-chore/p4pip
-feat/abc123
-johnstegeman/k1ier
-fix/cleanup
+bug/a4l
 EOF
 
 ran=$((ran + 1))
-./new-work.sh candidates --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  >"$tmp/out" 2>"$tmp/err"
+./new-work.sh candidates --workspaces test/fixtures/workspaces.txt \
+  --bookmarks test/fixtures/branch-bookmarks.txt >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
   fail "candidates listing" "exit $status: $(cat "$tmp/err")"
@@ -106,38 +101,72 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
   fail "candidates listing" "output differs from the expected branch list"
 fi
 
-# The same call with no fzf anywhere on PATH: the script must not need it.
+# The same call with neither fzf nor jq on PATH: neither is part of this answer
+# any more. There is no JSON document to parse -- jj's rows are already the two
+# lists -- so a copy of the script is not needed to read them.
 ran=$((ran + 1))
 mkdir -p "$tmp/bin"
-for tool in bash jq awk cat; do
+for tool in bash awk cat; do
   ln -s "$(command -v "$tool")" "$tmp/bin/$tool"
 done
-PATH=$tmp/bin ./new-work.sh candidates --wt-json test/fixtures/wt-list.json \
-  --refs "$tmp/refs" >"$tmp/out" 2>"$tmp/err"
+PATH=$tmp/bin ./new-work.sh candidates --workspaces test/fixtures/workspaces.txt \
+  --bookmarks test/fixtures/branch-bookmarks.txt >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "candidates needs no fzf" "exit $status: $(cat "$tmp/err")"
+  fail "candidates needs neither fzf nor jq" "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
-  fail "candidates needs no fzf" "output differs from the expected branch list"
+  fail "candidates needs neither fzf nor jq" \
+    "output differs from the expected branch list"
 fi
 
-# Reading the branches out of a real repository: --main with no fixtures.
+# A row ending in /HEAD is KEPT, and it is a branch like any other. git's short
+# refname rendering used to put `origin/HEAD` in this list and a detached
+# worktree put one there too, so the picker dropped the shape -- but that shape
+# was git's refs/remotes/*/HEAD vocabulary and this flow reads no git listing
+# any more. A workspace or a bookmark really called origin/HEAD is a name jj
+# answers for, and hiding a row that is there is the one thing the picker must
+# not do. The listing here holds nothing but the `default` row, so the bookmarks
+# are the whole answer -- in the order they came, once each.
+printf 'origin/HEAD\nfix/headless\norigin/HEAD\n' >"$tmp/head-bookmarks"
+printf 'origin/HEAD\nfix/headless\n' >"$tmp/head.expected"
 ran=$((ran + 1))
-git init -q "$tmp/repo" && git -C "$tmp/repo" -c user.email=t@example.com \
-  -c user.name=t commit -q --allow-empty -m init &&
-  git -C "$tmp/repo" branch feat/real-one && git -C "$tmp/repo" branch fix/real-two
-./new-work.sh candidates --main "$tmp/repo" >"$tmp/out" 2>"$tmp/err"
+./new-work.sh candidates \
+  --workspaces test/fixtures/workspaces-default-only.txt \
+  --bookmarks "$tmp/head-bookmarks" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "candidates from a repository" "exit $status: $(cat "$tmp/err")"
+  fail "a /HEAD row is kept" "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/head.expected" "$tmp/out"; then
+  fail "a /HEAD row is kept" "output: $(cat "$tmp/out")"
+fi
+
+# Reading both lists out of a real repository: --main with no fixtures at all.
+# The repository is a real one because the one thing a saved listing cannot
+# prove is that jj's own rendering parses as rows -- the tab between a workspace
+# and its root, the trailing newline, and the `default` workspace that is no
+# branch. jj is asked here and nowhere else in this file, so a host without it
+# says so once instead of failing every case below.
+if ! command -v jj >/dev/null 2>&1; then
+  fail 'candidates from a repository' \
+    'this host has no jj, so no repository can be made to read'
 else
-  for want in feat/real-one fix/real-two; do
-    if ! grep -qx "$want" "$tmp/out"; then
-      fail "candidates from a repository" "missing $want in: $(cat "$tmp/out")"
+  ran=$((ran + 1))
+  mkdir -p "$tmp/jjrepo/main"
+  if ( cd "$tmp/jjrepo/main" && jj git init . >/dev/null 2>&1 &&
+    jj workspace add --name feat/real-one "$tmp/jjrepo/feat-real-one" \
+      >/dev/null 2>&1 &&
+    jj bookmark create fix/real-two -r @ >/dev/null 2>&1 ); then
+    printf 'feat/real-one\nfix/real-two\n' >"$tmp/repo.expected"
+    ./new-work.sh candidates --main "$tmp/jjrepo/main" >"$tmp/out" 2>"$tmp/err"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      fail "candidates from a repository" "exit $status: $(cat "$tmp/err")"
+    elif ! diff -u "$tmp/repo.expected" "$tmp/out"; then
+      fail "candidates from a repository" \
+        "output differs from the expected branch list"
     fi
-  done
-  if sort "$tmp/out" | uniq -d | grep -q .; then
-    fail "candidates from a repository" "duplicate rows in: $(cat "$tmp/out")"
+  else
+    fail 'candidates from a repository' 'the jj fixtures could not be made'
   fi
 fi
 
@@ -164,13 +193,14 @@ elif grep -q 'cd:' "$tmp/err"; then
     "bash's own cd error is still in: $(cat "$tmp/err")"
 fi
 
-# ... but only when it will really be read: with both fixtures --wt-json and
-# --refs are the two sources candidates has, so --main is never touched and a
-# directory that is not there costs nothing. The same shape pick accepts, since
-# it is how the tests and dry runs call both commands.
+# ... but only when it will really be read: --workspaces and --bookmarks are the
+# two sources candidates has, so --main is never touched and a directory that is
+# not there costs nothing. The same shape pick accepts, since it is how the tests
+# and dry runs call both commands.
 ran=$((ran + 1))
 ./new-work.sh candidates --main "$tmp/nowhere" \
-  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
+  --workspaces test/fixtures/workspaces.txt \
+  --bookmarks test/fixtures/branch-bookmarks.txt \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -181,44 +211,60 @@ elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
     "output differs from the expected branch list"
 fi
 
-# A --wt-json that cannot be opened is the caller's mistake, not a repository
-# this machine cannot read, so it is not forgiven the way a failed `wt list` is:
-# the run stops at the failed read and prints no rows at all -- git's half
-# included, because half a list is a guess dressed as an answer.
+# A --workspaces fixture that cannot be opened is the caller's mistake, not a
+# repository this machine cannot read, so it is not forgiven the way a failed
+# `jj workspace list` is: the run stops at the failed read, naming the file, and
+# prints no rows at all -- the bookmark half included, because half a list is a
+# guess dressed as an answer.
 ran=$((ran + 1))
-./new-work.sh candidates --main "$tmp/repo" --wt-json "$tmp/no-such-wt.json" \
+./new-work.sh candidates --main "$tmp/nowhere" \
+  --workspaces "$tmp/no-such-workspaces.txt" \
+  --bookmarks test/fixtures/branch-bookmarks.txt \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -eq 0 ]; then
-  fail "candidates with an unopenable --wt-json exits non-zero" \
+  fail "candidates with an unopenable --workspaces exits non-zero" \
     "exit $status"
 elif [ -s "$tmp/out" ]; then
-  fail "candidates with an unopenable --wt-json prints no rows" \
+  fail "candidates with an unopenable --workspaces prints no rows" \
     "output: $(cat "$tmp/out")"
+elif [ "$(cat "$tmp/err")" != \
+  "new-work.sh: could not read the workspaces of $tmp/no-such-workspaces.txt" ]; then
+  fail "candidates with an unopenable --workspaces names the file" \
+    "stderr: $(cat "$tmp/err")"
 fi
 
-# A worktrunk that cannot read the repository: its worktree rows are lost, but
-# git's branches still come through -- and the partial list says so, naming the
-# directory. Only this subcommand answers from half the list: a pick given a
-# name missing here is refused rather than guessed at, since the guess would be
-# a create (or an attach) for a branch that already has a worktree.
-mkdir -p "$tmp/bad-wt"
-cat >"$tmp/bad-wt/wt" <<'EOF'
+# A jj that cannot produce one of the two lists: that half is lost, the other one
+# still comes through, and the partial list says so, naming the directory. Only
+# this subcommand answers from half of it: a pick given a name missing here is
+# refused rather than guessed at, since the guess would be a create (or an
+# attach) for a branch that already has a workspace.
+mkdir -p "$tmp/half-jj"
+cat >"$tmp/half-jj/jj" <<'EOF'
 #!/bin/sh
-printf 'wt: not a worktrunk repository\n' >&2
-exit 1
+# The listing fails the way a locked working copy or a missing repository makes
+# it fail; the bookmarks are answered as jj renders them.
+case " $* " in
+  *' workspace list '*) printf 'jj: could not read the repository\n' >&2; exit 1 ;;
+  *' bookmark list '*) printf 'fix/real-two\n' ;;
+  *) exit 1 ;;
+esac
 EOF
-chmod +x "$tmp/bad-wt/wt"
+chmod +x "$tmp/half-jj/jj"
+mkdir -p "$tmp/half-repo"
 ran=$((ran + 1))
-PATH="$tmp/bad-wt:$PATH" ./new-work.sh candidates --main "$tmp/repo" \
+PATH="$tmp/half-jj:$PATH" ./new-work.sh candidates --main "$tmp/half-repo" \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail "a failed wt list still lists git's branches" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qx 'feat/real-one' "$tmp/out"; then
-  fail "a failed wt list still lists git's branches" "output: $(cat "$tmp/out")"
-elif ! grep -qF "could not read the worktrees of $tmp/repo" "$tmp/err"; then
-  fail "a failed wt list is said out loud" "stderr: $(cat "$tmp/err")"
+  fail "a failed workspace listing still lists the bookmarks" \
+    "exit $status: $(cat "$tmp/err")"
+elif ! grep -qx 'fix/real-two' "$tmp/out"; then
+  fail "a failed workspace listing still lists the bookmarks" \
+    "output: $(cat "$tmp/out")"
+elif ! grep -qxF \
+  "new-work.sh: could not read the workspaces of $tmp/half-repo" "$tmp/err"; then
+  fail "a failed workspace listing is said out loud" "stderr: $(cat "$tmp/err")"
 fi
 
 # The bookmarks of a pretend repository, as bases reads them: exactly what
@@ -275,19 +321,29 @@ run_bases 'both local branches are offered after @' \
   $'main@origin\n@\nmain\nmaster' \
   --base-bookmarks "$tmp/bookmarks.both" --origin-head origin/main
 
-# origin/HEAD is the branch this clone says it tracks, so it is asked before any
-# fixed name -- and the answer is that branch on origin, in jj's vocabulary: the
-# branch name and the remote it lives on, as one revision. This clone has no main
-# and no master, so the opening answer and @ are the whole cycle.
+# --origin-head is the branch this clone was told it tracks -- the fixture that
+# stands in for the `origin/HEAD` symref read this flow no longer makes -- so it
+# is asked before any fixed name, and the answer is that branch on origin in jj's
+# vocabulary: the branch name and the remote it lives on, as one revision. This
+# clone has no main and no master, so the opening answer and @ are the whole
+# cycle.
 bookmarks_file "$tmp/bookmarks.develop" develop@ develop@origin
-run_bases 'origin/HEAD decides the opening answer' \
+run_bases '--origin-head decides the opening answer' \
   $'develop@origin\n@' \
   --base-bookmarks "$tmp/bookmarks.develop" --origin-head origin/develop
 
-# With no origin/HEAD named -- a clone that has none, or a run standing in for
+# --origin-head is written in git's spelling by anything that had one to read,
+# and in jj's by anything that already speaks the cycle's vocabulary: both name
+# the same branch on origin, so an answer already carrying its remote must not
+# collect a second suffix.
+run_bases 'an --origin-head already in jj spelling is not suffixed twice' \
+  $'main@origin\n@\nmain' \
+  --base-bookmarks test/fixtures/bookmarks.txt --origin-head main@origin
+
+# With no --origin-head named -- a clone that has none, or a run standing in for
 # one -- the fixed names speak, in the order they always have.
 bookmarks_file "$tmp/bookmarks.main" main@ main@origin
-run_bases 'main@origin opens the cycle when there is no origin/HEAD' \
+run_bases 'main@origin opens the cycle when --origin-head says nothing' \
   $'main@origin\n@\nmain' --base-bookmarks "$tmp/bookmarks.main"
 
 bookmarks_file "$tmp/bookmarks.master" master@ master@origin
@@ -418,9 +474,23 @@ bases_refuses '--base with --no-base' \
 
 # Both reads out of a real place: --main with no fixture at all. jj is stood in
 # for -- the suite does not require it, and its rendering is the one thing this
-# script takes on trust -- while origin/HEAD is a real symref in a real
-# repository. That it points at trunk, and not at the main its bookmarks hold,
-# is what proves git was asked rather than guessed from the bookmark list.
+# script takes on trust -- while the `.git` here is a real one, with a real
+# origin/HEAD symref pointing at `trunk`. The cycle does NOT open on trunk: git
+# is not asked, whatever symref a repository happens to carry beside it. The
+# fixed names answer -- main, because the bookmarks hold it -- which is the
+# design and not a fallback a `.git` improves on.
+#
+# git is stood in for by a LIAR, not left off the PATH: the point is that it is
+# never *asked*. A stand-in that answers `trunk` is an answer nobody should take,
+# and the mark it leaves says whether the question was put at all. The same liar
+# stands in for every case below, including the ones with no `.git` to ask.
+mkdir -p "$tmp/git-bin"
+cat >"$tmp/git-bin/git" <<'EOF'
+#!/bin/sh
+touch "$GIT_MARKER"
+printf 'trunk\n'
+EOF
+chmod +x "$tmp/git-bin/git"
 mkdir -p "$tmp/jj-bin"
 cat >"$tmp/jj-bin/jj" <<'EOF'
 #!/bin/sh
@@ -433,21 +503,26 @@ git init -q "$tmp/base-repo" && git -C "$tmp/base-repo" \
   git -C "$tmp/base-repo" update-ref refs/remotes/origin/trunk HEAD &&
   git -C "$tmp/base-repo" symbolic-ref refs/remotes/origin/HEAD \
     refs/remotes/origin/trunk
-printf 'trunk@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
-PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
-  >"$tmp/out" 2>"$tmp/err"
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/base-repo" >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
   fail 'bases from a repository' "exit $status: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'bases from a repository' 'output differs from the expected cycle'
 fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'bases never asks git, even beside a real .git' \
+    'git was run for a cycle that is decided by the fixed names'
+fi
 
 # The same read in a repository that names no origin/HEAD at all -- a clone whose
-# remote was renamed, or one that never had a symref. git exits non-zero, and
-# that is an empty answer rather than a failure: the cycle falls through to the
-# bookmarks, the run still succeeds, and nothing is said about a lookup that is
-# allowed to miss.
+# remote was renamed, or one that never had a symref. It is not a question this
+# flow puts any more, so the answer is the same one the case above gives: the
+# fixed names, main first, with nothing said about a lookup nobody made.
 ran=$((ran + 1))
 git init -q "$tmp/base-repo-headless" && git -C "$tmp/base-repo-headless" \
   -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
@@ -456,22 +531,24 @@ PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo-headless" \
   >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
-  fail 'no origin/HEAD falls through to the bookmarks' \
+  fail 'a repo that names no origin/HEAD falls through to the bookmarks' \
     "exit $status: $(cat "$tmp/err")"
 elif [ -s "$tmp/err" ]; then
   fail 'no origin/HEAD is not a failure' "stderr: $(cat "$tmp/err")"
 elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
-  fail 'no origin/HEAD falls through to the bookmarks' \
+  fail 'a repo that names no origin/HEAD falls through to the bookmarks' \
     'output differs from the expected cycle'
 fi
 
 # --base-bookmarks stands in for the repository as a whole, so a run that has
-# both reads the fixture for the bookmarks and never asks git for origin/HEAD:
-# this repository's symref points at trunk, and the fixture's main@origin is what
-# opens the cycle.
+# both reads the fixture for the bookmarks and asks nothing else: the fixture's
+# main@origin is what opens the cycle, and git is not asked even though this
+# repository carries a symref of its own.
 ran=$((ran + 1))
 printf 'main@origin\n@\nmain\n' >"$tmp/base.expected"
-PATH="$tmp/jj-bin:$PATH" ./new-work.sh bases --main "$tmp/base-repo" \
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/base-repo" \
   --base-bookmarks test/fixtures/bookmarks.txt >"$tmp/out" 2>"$tmp/err"
 status=$?
 if [ "$status" -ne 0 ]; then
@@ -480,6 +557,213 @@ elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
   fail 'a bookmark fixture beside a real --main' \
     'the fixture does not win the opening row'
 fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'a bookmark fixture beside a real --main asks no git' 'git was run'
+fi
+
+# A wrapper with no `.git` anywhere -- what `jj git init --no-colocate` makes, and
+# the state this cut is for -- still opens the base cycle on the branch the
+# project treats as its default. jj records no remote-HEAD symref of its own, so
+# the cycle answers from the fixed pair: main, then master, then @ -- and the
+# liar git from above is still on the PATH, so a read that crept back in would
+# leave its mark.
+mkdir -p "$tmp/nogit/main" "$tmp/nogit/.jj/repo"
+
+# Both fixed names present: the first of them opens the cycle.
+ran=$((ran + 1))
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/nogit/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a wrapper with no .git opens on main@origin' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'a wrapper with no .git is not a failure' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a wrapper with no .git opens on main@origin' \
+    'output differs from the expected cycle'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ]; then
+  fail 'a wrapper with no .git never asks git' 'git was run'
+fi
+
+# Only master, which is the whole of the fall-through: a project whose default
+# was never renamed answers master@origin.
+mkdir -p "$tmp/jj-master-bin"
+cat >"$tmp/jj-master-bin/jj" <<'EOF'
+#!/bin/sh
+printf 'master@\nmaster@origin\n'
+EOF
+chmod +x "$tmp/jj-master-bin/jj"
+ran=$((ran + 1))
+printf 'master@origin\n@\nmaster\n' >"$tmp/base.expected"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-master-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/nogit/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a wrapper with no .git and no main opens on master@origin' \
+    "exit $status: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a wrapper with no .git and no main opens on master@origin' \
+    'output differs from the expected cycle'
+fi
+
+# Neither, and the run still succeeds: an unanswerable default is a
+# fall-through, not a failure, and the cycle is the working copy alone.
+mkdir -p "$tmp/jj-topic-bin"
+cat >"$tmp/jj-topic-bin/jj" <<'EOF'
+#!/bin/sh
+printf 'topic@\ntopic@origin\n'
+EOF
+chmod +x "$tmp/jj-topic-bin/jj"
+ran=$((ran + 1))
+printf '@\n' >"$tmp/base.expected"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-topic-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/nogit/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'no default branch at all still answers the cycle' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'no default branch at all says nothing' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'no default branch at all still answers the cycle' \
+    'output differs from the expected cycle'
+fi
+
+# And the same guard from the other side: the `.git` that is not in the base
+# directory but in the wrapper above it. <wrapper>/main is how a wrapper is laid
+# out, so this is the shape the flow really meets -- and the symref there
+# points at trunk, which is exactly the answer a read that crept back in would
+# give. The fixed names answer instead, and the liar leaves no mark.
+mkdir -p "$tmp/gitwrap"
+git init -q "$tmp/gitwrap" && git -C "$tmp/gitwrap" \
+  -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init &&
+  git -C "$tmp/gitwrap" update-ref refs/remotes/origin/trunk HEAD &&
+  git -C "$tmp/gitwrap" symbolic-ref refs/remotes/origin/HEAD \
+    refs/remotes/origin/trunk
+mkdir -p "$tmp/gitwrap/main"
+# The marker only proves something if the liar is the git this run would find:
+# a stand-in the ambient PATH reached instead would leave no mark and look like
+# a clean run. Asked through a plain sh, which has no command cache of its own
+# to answer from.
+liar_git=$(PATH="$tmp/git-bin:$PATH" sh -c 'command -v git')
+ran=$((ran + 1))
+if [ "$liar_git" != "$tmp/git-bin/git" ]; then
+  fail 'the liar is the git this case would ask' "command -v git answers $liar_git"
+fi
+ran=$((ran + 1))
+printf 'main@origin\n@\nmain\nmaster\n' >"$tmp/base.expected"
+rm -f "$tmp/git-asked"
+GIT_MARKER=$tmp/git-asked PATH="$tmp/git-bin:$tmp/jj-bin:$PATH" \
+  ./new-work.sh bases --main "$tmp/gitwrap/main" >"$tmp/out" 2>"$tmp/err"
+status=$?
+if [ "$status" -ne 0 ]; then
+  fail 'a .git beside main is not a question for git' \
+    "exit $status: $(cat "$tmp/err")"
+elif [ -s "$tmp/err" ]; then
+  fail 'a .git beside main is not a failure' "stderr: $(cat "$tmp/err")"
+elif ! diff -u "$tmp/base.expected" "$tmp/out"; then
+  fail 'a .git beside main is not a question for git' \
+    'output differs from the expected cycle'
+fi
+ran=$((ran + 1))
+if [ -e "$tmp/git-asked" ] || grep -qx 'trunk' "$tmp/out"; then
+  fail 'a .git beside main never asks git' \
+    "git was run: $(cat "$tmp/git-asked" 2>/dev/null || true)"
+fi
+
+# The branch-name rule, applied where a person's typed name actually meets it:
+# `pick` refuses a name it could not create while the float is still on screen.
+# Every name in the refused table below is one `git check-ref-format --branch`
+# also refused, checked one by one against git while this rule was being written
+# -- the rule is git's, re-expressed in the shell now that the flow runs where
+# there may be no git to ask. `@` is the one name this flow refuses and git
+# accepts: in jj's language `@` is the working copy, so a bookmark named `@`
+# would be read as an answer to a different question -- it always has been.
+#
+# git is answered here by a stand-in that refuses every question and leaves a
+# mark when it was asked one. That is the whole point of the table: a name must
+# be accepted or refused by the rule in this script, and never by git. The mark
+# is how 'git was not asked' is proven rather than argued.
+#
+# An empty name never reaches the rule: a pick with no branch is no branch, and
+# it is refused a step earlier, with the one line that has always said so.
+mkdir -p "$tmp/gitless-bin"
+cat >"$tmp/gitless-bin/git" <<'EOF'
+#!/bin/sh
+touch "$GIT_MARKER"
+exit 1
+EOF
+chmod +x "$tmp/gitless-bin/git"
+printf 'main\t/p/demo/main\n' >"$tmp/name-ws"
+printf 'main\n' >"$tmp/name-br"
+printf 'main@origin\n' >"$tmp/name-base"
+printf '[]\n' >"$tmp/name-beads"
+mkdir -p "$tmp/name-state"
+
+# pick_name <name>: one dry pick whose branch answer is NAME, with every read
+# saved, so nothing here needs a repository or a terminal. Not on either list,
+# so NAME is always a branch to create -- the only mode the rule checks. The
+# state directory is one of its own, so no name is remembered for the next run.
+pick_name() {
+  ran=$((ran + 1))
+  rm -f "$tmp/git-asked"
+  GIT_MARKER=$tmp/git-asked PATH="$tmp/gitless-bin:$PATH" \
+    XDG_STATE_HOME=$tmp/name-state ./new-work.sh pick \
+    --main /p/demo/main --root /p/demo --project demo \
+    --bd-json "$tmp/name-beads" \
+    --workspaces "$tmp/name-ws" --bookmarks "$tmp/name-br" \
+    --base-bookmarks "$tmp/name-base" \
+    --bead '' --branch "$1" --dry-run >"$tmp/out" 2>"$tmp/err" </dev/null
+  status=$?
+}
+
+for name in '@' '-x' 'a..b' 'a.' 'a/b/' 'a b' 'a~b' 'a^b' 'a:b' 'a?b' 'a*b' \
+  'a[b' 'a\b' 'a//b' 'feat/x..y' 'feat/x.' '-feat/x' $'a\001b'; do
+  pick_name "$name"
+  # Quoted for the message: one of these holds a byte no terminal draws, and a
+  # failure on it has to say which name it was.
+  shown=$(printf '%q' "$name")
+  if [ "$status" -ne 2 ]; then
+    fail "the name $shown is refused" "exit $status: $(cat "$tmp/err")"
+  elif ! grep -qxF "new-work.sh: not a valid branch name: $name" "$tmp/err"; then
+    fail "the name $shown says why" "stderr: $(cat "$tmp/err")"
+  elif [ -s "$tmp/out" ]; then
+    fail "the name $shown starts nothing" "stdout: $(cat "$tmp/out")"
+  elif [ -e "$tmp/git-asked" ]; then
+    fail "the name $shown is refused without git" 'git was asked'
+  fi
+done
+
+pick_name ''
+if [ "$status" -ne 3 ]; then
+  fail 'an empty name starts nothing' "exit $status: $(cat "$tmp/err")"
+elif [ "$(cat "$tmp/err")" != 'new-work.sh: no branch given, nothing to start' ]; then
+  fail 'an empty name says why' "stderr: $(cat "$tmp/err")"
+fi
+
+# And the names that do get through: `feat/xxx` is what a bead derives and the
+# rest are the shapes a hand types -- a backtick among them, which git never had
+# a quarrel with and this rule refused once. Each is a create, so each reaches the
+# rule. A refusal among these is the regression this table exists to catch, and a
+# mark left by the stand-in is the same regression seen from the other side: it is
+# a question a git-free wrapper could never have had answered.
+for name in 'feat/x' 'feat-x' 'v1.2' 'feat/x-1_2' 'fix-it' 'aeiou' 'feat/2ow' 'a`b'; do
+  pick_name "$name"
+  if [ "$status" -ne 0 ]; then
+    fail "the name '$name' is a branch to create" \
+      "exit $status: $(cat "$tmp/err")"
+  elif grep -q 'not a valid branch name' "$tmp/err"; then
+    fail "the name '$name' is not refused" "stderr: $(cat "$tmp/err")"
+  elif [ -e "$tmp/git-asked" ]; then
+    fail "the name '$name' is accepted without git" 'git was asked'
+  fi
+done
 
 if [ "$fails" -ne 0 ]; then
   printf '%d of %d assertions failed\n' "$fails" "$ran"

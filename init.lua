@@ -20,60 +20,6 @@ function M.render_prompt(template, vars)
   end))
 end
 
--- `<project root>/.git`, as produced by `git rev-parse --path-format=absolute
--- --git-common-dir` (with or without a trailing slash): the project root is its
--- parent and the project name the basename of that root. The plain form of that
--- command prints a path relative to the worktree (".git"), which names no
--- project at all, so a relative input returns nil instead of empty strings --
--- callers must ask git for the absolute form and handle nil.
-function M.project_from_common_dir(common_dir)
-  if type(common_dir) ~= "string" then
-    return nil
-  end
-  local dir = common_dir:gsub("/+$", "")
-  if not dir:match("^/") then
-    return nil
-  end
-  local root = dir:match("^(.*)/[^/]+$")
-  if root == nil then
-    return nil
-  end
-  local name = root:match("([^/]+)$")
-  if name == nil then
-    return nil
-  end
-  return { root = root, name = name }
-end
-
--- Path of the main worktree from a decoded `wt list --format=json`.
--- Accepts schema 2 (items[].worktree.path + items[].worktree.main) and the
--- legacy flat shape ([].path + [].is_main); nil when neither flags a main.
-function M.main_worktree(list_json)
-  if type(list_json) ~= "table" then
-    return nil
-  end
-  local items = list_json.items or list_json
-  if type(items) ~= "table" then
-    return nil
-  end
-  for _, item in ipairs(items) do
-    if type(item) == "table" then
-      local path, is_main
-      if type(item.worktree) == "table" then
-        path, is_main = item.worktree.path, item.worktree.main
-      else
-        path, is_main = item.path, item.is_main
-      end
-      -- A literal true is what rex.json.decode gives for `"main": true`; the
-      -- string form is read the same way, because a producer that quoted the
-      -- flag would otherwise lose the main worktree and refuse the project.
-      if (is_main == true or is_main == "true") and type(path) == "string" then
-        return path
-      end
-    end
-  end
-  return nil
-end
 
 -- The session whose label is exactly the project's name. The label is the only
 -- key: a session called pmm-iris-2 belongs to something else, and adopting it
@@ -124,12 +70,13 @@ M.options = {
   no_bead_prompt = "/brainstorming",
   -- The base a new branch starts from when nobody answered for this tab. Unset
   -- -- nil rather than a value, so it reads as a default -- is auto-detect: the
-  -- picker resolves the remote's own default branch and the cycle that opens on
-  -- it. A string is that cycle's first entry, and false is "no revision at all"
-  -- -- the field opens on nothing, no revision is passed, and the new workspace
-  -- sits on main's working copy. Either way it is the create answer's base and no
-  -- word of its own: the revision travels as one positional parameter, and only a
-  -- create is given one (see new_tab_argv).
+  -- picker opens the cycle on the conventional default branch — main@origin,
+  -- then master@origin, then the working copy — decided from the bookmarks
+  -- alone (no git is asked). A string is that cycle's first entry, and false is
+  -- "no revision at all" -- the field opens on nothing, no revision is passed,
+  -- and the new workspace sits on main's working copy. Either way it is the
+  -- create answer's base and no word of its own: the revision travels as one
+  -- positional parameter, and only a create is given one (see new_tab_argv).
   base = nil,
   bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
@@ -137,16 +84,16 @@ M.options = {
 
 -- The program the new tab runs, as fish (the tab gets it through `fish -c`,
 -- see new_tab_argv below for the parameters). It exists because the pane has to
--- outlive the agent: switch to, attach or create the worktree, run the agent in
--- it, then leave a login shell there, so the hook output gws and worktrunk print
--- and the agent's own last lines stay readable above a prompt that works.
+-- outlive the agent: switch to, attach or create the workspace, run the agent
+-- in it, then leave a login shell there, so the hook output jws prints and the
+-- agent's own last lines stay readable above a prompt that works.
 -- Exiting that shell closes the tab.
 --
 -- Every value the flow knows arrives as a positional parameter, so no branch,
 -- base, agent name or prompt is ever written into this text: a branch with a
 -- slash, a prompt with quotes and an agent name with a space each stay one
 -- argument, because the shell hands them over as they were. The shell is fish
--- and not sh because gws is a fish function: a program on a PATH cannot be one.
+-- and not sh because jws is a fish function: a program on a PATH cannot be one.
 M.new_tab_script = [==[
 # $argv[1] = mode (switch, create or attach), $argv[2] = branch, $argv[3] = base
 # (empty when there is none), then the agent and the arguments it is started
@@ -177,7 +124,7 @@ set -l contract 'rex-config: the tab needs a mode, a branch and a base'
 # The three words come before the agent, and they are read before they are used:
 # the count here, and the mode word in the dispatch below. Reading them anyway
 # would be harmless -- fish answers a missing word with nothing where sh's
-# `shift` would end the shell -- but an empty branch would reach gws, and "could
+# `shift` would end the shell -- but an empty branch would reach jws, and "could
 # not enter ; not starting an agent" is a worse answer than naming the contract.
 # The message names all three, so a caller that sends two learns about the
 # third.
@@ -195,9 +142,10 @@ set -l base $argv[3]
 set -l agent $argv[4]
 set -l rest $argv[5..-1]
 
-# gws and worktrunk both run the project's hooks, and a hook that talks to git
-# in a pane nobody can type into must never stop on a credential prompt: it
-# would hang there invisibly. So git's terminal prompt is off before either.
+# jws runs jj and then the project's post-start hooks, and a hook that talks to
+# git in a pane nobody can type into must never stop on a credential prompt: it
+# would hang there invisibly. So git's terminal prompt is off before jws runs --
+# for a switch too, which reaches no hook but is the same pane.
 set -gx GIT_TERMINAL_PROMPT 0
 
 # Named once so the messages below can name what is not started even when no
@@ -207,103 +155,87 @@ if test -n "$agent"
   set what $agent
 end
 
-# The three modes are the three things a branch can want, and each is one
-# program's:
+# The three modes are the three things a branch can want, and all three are one
+# program's -- `jws`, which is the only workspace tool this wrapper names:
 #
-#   switch  an existing worktree, which is worktrunk's: `wt switch --no-cd`
-#           leaves this shell where it is, so the worktree's path is read from
-#           the JSON reply rather than arrived at by changing directory.
-#   create  a branch to make, which is gws's: jj has to make the workspace before
-#           wt can see the branch, so gws runs `jj workspace add` (from the
-#           wrapper's main workspace, fetching the revision first), attaches the
-#           branch and runs the post-start hooks.
-#   attach  a local branch with no worktree yet, which is also gws's: the
-#           workspace is made for the branch that is already there, so nothing is
-#           created from anything and no base is passed at all.
+#   switch  a workspace that already exists: `jws --existing` asks jj for its
+#           rows, refuses a name they do not list, and creates nothing.
+#   create  a branch to make: jws adds the workspace and its bookmark, fetches
+#           the base revision when there is one, and runs the post-start hooks.
+#   attach  a local branch with no workspace yet: jws makes the workspace for
+#           the bookmark that is already there, so no base is passed at all.
 #
-# A create and an attach are one program with two words, so they share the path
-# file: this program cannot follow the cd gws ends with, so gws is handed a file
-# and the new worktree's path is read out of it. The base is a revision, not a
-# flag: it is only passed to a create, and only when there is one, since an empty
-# word is a revision jj has no name for and a missing one means "start at main".
-# To an attach it is never passed -- the branch exists, so it was not made from
-# anything -- even when a caller sent one. gws and worktrunk say what they did on
-# this pane themselves, so none of it is captured -- and gws does the fetching,
-# which is why nothing here runs git at all.
+# The base is a revision, not a flag: it is only passed to a create, and only
+# when there is one, since an empty word is a revision jj has no name for and a
+# missing one means "start at main". To an attach it is never passed -- the
+# branch exists, so it was not made from anything -- even when a caller sent one.
+# jws says what it did on this pane itself, so none of it is captured; it is also
+# what fetches, which is why nothing here runs git at all.
 #
-# The worktree the answer named, and nothing else: the agent must never start in
-# the wrong directory, so a create, attach or switch that failed -- and its own
-# message is already on this pane -- or a path that cannot be read means the
-# agent is not started at all. The path file is read and removed either way: it
-# is this pane's litter, and an empty one is how "gws never wrote it" arrives
-# here.
+# The mode only decides which words jws is given. The path arrives the same way
+# for all three, because this program cannot follow the cd jws ends with: jws is
+# handed a file and writes the workspace's path into it as one line -- one
+# mktemp, one reading with head, removed here whichever mode ran.
+#
+# The workspace that answer named, and nothing else: the agent must never start
+# in the wrong directory, so a jws that failed -- and its own message is already
+# on this pane -- or a path file that cannot be read means the agent is not
+# started at all. The file is read and removed either way: it is this pane's
+# litter, and an empty first line is how "jws never wrote it" arrives here.
 #
 # The programs borrowed here are called through `command`, and the directory is
 # entered with `builtin cd`. fish's function namespace belongs to the user: on
 # this machine `rm` is a `trash` wrapper (so `rm -f` prints "Un-recognized
 # argument -f" and leaves the file) and `cd` is a directory jumper that lands
 # nowhere, so a plain `rm` or `cd` would put a line on every create and start the
-# agent in the wrong place. The two exceptions are `gws` and `wt`, which are
-# looked up as plain names because that is what they are: gws exists only as a
-# fish function, and the user's `wt` is how worktrunk's shell integration gets
-# in.
-# wt_path and not path: fish keeps $path as a mirror of PATH, so a local with that
-# name would shadow it -- harmless on the fish this was written against, a trap in
-# a later one.
-set -l wt_path
-if test "$mode" = switch
-  set -l listing (wt switch $branch --no-cd --format=json)
-  # The substitution's status is the switch's own, captured before anything else
-  # runs: a worktrunk that failed has already said why, on this pane's stderr.
-  set -l switched $status
-  if test $switched -eq 0
-    set wt_path (printf '%s\n' $listing | command jq -r '.path // empty')
-  end
-  if test -z "$wt_path"
-    # Two steps can leave no path: a switch that failed, whose own message is
-    # already on this pane, or a switch that worked and a reply whose path cannot
-    # be read (jq missing, or no path in it). Naming the step that went wrong is
-    # the point of the line, so neither case says "no path (exit 0)".
-    if test $switched -eq 0
-      printf 'rex-config: could not read the worktree path of %s from the switch reply (jq missing, or no path in it); not starting %s\n' "$branch" "$what" >&2
-    else
-      printf 'rex-config: wt switch %s failed (exit %s); not starting %s\n' "$branch" "$switched" "$what" >&2
-    end
+# agent in the wrong place. The one exception is `jws`, which is looked up as a
+# plain name because that is what it is: a fish function, and a program on a PATH
+# cannot be one.
+# ws_path and not path: fish keeps $path as a mirror of PATH, so a local with
+# that name would shadow it -- harmless on the fish this was written against, a
+# trap in a later one.
+set -l ws_path
+if test "$mode" = switch -o "$mode" = create -o "$mode" = attach
+  set -l pf (command mktemp)
+  # An empty answer is mktemp failing rather than a file name, and the `head`
+  # below would then read this pane's stdin and block there with no agent and no
+  # message on screen: refused here, in one line, like every other step that
+  # cannot go on.
+  if test -z "$pf"
+    printf 'rex-config: could not make a path file for %s; not starting %s\n' "$branch" "$what" >&2
     leave_shell
   end
-else if test "$mode" = create -o "$mode" = attach
-  set -l pf (command mktemp)
-  # One gws, two words: an attach names the branch that is already there and is
-  # given no base, and a create names the branch to make and the revision to make
-  # it from when the picker answered one.
-  if test "$mode" = attach
-    gws --attach $branch --path-file $pf
+  if test "$mode" = switch
+    jws --existing $branch --path-file $pf
+  else if test "$mode" = attach
+    jws --attach $branch --path-file $pf
   else if test -n "$base"
-    gws $branch $base --path-file $pf
+    jws $branch $base --path-file $pf
   else
-    gws $branch --path-file $pf
+    jws $branch --path-file $pf
   end
-  # The command's own status, captured before anything else runs.
-  set -l created $status
-  if test $created -eq 0
-    # the one line gws wrote, and not whatever else may have landed there
-    set wt_path (command head -n 1 $pf)
+  # jws's own status, captured before anything else runs: a jws that failed has
+  # already said why, on this pane's stderr.
+  set -l jws_status $status
+  if test $jws_status -eq 0
+    # the one line jws wrote, and not whatever else may have landed there
+    set ws_path (command head -n 1 $pf)
   end
   command rm -f $pf
-  if test $created -ne 0
-    printf 'rex-config: gws %s failed (exit %s); not starting %s\n' "$branch" "$created" "$what" >&2
+  if test $jws_status -ne 0
+    printf 'rex-config: jws %s failed (exit %s); not starting %s\n' "$branch" "$jws_status" "$what" >&2
     leave_shell
   end
-  if test -z "$wt_path"
-    printf 'rex-config: could not read the worktree path of %s from the gws path file; not starting %s\n' "$branch" "$what" >&2
+  if test -z "$ws_path"
+    printf 'rex-config: could not read the workspace path of %s from the jws path file; not starting %s\n' "$branch" "$what" >&2
     leave_shell
   end
 else
   # The first word is none of the three: a caller that does not know the
   # contract, or one still sending the old `1`/`0`. It is refused with the same
   # sentence too few words get, because it is the same mistake seen from the
-  # other side -- and before either program runs, since guessing what worktrunk
-  # or gws would make of the word happens on a pane nobody is watching.
+  # other side -- and before anything runs, since guessing what jws would make of
+  # the word happens on a pane nobody is watching.
   printf '%s\n' $contract >&2
   leave_shell
 end
@@ -311,16 +243,16 @@ end
 # A path that starts with a dash is a directory like any other, and fish's `cd`
 # reads one as an option: unlike sh's it has no `--` to end them with, so the
 # current-directory spelling is what keeps it a path. An absolute path, which is
-# what gws and worktrunk report, is left alone -- and `builtin`, because a plain
-# `cd` is the user's jumper (see above).
-set -l dir (string replace -r '^-' './-' -- $wt_path)
+# what jws reports, is left alone -- and `builtin`, because a plain `cd` is the
+# user's jumper (see above).
+set -l dir (string replace -r '^-' './-' -- $ws_path)
 builtin cd $dir
 or begin
-  printf 'rex-config: could not enter %s; not starting %s\n' "$wt_path" "$what" >&2
+  printf 'rex-config: could not enter %s; not starting %s\n' "$ws_path" "$what" >&2
   leave_shell
 end
 
-# No agent was asked for: the pane is the worktree and a login shell. The
+# No agent was asked for: the pane is the workspace and a login shell. The
 # prompt is the last word -- whatever else came with it belonged to an agent
 # that is not running -- and it has nowhere to go now, so it is printed above
 # the shell rather than disappearing with the float that collected it.
@@ -363,7 +295,7 @@ leave_shell
 -- typed there, the bead's, or -- with neither -- the configured no-bead prompt.
 -- An empty agent is the picker's "none": the wrapper starts nothing and hands
 -- the pane to a login shell. An empty base is "no base revision at all", which
--- is what leaves gws to start the branch at main.
+-- is what leaves jws to start the branch at main.
 --
 -- The prompt is not always there: a blank answer sends no prompt parameter at
 -- all, so the argv ends after the agent and its arguments, and a prompt whose
@@ -432,7 +364,7 @@ function M.new_tab_argv(project, args)
   -- The base a new branch starts from. The picker resolves it -- no ref is read
   -- here -- so this only carries the answer, and it is three-valued: a string is
   -- the revision to create from, false is the picker's "start from nothing" (and
-  -- travels as the empty parameter, which is gws's own default), and absent
+  -- travels as the empty parameter, which is jws's own default), and absent
   -- means the picker never answered -- a hand-run `rex do` -- so the configured
   -- base is the fallback. The remote a base lives on is part of the revision's
   -- own name (`main@origin`), so there is no word of its own for it.
@@ -490,11 +422,11 @@ end
 
 -- Rex runs an action with its own PATH -- /usr/bin:/bin:/usr/sbin:/sbin on this
 -- Mac -- which knows nothing of mise or Homebrew installs, while the design puts
--- fish, wt, jq, jj and bd on the login shell's PATH. wt and bd therefore run in
+-- fish, djo, jj and bd on the login shell's PATH. djo and bd therefore run in
 -- that shell, which is also where mise keeps the environment its shims need.
--- The new tab is a fish program for the same reason: gws exists only as a fish
+-- The new tab is a fish program for the same reason: jws exists only as a fish
 -- function, so the flow has to reach it from fish -- which is also what the
--- picker's own check asks for (`fish -c 'functions -q gws'`). Nothing is
+-- picker's own check asks for (`fish -c 'functions -q jws'`). Nothing is
 -- interpolated into the command text: a directory travels as rex.exec's cwd
 -- option, never inside the command.
 local function login_shell()
@@ -564,10 +496,9 @@ end
 -- template new-work.sh's done uses, and the read that names main below. It goes
 -- through the login shell, where jj lives, and it skips the working-copy
 -- snapshot for the reason the flow's own wait does: a plain read wants the
--- working-copy lock, which a background `jj workspace forget` hook can hold,
--- and a read that fails here falls back to worktrunk's answer -- the wrong one
--- in exactly the repo this fixes. The template's backslashes are escaped here
--- because they are jj's own, handed to it through the shell as written.
+-- working-copy lock, which a background `jj workspace forget` hook can hold.
+-- The template's backslashes are escaped here because they are jj's own, handed
+-- to it through the shell as written.
 local JJ_WORKSPACES = "jj --ignore-working-copy workspace list -T 'name ++ \"\\t\" ++ root ++ \"\\n\"'"
 
 -- The root of the workspace named exactly `main` in that listing, or nil when
@@ -587,68 +518,124 @@ local function main_workspace(listed)
   return nil
 end
 
--- The project a directory belongs to: its root and name from git's common
--- directory, and the main worktree from jj's `main` workspace -- or, when jj
--- names no such workspace, from worktrunk's own main flag. Returns nil and a
--- message naming the reason when the directory is not in a repository this can
--- use.
-function M.project_for(cwd)
-  local git, git_reason = run({ "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" })
-  if git == nil then
-    return nil, "git could not be run: " .. tostring(git_reason)
+-- Whether PATH is a directory, asked of io.open alone: a read of a directory
+-- fails, and that failure is the only answer io.open gives -- it opens one as
+-- happily as a file. A file always reads, even an empty one, so a failed read
+-- is the directory answer and a nil handle is simply not there.
+local function is_dir(path)
+  local handle = io.open(path, "r")
+  if handle == nil then
+    return false
   end
-  if git.code ~= 0 then
-    return nil, "not a git repository: " .. cwd
+  local first, reason = handle:read(1)
+  handle:close()
+  return first == nil and reason ~= nil
+end
+
+-- The wrapper a directory sits in: the nearest ancestor holding `.jj/repo` as
+-- a directory. This replaces a `git rev-parse --git-common-dir` read, because
+-- a wrapper cut to jj alone has no git to ask -- and the question it answered
+-- is one the filesystem still answers.
+--
+-- The directory form is what makes the walk work: a branch workspace, main
+-- included, has a `.jj/repo` of its own, but as a *file* holding the path of
+-- the store it borrows. So the walk passes every workspace and stops at the
+-- directory that holds them, which is also the directory jws adds to and the
+-- one whose basename is the project's name.
+function M.wrapper_root(cwd)
+  if type(cwd) ~= "string" then
+    return nil
+  end
+  -- A relative path names no project: every caller passes an absolute one, and
+  -- a walk up from here would answer about this process's directory instead.
+  if not cwd:match("^/") then
+    return nil
+  end
+  -- Every slash comes off, not just the last -- and a bare / keeps its one, so
+  -- that `/` handed over as the directory and `/` reached as an ancestor answer
+  -- the same: without that, the trim leaves nothing and the walk below would
+  -- skip every test the loop and the root check make.
+  local dir = cwd:gsub("/+$", "")
+  if dir == "" then
+    dir = "/"
   end
 
-  -- Only the absolute form names a project: the plain one prints ".git", which
-  -- project_from_common_dir refuses rather than turn into empty strings.
-  local common_dir = (git.stdout or ""):gsub("%s+$", "")
-  local project = M.project_from_common_dir(common_dir)
-  if project == nil then
-    return nil, "could not resolve the project root of " .. cwd
+  -- `/` is its own last step: the pattern cannot shorten it, and the walk has
+  -- then looked at every ancestor there is.
+  while dir ~= "" and dir ~= "/" do
+    if is_dir(dir .. "/.jj/repo") then
+      return dir
+    end
+    local parent = dir:match("^(.*)/[^/]+$")
+    if parent == nil then
+      return nil
+    end
+    -- `/a`'s parent is the root itself, which the pattern gives as the empty
+    -- string: the last step is the one this cannot shorten.
+    dir = parent == "" and "/" or parent
   end
 
-  -- The main worktree is jj's workspace named `main`, and only that. worktrunk's
-  -- own flag can name the wrong worktree -- in a bare-rooted wrapper whose
-  -- worktrees are all detached (pi-rex) it calls a branch workspace main -- while
-  -- jj's workspace name is the convention every part of this flow already assumes
-  -- when it says "main". A repository jj does not manage, or one whose main
-  -- workspace has another name, has no such row and falls through to the flag.
-  local jj_listed = run_in_shell(JJ_WORKSPACES, project.root)
-  local main
-  if jj_listed ~= nil and jj_listed.code == 0 then
-    main = main_workspace(jj_listed.stdout)
+  if is_dir("/.jj/repo") then
+    return "/"
   end
+  return nil
+end
 
+-- The project a wrapper is, from the jj listing read inside it: the wrapper is
+-- the root, its basename the name, and the row jj calls `main` the main
+-- workspace.
+--
+-- A wrapper with no `main` row is refused here rather than looked for anywhere
+-- else. This flow cannot make a workspace without one, so a plain colocated
+-- repo -- jj's default workspace is the root itself, with no main beside it --
+-- is exactly that case, and being told so is kinder than a picker that opens
+-- and then has nothing to offer. It is also the case worktrunk's own main flag
+-- used to answer, wrongly: in a bare-rooted wrapper whose worktrees are all
+-- detached (pi-rex) it called a branch workspace main, and the audit then ran
+-- in somebody's feature branch.
+--
+-- Exported because it is the pure half of the question and the test drives it
+-- directly: a listing written as text needs no `rex` stub, which is what
+-- project_for would take.
+function M.project_at(wrapper, listed)
+  -- The last segment is the name, and a trailing slash would leave none: the
+  -- wrapper walk trims its own answer, and a caller that handed over a path
+  -- with a slash would otherwise be told the root could not be resolved.
+  local root = type(wrapper) == "string" and (wrapper:gsub("/+$", "")) or nil
+  local name = root ~= nil and root:match("([^/]+)$") or nil
+  if name == nil then
+    return nil, "could not resolve the project root of " .. tostring(wrapper)
+  end
+  local main = main_workspace(listed)
   if main == nil then
-    local listed, list_reason = run_in_shell("wt list --format=json", project.root)
-    if listed == nil or listed.code ~= 0 then
-      return nil, "worktrunk could not list worktrees for " .. project.root .. ": "
-        .. first_line(listed and listed.stderr or list_reason)
-    end
+    return nil, "the wrapper " .. root .. " has no jj workspace named main"
+  end
+  return { root = root, name = name, main = main }
+end
 
-    -- main_worktree reads the decoded document, not raw text: raw JSON is never a
-    -- table. rex.json.decode reports bad text by returning nil and a reason rather
-    -- than raising, so the value decides -- and what it is, when it is not an
-    -- object, is what the message names.
-    local decoded, decode_reason = rex.json.decode(listed.stdout or "")
-    if type(decoded) ~= "table" then
-      local why
-      if decode_reason ~= nil then
-        why = tostring(decode_reason)
-      else
-        why = "the listing decoded to a " .. type(decoded) .. ", not an object"
-      end
-      return nil, "could not read the worktrunk listing for " .. project.root .. ": " .. why
-    end
-    main = M.main_worktree(decoded)
-    if main == nil then
-      return nil, "no main worktree found for " .. project.root
-    end
+-- The project a directory belongs to: the wrapper it sits in, that directory's
+-- name, and the `main` workspace beside it. Returns nil and a message naming
+-- the reason when the directory is not in a wrapper this flow can make a
+-- workspace in.
+function M.project_for(cwd)
+  local wrapper = M.wrapper_root(cwd)
+  if wrapper == nil then
+    return nil, "not in a jj wrapper: no .jj/repo directory above " .. tostring(cwd)
   end
 
-  return { root = project.root, name = project.name, main = main }
+  -- jj's own workspace list is the only source: its `main` row is the name
+  -- every part of this flow already assumes when it says "main". A listing that
+  -- cannot be read is a failed read, not an empty one, and saying which it was
+  -- is what keeps "jj is broken" from reading as "this project has no main".
+  local listed, reason = run_in_shell(JJ_WORKSPACES, wrapper)
+  if listed == nil then
+    return nil, "jj could not be run in " .. wrapper .. ": " .. tostring(reason)
+  end
+  if listed.code ~= 0 then
+    return nil, "could not list the jj workspaces of " .. wrapper .. ": "
+      .. first_line(listed.stderr)
+  end
+  return M.project_at(wrapper, listed.stdout)
 end
 
 -- bd's own way of saying a directory has no database. A failure that says
@@ -656,9 +643,11 @@ end
 -- locked database -- and calling that "no database" would be a lie.
 local NO_DATABASE = "no beads database"
 
--- Whether the project has a beads database, asked from the main worktree: in
--- the worktrunk layout the root holds only .git, and main/.beads/redirect is
--- what resolves the database.
+-- Whether the project has a beads database, asked from the main worktree. Which
+-- layout that is costs nothing here: bd's own upward detection finds the
+-- database from any workspace in the wrapper, so a `jinit` wrapper -- which has
+-- no `.git` at its root and no `.beads/redirect` in `main` -- answers exactly as
+-- the older ginit one does.
 --
 -- Returns true, or false and the reason bd gave: nil when bd ran and reported no
 -- database itself, and a message when bd could not be started or failed.
@@ -812,11 +801,12 @@ local function agent_choices()
 end
 
 -- argv for new-work.sh's picker, every word of it built here and nowhere else.
--- base = false means "let worktrunk choose", so there is no ref to pass on --
+-- base = false means "no revision at all", so there is no ref to pass on --
 -- but the picker still has to be told, because a picker told nothing resolves
--- the remote's default branch itself and the screen would open on a base the
--- configuration opted out of. So false is --no-base: the cycle opens on the
--- worktrunk-default sentinel, and ctrl-r can still move off it.
+-- its own opening base (main@origin, then master@origin, then @) and the screen
+-- would open on one the configuration opted out of. So false is --no-base: the
+-- cycle opens on the "no revision at all" sentinel, and ctrl-r can still move
+-- off it.
 local function picker_command(project)
   local command = {
     M.options.script, "pick",
@@ -1260,17 +1250,26 @@ function M.work_new_go(ctx, args)
 end
 
 -- The jj workspaces as name and root rows, in the order workspaces were added.
--- Read from the op log rather than from the working copy: the background
--- post-remove hook is running `jj workspace forget` in this same repository, and
--- a plain read wants the working-copy lock that hook holds. The op log already
--- carries the row the hook is removing, so a wait still sees it go.
+-- Read from the op log rather than from the working copy: the op log is what
+-- carries the row, and a plain read would want a working-copy lock that another
+-- workspace's jj, or a hook dojjo started, may be holding.
 local WORKSPACE_LIST =
   [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
 
--- How long a background hook is given to clear the jj workspace row before the
--- row is called a leftover: a read, then a short sleep and another read, until
--- the reads are spent. The hook is one `jj workspace forget`, so about two
--- seconds is generous, and the wait cannot hang the audit's exit.
+-- The workspace's bookmark, read as a live target rather than as a name in a
+-- listing. `jj bookmark delete` -- which is what dojjo's remove runs -- only marks
+-- a bookmark a remote tracks deleted: the tombstone goes on printing its name in
+-- `jj bookmark list`, so a listing cannot tell a deleted bookmark from a kept one.
+-- A revset can, because it resolves to a commit only while the bookmark is really
+-- there. Read from the op log for the same reason the row read is.
+local BOOKMARK_TARGET =
+  [[jj --ignore-working-copy log --no-graph -r %s -T 'commit_id ++ "\n"']]
+
+-- How long the jj workspace row is given to go before it is called a leftover: a
+-- read, then a short sleep and another read, until the reads are spent. dojjo's
+-- own remove is synchronous, so this is belt to its braces -- the row is what is
+-- verified, and an exit code is not -- and about two seconds is generous for a
+-- forget that has already been asked for. The wait cannot hang the audit's exit.
 local SETTLE_READS = 10
 local SETTLE_SECONDS = "0.2"
 
@@ -1286,7 +1285,7 @@ local function jj_workspace_list(main)
 end
 
 -- Whether a jj workspace listing still names NAME: one row per workspace, a tab
--- between the name and the root.
+-- between the name and its root.
 local function lists_workspace(stdout, name)
   for line in tostring(stdout or ""):gmatch("[^\n]+") do
     if line:match("^([^\t]+)") == name then
@@ -1315,75 +1314,28 @@ function M.work_done_go(ctx, args)
   end
   local workspace, path, main = args.workspace, args.path, args.main
 
-  -- --foreground so the removal itself blocks: its exit code and its
-  -- branch_outcome are then final, where a background removal could still be
-  -- running when the tab closes. It does *not* wait for the post-remove hook --
-  -- worktrunk's post-* hooks run in the background -- which is what the wait
-  -- below is for.
-  -- -y because nobody is there to approve a prompt; --format=json so the
-  -- branch's fate is read rather than guessed. No -f, no -D, no --reap: if
-  -- worktrunk refuses on its own terms, that refusal is the report. It runs in
-  -- the main worktree, because the one being removed is the pane's own.
+  -- dojjo's remove is the teardown itself: it forgets the workspace, deletes its
+  -- directory and deletes the bookmark. -y because nobody is there to answer a
+  -- prompt, and no --keep-bookmark because the branch is merged and goes with
+  -- the workspace it was named for. It runs in the main worktree, because the one
+  -- being removed is the pane's own. dojjo has no merged check to second-guess,
+  -- so nothing here is reinterpreted: a refusal is dojjo's own line, and the
+  -- three reads below are the only audit this teardown gets.
   local removed, remove_reason = run_in_shell(
-    "wt remove " .. M.shell_quote(path) .. " --foreground -y --format=json", main)
+    "djo remove " .. M.shell_quote(workspace) .. " -y", main)
   if removed == nil then
-    error("could not run worktrunk: " .. tostring(remove_reason), 0)
+    error("could not run djo: " .. tostring(remove_reason), 0)
   end
   if removed.code ~= 0 then
-    error("could not remove " .. path .. ": " .. first_line(removed.stderr), 0)
+    error("could not remove the workspace " .. workspace .. " (" .. path .. "): "
+      .. first_line(removed.stderr), 0)
   end
 
-  -- worktrunk's --format=json reply is an array, one entry per removal; this flow
-  -- removes one path, so the entry that matters is the first. Reading it as an
-  -- object -- which an array is not -- is how a perfect removal came to be
-  -- reported as a failure after the worktree was already gone. A bare object is
-  -- tolerated as well, so a single-entry shape reads the same.
-  local decoded = rex.json.decode(removed.stdout or "")
-  -- An entry is an array's first, or a bare object's own self. An empty reply is
-  -- neither -- worktrunk exited 0 and then named no removal at all -- so there is
-  -- no branch to report and none to name a command for, and the kept-branch line
-  -- below would claim it kept something it never mentioned. A report that cannot
-  -- be made says so in its own words.
-  local entry = nil
-  if type(decoded) == "table" then
-    if decoded[1] ~= nil then
-      entry = decoded[1]
-    elseif next(decoded) ~= nil then
-      entry = decoded
-    end
-  end
-  if entry == nil then
-    error("worktrunk named no removal in its reply: run wt list --format=json in " .. main
-      .. " to see what is left", 0)
-  end
-  local outcome = type(entry) == "table" and entry.branch_outcome or nil
-  local branch = type(entry) == "table" and entry.branch or nil
-
-  -- A teardown is complete or it is not. `deleted` is worktrunk's word for a
-  -- branch it removed; `not_attempted` with no branch is the detached worktree a
-  -- jj wrapper produces -- `gws` adds workspaces with `jj workspace add` and
-  -- nothing attaches a branch, so there is nothing for worktrunk to delete and
-  -- nothing left behind. Everything else -- a retained branch, a reply that says
-  -- nothing about one, a value this flow does not know -- is reported with the one
-  -- command that would finish the job. A bookmark that survives is not that: a
-  -- bookmark belongs to the finishing skill's Step 8, and this flow neither
-  -- deletes nor reports one. -D is the person's to run: if worktrunk and the audit
-  -- disagree about merged, that is theirs to settle.
-  local complete = outcome == "deleted" or (outcome == "not_attempted" and branch == nil)
-  if not complete then
-    -- The command names the branch, not the path: by the time this line is read
-    -- the worktree is gone, and `wt remove <path> -D` has no path to work on.
-    -- The branch is what is left to remove, so that is what worktrunk is given.
-    local named = type(branch) == "string" and branch ~= "" and branch or workspace
-    error("the branch " .. named .. " was kept (" .. tostring(outcome or "worktrunk said nothing")
-      .. "): run wt remove -D " .. M.shell_quote(named), 0)
-  end
-
-  -- The seeded hook ends in || true, so the row is verified rather than trusted.
-  -- The hook is also a background hook: it starts after the removal has already
-  -- returned, so the first read can be too early on a teardown that is
-  -- perfectly healthy. The row is therefore given a bounded moment to go, and
-  -- only what is still there at the end of it is a leftover.
+  -- dojjo forgetting the workspace is trusted rather than believed, so the row is
+  -- read: an exit code says only that dojjo thought it had finished, and the row
+  -- is what is left to check -- and what a person checks when they doubt the exit
+  -- code. The row is given a bounded moment to go, and only what is still there
+  -- at the end of it is a leftover.
   local rows = jj_workspace_list(main)
   for _ = 2, SETTLE_READS do
     if not lists_workspace(rows, workspace) then
@@ -1395,15 +1347,12 @@ function M.work_done_go(ctx, args)
     rows = jj_workspace_list(main)
   end
   if lists_workspace(rows, workspace) then
-    -- The hook is worktrunk's fast path and not a guarantee: worktrunk cannot
-    -- even expand the seeded line for a detached worktree -- all `jj workspace
-    -- add`, and so `gws`, creates -- because there is no `branch` variable in it
-    -- to interpolate, and an unapproved hook never runs at all. A row left
-    -- behind for a directory this flow has just removed is therefore this
-    -- teardown finishing itself, once, rather than somebody else's leftover: the
-    -- same forget the hook would have run, from main, with the workspace's name
-    -- as one quoted word. The row is then read again, because the row is what
-    -- this verifies and an exit code is not.
+    -- dojjo's forget is the fast path and not a guarantee, so a row left behind
+    -- for a directory this flow has just removed is this teardown finishing
+    -- itself, once, rather than somebody else's leftover: the same forget dojjo
+    -- would have run, from main, with the workspace's name as one quoted word. The
+    -- row is then read again, because the row is what this verifies and an exit
+    -- code is not.
     local forgotten = run_in_shell(
       "jj workspace forget " .. M.shell_quote(workspace), main)
     -- The row is read again whatever the forget said: the row is the thing being
@@ -1419,23 +1368,42 @@ function M.work_done_go(ctx, args)
     end
   end
 
-  -- And the worktree itself. A listing that cannot be read is not a proof of
-  -- absence, so it is reported rather than read as an empty one.
-  local worktrees, worktree_reason = run_in_shell("wt list --format=json", main)
-  if worktrees == nil or worktrees.code ~= 0 then
-    error("could not list worktrees: "
-      .. first_line(worktrees and worktrees.stderr or worktree_reason), 0)
+  -- And the directory itself, which is what a person looks for when they doubt
+  -- the removal. `test ! -e` is one argv rather than a shell line, so the path is
+  -- one word whatever it holds -- and a check that could not be run is not a proof
+  -- of absence either, so it is reported rather than read as a directory that
+  -- went. `-e` and not `-d`: dojjo takes the directory away whole, so anything
+  -- left at the path -- a stray file included -- is a leftover, and a `-d` test
+  -- would read that as the path being gone.
+  local absent, absent_reason = run({ "test", "!", "-e", path }, main)
+  if absent == nil then
+    error("could not check whether " .. path .. " is still there: "
+      .. tostring(absent_reason), 0)
   end
-  local listing, listing_reason = rex.json.decode(worktrees.stdout or "")
-  if type(listing) ~= "table" then
-    error("could not read the worktrunk listing: "
-      .. tostring(listing_reason or ("it decoded to a " .. type(listing) .. ", not an object")), 0)
+  if absent.code ~= 0 then
+    error(path .. " is still there: run djo list -f in " .. main, 0)
   end
-  for _, item in ipairs(type(listing.items) == "table" and listing.items or {}) do
-    local worktree = type(item) == "table" and item.worktree or nil
-    if type(worktree) == "table" and worktree.path == path then
-      error(path .. " is still a worktree: run wt list to see why", 0)
-    end
+
+  -- And the bookmark, which dojjo deletes with the workspace -- so one that still
+  -- resolves is the only "kept" case this flow has. It is not this action's to
+  -- delete: the one command that would finish the job is named rather than run.
+  -- The name goes inside a jj string literal, so its own quote and backslash are
+  -- escaped first: a bookmark can hold either, and unescaped they end the literal
+  -- early -- which makes jj fail to parse a revset rather than answer one, and the
+  -- failure is reported below rather than read as a live bookmark.
+  local escaped = workspace:gsub('[\\"]', '\\%0')
+  local target = 'bookmarks(exact:"' .. escaped .. '")'
+  local live, live_reason = run_in_shell(
+    string.format(BOOKMARK_TARGET, M.shell_quote(target)), main)
+  if live == nil or live.code ~= 0 then
+    error("could not read the bookmark of " .. workspace .. ": "
+      .. first_line(live and live.stderr or live_reason), 0)
+  end
+  -- A commit id means the bookmark is there; no output at all means it is not --
+  -- which is also what the tombstone of a deleted remote-tracked bookmark leaves.
+  if (live.stdout or ""):match("%S") ~= nil then
+    error("the bookmark " .. workspace .. " was kept: run jj bookmark delete "
+      .. M.shell_quote(workspace), 0)
   end
 end
 

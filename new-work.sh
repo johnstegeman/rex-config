@@ -19,9 +19,9 @@ commands:
       print one bead's full text, for the picker's preview pane
   branch-default --type TYPE --id ID
       print the branch name to offer for a bead, e.g. bug/pmm-iris-a4l
-  candidates --main DIR [--wt-json FILE] [--refs FILE]
-      print the branch names that already exist, one per line, worktree
-      branches first
+  candidates --main DIR [--workspaces FILE] [--bookmarks FILE]
+      print the branch names that already exist, one per line: the branches a
+      jj workspace is already on first, then the local bookmarks
   bases --main DIR [--base-bookmarks FILE] [--origin-head REF]
         [--base REF | --no-base]
       print the revisions the screen opens on and cycles through, one jj
@@ -53,7 +53,7 @@ commands:
       cycle-agent, cycle-base and branch-field are what ctrl-a, ctrl-r and ctrl-b
       run, and branch-field prints nothing
   done --cwd PATH --main DIR --root PATH --project NAME --session ID
-       --window ID [--running NAME]... [--workspaces FILE] [--wt-json FILE]
+       --window ID [--running NAME]... [--workspaces FILE]
        [--diff FILE] [--own-status FILE] [--changes FILE]
        [--main-state FILE] [--bd-json FILE] [--base-bookmarks FILE]
        [--origin-head REF] [--no-fetch] [--dry-run]
@@ -69,7 +69,6 @@ commands:
         --running        a program still running in the tab; repeat for each
         --workspaces     a saved `jj workspace list -T` rendering, one
                          "name<TAB>root" row per line, instead of asking jj
-        --wt-json        a saved `wt list --format=json`, instead of worktrunk
         --diff           a saved `jj diff --summary` of the branch against its base
         --own-status     a saved `jj diff --summary` of the working copy
         --changes        a saved list of the change ids the branch holds
@@ -77,7 +76,8 @@ commands:
         --bd-json        a saved `bd list --status in_progress --json`, holding
                          the bead the branch is on
         --base-bookmarks a saved `jj bookmark list`, as bases reads it
-        --origin-head    what origin/HEAD names, where the branch's base comes from
+        --origin-head    the branch this clone treats as origin's default, as
+                         `origin/main` or `main@origin`: the base the cycle opens on
         --no-fetch       do not fetch before the audit
         --dry-run        print the hand-back instead of running it; the audit
                          still fetches and refreshes main
@@ -91,14 +91,20 @@ waits for a key, with nothing removed: that answer is exit 4, shown and
 stopped rather than failed. A clean run prints nothing of its own, hands the
 five paths to Rex and lets the tab close itself.
 
---bd-json, --wt-json, --refs and --base-bookmarks read saved tool
-output instead of asking the tools, which is how the tests and dry runs work:
---bd-json stands in for bd, --wt-json with --refs for both of the lookups
---main would be read for, --base-bookmarks for the bookmark list bases reads,
-so a run given all four never touches --main at all. --origin-head is the same
-seam for the one ref git is
-still asked about. PICK_SCREEN=1 in the environment says the run has the float's
-terminal, which is how the screen's own paths are driven without one.
+--bd-json, --workspaces, --bookmarks and --base-bookmarks read saved tool
+output instead of asking the tools, which is how the tests and dry runs work.
+Each belongs to the subcommands that read that tool, and not to the rest:
+--bd-json stands in for bd in `beads`, `pick` and `done`; --workspaces and
+--bookmarks stand in for the two lookups `--main` would be read for (`jj
+workspace list`, one "name<TAB>root" row per workspace, and `jj bookmark list`,
+one local name per line) in `candidates` and `pick`, which read both, and
+--workspaces alone in `done`, which has no bookmark half; --base-bookmarks
+stands in for the bookmark list `bases` reads, in `bases`, `pick` and `done`.
+So a `pick` given all four never touches --main at all. --origin-head is the
+same seam for the remote default itself, which is no longer asked of anything:
+give it, or the fixed names answer. PICK_SCREEN=1 in the environment says the
+run has the float's terminal, which is how the screen's own paths are driven
+without one.
 
 The one screen asks everything at once: the ready beads with "✎  write a prompt
 instead" pinned on top, and the agent, the branch and the base in its header, a
@@ -116,8 +122,8 @@ not deliver printed above that shell rather than dropped. The branch starts as
 the name derived from the bead and a bare Enter keeps it.
 
 The base field opens on the one --base names, or the one a new workspace would be
-created from (origin/HEAD's branch on origin, then main@origin, then
-master@origin, then @), or none at all with --no-base -- which reads "none",
+created from (main@origin, then master@origin, then @ -- no git is asked), or
+none at all with --no-base -- which reads "none",
 because it is a real answer rather than a missing one. It is one jj revision: the
 remote a base comes from is the @remote in its own name, so there is nothing for
 the tab to fetch by a second word. The rest of the cycle is @, then the local
@@ -179,7 +185,7 @@ held=0
 # Whether this run has the float's terminal. The screen, the fields it opens and
 # the state directory they share exist only where stdin is a terminal, and a
 # pipe, a script and the tests have none. PICK_SCREEN=1 says "this is the
-# float" to a run with no terminal to hand, the way --bd-json and --wt-json
+# float" to a run with no terminal to hand, the way --bd-json and --workspaces
 # say "no tool is consulted for this": the seam lives here, in the script
 # itself, so the screen's own paths are run through this file rather than
 # through a patched copy of it.
@@ -264,10 +270,10 @@ need() {
   exit 1
 }
 
-# Exit 1: the same for a fish function, which is not on PATH and cannot be: gws
+# Exit 1: the same for a fish function, which is not on PATH and cannot be: jws
 # is a function in ~/.config/fish/functions, and it is the one thing that knows
-# how to make a jj colocated workspace. fish itself missing is the plainer
-# failure need() already has a message for, so the two do not differ in shape.
+# how to make a jj workspace. fish itself missing is the plainer failure need()
+# already has a message for, so the two do not differ in shape.
 # The words to fish go through $argv rather than a string, so a name with a
 # space or a quote in it is still one name.
 need_fish_function() {
@@ -393,135 +399,177 @@ cmd_branch_default() {
 
   # Only the last dash-separated segment is kept, and an id that ends in a dash,
   # or is nothing but dashes, leaves no segment at all: "feat/" is not a ref, so
-  # it is refused here rather than handed to worktrunk.
+  # it is refused here rather than offered as a name the tab cannot create.
   short=${id##*-}
   [ -n "$short" ] || usage_error "branch-default: --id $id leaves no name to use"
 
   printf '%s/%s\n' "$prefix" "$short"
 }
 
-# Branch names out of `wt list --format=json`. Schema 2 puts the branch on the
-# item (`items[].branch`) and some versions also repeat it inside the worktree
-# object, so prefer the worktree copy and fall back to the item. A detached
-# worktree reports no branch at all and is skipped.
-wt_branches() {
-  jq -r '
-    ( if type == "array" then . else (.items // []) end )[]
-    | (.worktree.branch? // .branch? // empty)
-    | strings
-  '
-}
-
-# The first half of the candidate list: the branches worktrunk already has a
-# worktree for, main's at the top (wt lists it first). A branch in this list is
-# a worktree to switch to.
+# The first half of the candidate list: the workspaces jj already has, by name.
+# A workspace's name is the branch it is on -- the convention `gws` and `jws`
+# create and the one the done flow already reads a workspace by -- so a name in
+# this list is a workspace to switch to.
 #
-# A worktrunk that cannot read the repository is a failed read, not an empty
-# one: it says so, naming the directory, and returns 1. What happens next is the
-# caller's, and the message says only what happened, because the two callers
-# differ -- `candidates` still prints git's branches beside them, since a partial
-# branch list is still the list a dry run asked for, while `branch_mode` cannot
-# tell a worktree branch from one only git knows without this half, so a pick stops
-# rather than guess. Guessing would send a branch that has a worktree to
-# `gws --attach`, which refuses on the directory that is already there.
-wt_branch_rows() {
-  local main=$1 wt_json=$2
+# The rendering is `done`'s own, one "name<TAB>root" row per workspace, and only
+# the name is wanted here: the root is what a teardown needs, and cutting at the
+# tab is what keeps one fixture serving both subcommands. The row named `default`
+# is jj's workspace at the wrapper itself -- the directory main and every branch
+# workspace sit in, which owns every directory no other workspace does -- and it
+# is no branch, so it is skipped rather than offered as one. Skipping it assumes
+# the wrapper layout this flow only works in, where the base workspace beside
+# the wrapper is `main`: there `default` is jj's leftover at the wrapper root
+# and never the thing to switch to, while a colocated repo has nothing else.
+#
+# A jj that cannot read the repository is a failed read, not an empty one: it
+# says so, naming what could not be read -- the directory jj was asked about, or
+# the fixture that stands in for it -- and returns 1. That is one line, and the
+# same line in both cases, so a caller adds none of its own. What happens next is
+# the caller's, because the two callers differ: `candidates` still prints the
+# bookmark half beside it, since a partial list is still the list a dry run asked
+# for, while `branch_mode` cannot tell a workspace from a bookmark without this
+# half, so a pick stops rather than guess. Guessing would send a branch that has
+# a workspace to `jws --attach`, which refuses on the directory already there.
+workspace_rows() {
+  local main=$1 fixture=$2
   local listing
 
-  if [ -n "$wt_json" ]; then
-    wt_branches <"$wt_json"
-  elif [ -n "$main" ]; then
-    if listing=$( cd "$main" && wt list --format=json ); then
-      printf '%s\n' "$listing" | wt_branches
-    else
-      printf '%s: could not read the worktrees of %s\n' "$PROG" "$main" >&2
+  if [ -n "$fixture" ]; then
+    # A fixture that cannot be opened is refused here rather than left to the
+    # redirect: the shell's own "line NNN: ... No such file or directory" names a
+    # line of this script instead of the file, and it arrives beside this message
+    # rather than instead of it.
+    [ -r "$fixture" ] || {
+      printf '%s: could not read the workspaces of %s\n' "$PROG" "$fixture" >&2
       return 1
-    fi
-  fi
-}
-
-# The second half: the branches git knows about, with no worktree among them. A
-# branch in this list and not in the one above is one waiting for a workspace of
-# its own -- an attach -- so the two lists together are the whole answer to what
-# a picked name means.
-local_branch_rows() {
-  local main=$1 refs=$2
-  if [ -n "$refs" ]; then
-    cat "$refs"
+    }
+    listing=$(cat "$fixture")
   elif [ -n "$main" ]; then
-    ( cd "$main" && git for-each-ref refs/heads --format='%(refname:short)' )
+    listing=$( cd "$main" &&
+      jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) || {
+      printf '%s: could not read the workspaces of %s\n' "$PROG" "$main" >&2
+      return 1
+    }
+  else
+    return 0
+  fi
+
+  printf '%s\n' "$listing" | awk -F'\t' 'NF && $1 != "default" { print $1 }'
+}
+
+# The second half: the local bookmarks jj knows. A bookmark with no workspace
+# among them is a branch waiting for one -- an attach -- so the two lists
+# together are the whole answer to what a picked name means.
+#
+# Names alone, one per line, which is the rendering that makes the two halves
+# comparable: a bookmark and a workspace are the same branch spelled the same
+# way. This is not the base cycle's list: --base-bookmarks is a saved
+# `jj bookmark list --all-remotes` rendering, one "<name>@<remote>" record per
+# line, and neither fixture may stand in for the other.
+#
+# A failed read returns 1 with one line, as workspace_rows does and for the same
+# reason -- so a bookmark that could not be read is never mistaken for a clone
+# with no bookmarks, which would make every name a create.
+bookmark_rows() {
+  local main=$1 fixture=$2
+  if [ -n "$fixture" ]; then
+    [ -r "$fixture" ] || {
+      printf '%s: could not read the bookmarks of %s\n' "$PROG" "$fixture" >&2
+      return 1
+    }
+    cat "$fixture"
+  elif [ -n "$main" ]; then
+    ( cd "$main" && jj --ignore-working-copy bookmark list -T 'name ++ "\n"' ) || {
+      printf '%s: could not read the bookmarks of %s\n' "$PROG" "$main" >&2
+      return 1
+    }
   fi
 }
 
-# The candidate branch names for --main, or for the given saved tool output.
-# Worktree branches come first -- wt lists the main worktree at the top --
-# then the local branches git knows about. One branch can be both, so the
-# first sighting wins.
+# The candidate branch names for --main, or for the given saved tool output. The
+# workspace names come first -- a name in that half is a switch -- then the local
+# bookmarks with no workspace among them. One branch can be both, so the first
+# sighting wins.
 #
-# A worktrunk that could not be read costs this list its worktree rows and
-# nothing else: the warning above has already been said, and the branches git
-# knows are still worth printing. That is the whole difference from branch_mode,
-# which has to refuse rather than answer from half the list.
+# A source that could not be read is forgiven here and nothing else is lost: the
+# line naming it has already been said, and the other half is still worth
+# printing. The one exception is a fixture, which is the caller's own mistake
+# rather than a repository this machine cannot read -- so that travels up, and
+# the read that follows is not made at all, because half a list is a guess
+# dressed as an answer. That is the whole difference from branch_mode, which has
+# to refuse rather than answer from half the list.
+#
+# Neither half is filtered by the SHAPE of a name on the way out. A workspace or a
+# bookmark really called origin/HEAD is a branch like any other -- no name is
+# reserved, and jj answers for it when it is picked. The `/HEAD` row this used to
+# drop was git's `refs/remotes/*/HEAD` vocabulary, and this flow no longer reads
+# a git listing at all: dropping it here would hide a row that is really there,
+# which is the one thing the picker must not do. What the filter keeps is the
+# empty line between the halves, and the dedupe of a name both halves hold.
 candidate_rows() {
-  local main=$1 wt_json=$2 refs=$3
+  local main=$1 workspaces=$2 bookmarks=$3
+  local rows
 
-  {
-    # Only a live `wt` is forgiven here. A --wt-json that cannot be opened is a
-    # caller's mistake rather than a repository this machine cannot read, and it
-    # travels up like any other failed read -- silently, since no message about a
-    # directory would be true of it.
-    if [ -n "$wt_json" ]; then
-      wt_branch_rows "$main" "$wt_json"
-    else
-      wt_branch_rows "$main" "$wt_json" || true
-    fi
-    local_branch_rows "$main" "$refs"
-  } | awk 'NF && !/\/HEAD$/ && !seen[$0]++'
+  if [ -n "$workspaces" ]; then
+    rows=$(workspace_rows "$main" "$workspaces") || return 1
+  else
+    rows=$(workspace_rows "$main" "$workspaces" || true)
+  fi
+  # A newline between the halves, never a join: an empty first half would
+  # otherwise run its last row into the first bookmark. The blank line it leaves
+  # behind is dropped with the rest of them by the filter below.
+  if [ -n "$bookmarks" ]; then
+    rows=$rows$'\n'$(bookmark_rows "$main" "$bookmarks") || return 1
+  else
+    rows=$rows$'\n'$(bookmark_rows "$main" "$bookmarks" || true)
+  fi
+
+  printf '%s\n' "$rows" | awk 'NF && !seen[$0]++'
 }
 
-# What a picked name means, as one word: switch to the worktree that already has
-# the branch, attach a worktree to the local branch that has not got one, or
-# create the branch.
+# What a picked name means, as one word: switch to the workspace that already has
+# the branch, attach a workspace to the bookmark that has not got one, or create
+# the branch.
 #
 # The two lists above are the answer, in that order, and asking them in that
-# order is the whole rule -- a branch worktrunk has a worktree for is a switch
-# even when git also knows the branch, and one only git knows is an attach. There
+# order is the whole rule -- a branch jj has a workspace for is a switch even
+# when a bookmark holds it too, and one only a bookmark holds is an attach. There
 # is no third lookup and nothing is asked of the repository beyond what the
 # picker already reads: the mode is decided once, here, and carried to the tab.
 branch_mode() {
-  local branch=$1 main=$2 wt_json=$3 refs=$4
-  local worktrees='' locals=''
+  local branch=$1 main=$2 workspaces=$3 bookmarks=$4
+  local switched='' attaches=''
 
-  # An empty list is not a failure -- a clone with no worktrees yet, or a caller
+  # An empty list is not a failure -- a clone with no workspaces yet, or a caller
   # with no fixture for one of the two sources, answers "create" -- but a source
   # that could not be read is, and travels up to the caller to be said there.
-  if [ -n "$wt_json" ] || [ -n "$main" ]; then
-    worktrees=$(wt_branch_rows "$main" "$wt_json") || return 1
+  if [ -n "$workspaces" ] || [ -n "$main" ]; then
+    switched=$(workspace_rows "$main" "$workspaces") || return 1
   fi
-  if [ -n "$refs" ] || [ -n "$main" ]; then
-    locals=$(local_branch_rows "$main" "$refs") || return 1
+  if [ -n "$bookmarks" ] || [ -n "$main" ]; then
+    attaches=$(bookmark_rows "$main" "$bookmarks") || return 1
   fi
 
-  if printf '%s\n' "$worktrees" | grep -Fxq -- "$branch"; then
+  if printf '%s\n' "$switched" | grep -Fxq -- "$branch"; then
     printf 'switch\n'
-  elif printf '%s\n' "$locals" | grep -Fxq -- "$branch"; then
+  elif printf '%s\n' "$attaches" | grep -Fxq -- "$branch"; then
     printf 'attach\n'
   else
     printf 'create\n'
   fi
 }
 
-# `new-work.sh candidates --main DIR [--wt-json FILE] [--refs FILE]`
+# `new-work.sh candidates --main DIR [--workspaces FILE] [--bookmarks FILE]`
 #
 # Every branch name that already exists, one per line: the two lists a mode is
 # decided from, printed. No code path in this script calls it -- the picker
 # offers no branch list, and a name is typed at ctrl-b and read by branch_mode
 # from these same two sources -- so its readers are the tests and a hand-run of
-# this subcommand. The order is the load-bearing part of it: worktree branches
-# first, because a name in that half is a switch and one only git knows is an
-# attach.
+# this subcommand. The order is the load-bearing part of it: the workspace names
+# first, because a name in that half is a switch and one only a bookmark holds is
+# an attach.
 cmd_candidates() {
-  local main='' wt_json='' refs=''
+  local main='' workspaces='' bookmarks=''
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -530,34 +578,33 @@ cmd_candidates() {
         main=$2
         shift 2
         ;;
-      --wt-json)
-        [ $# -ge 2 ] || usage_error 'candidates: --wt-json needs a file'
-        wt_json=$2
+      --workspaces)
+        [ $# -ge 2 ] || usage_error 'candidates: --workspaces needs a file'
+        workspaces=$2
         shift 2
         ;;
-      --refs)
-        [ $# -ge 2 ] || usage_error 'candidates: --refs needs a file'
-        refs=$2
+      --bookmarks)
+        [ $# -ge 2 ] || usage_error 'candidates: --bookmarks needs a file'
+        bookmarks=$2
         shift 2
         ;;
       *) usage_error "candidates: unknown option $1" ;;
     esac
   done
 
-  if [ -z "$main" ] && { [ -z "$wt_json" ] || [ -z "$refs" ]; }; then
-    usage_error 'candidates: need --main DIR (or --wt-json FILE and --refs FILE)'
+  if [ -z "$main" ] && { [ -z "$workspaces" ] || [ -z "$bookmarks" ]; }; then
+    usage_error 'candidates: need --main DIR (or --workspaces FILE and --bookmarks FILE)'
   fi
-  # --main is where git and wt are read, so a directory that is not there is
-  # refused here, by name: left to candidate_rows it reaches `cd` inside a
-  # subshell, whose failure reads as a line number in this script rather than as
-  # a place that does not exist. Only when one of those lookups will really be
-  # made: with both fixtures the directory is never read.
-  if [ -z "$wt_json" ] || [ -z "$refs" ]; then
+  # --main is where jj is read, so a directory that is not there is refused here,
+  # by name: left to candidate_rows it reaches `cd` inside a subshell, whose
+  # failure reads as a line number in this script rather than as a place that
+  # does not exist. Only when one of those lookups will really be made: with both
+  # fixtures the directory is never read.
+  if [ -z "$workspaces" ] || [ -z "$bookmarks" ]; then
     [ -d "$main" ] || die "candidates: no such directory: $main"
   fi
-  command -v jq >/dev/null 2>&1 || die 'jq is required but was not found on PATH'
 
-  candidate_rows "$main" "$wt_json" "$refs"
+  candidate_rows "$main" "$workspaces" "$bookmarks"
 }
 
 # The bookmarks jj knows, one rendering per line: the fixture when one is given
@@ -578,7 +625,7 @@ bookmark_records() {
     [ -r "$fixture" ] || return 1
     cat "$fixture"
   else
-    ( cd "$main" && jj bookmark list --all-remotes \
+    ( cd "$main" && jj --ignore-working-copy bookmark list --all-remotes \
         -T 'name ++ "@" ++ remote ++ "\n"' )
   fi
 }
@@ -586,18 +633,27 @@ bookmark_records() {
 # The branch this clone calls origin's HEAD, short -- origin/main -- which is
 # the default branch the cycle opens on. --origin-head is the same answer given
 # outright, which is how a test or a dry run says it without a repository to ask;
-# empty output or a failed lookup means this clone names no such branch, which is
-# a fall-through rather than an error, because the fixed names answer for it.
+# an empty answer means this clone names no such branch, which is a fall-through
+# rather than an error, because the fixed names answer for it.
+#
+# And an empty answer is the only one this flow has: jj records no remote-HEAD
+# symref, and the whole cycle reads no git at all -- not even where a `.git`
+# happens to sit beside the base. The state this flow is built for is a wrapper
+# with `jj git init --no-colocate`, where there is no `.git` anywhere, and
+# reading a symref out of git only where one is lying around would make the
+# opening revision depend on a layer the owner is deleting. So the function
+# answers what it was told and nothing else, and the fixed-name fall-through --
+# main, then master, then @ -- is the DESIGN rather than a compromise: whether
+# a clone calls its default branch main or master is a convention, jj keeps no
+# answer of its own, and putting a git layer back to learn one is not a trade
+# this flow is willing to make.
 origin_head_ref() {
-  local main=$1 fixture=$2
-  if [ -n "$fixture" ]; then
-    printf '%s\n' "$fixture"
-    return 0
-  fi
-  # git exits non-zero where the symref is not there, and that status is an
-  # empty answer here: a clone of nothing in particular is not a broken clone.
-  ( cd "$main" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null ) ||
-    true
+  # $1 is the base directory, and it is deliberately NOT read: the signature is
+  # kept because the callers and the fixtures are written to it, and because a
+  # future reader should find the question still named. $2 is --origin-head.
+  local fixture=${2:-}
+  [ -n "$fixture" ] || return 0
+  printf '%s\n' "$fixture"
 }
 
 # The base cycle for --main: one jj revision per line, the answer the screen
@@ -619,9 +675,10 @@ base_chain() {
     die "$label: could not read the bookmarks of ${bookmarks:-$main}"
   fi
 
-  # A saved bookmark list stands in for the repository as a whole, so the symref
-  # lookup is skipped rather than failed against a directory that need not
-  # exist: --origin-head is then the only way to say what this clone tracks.
+  # A saved bookmark list stands in for the repository as a whole, so the
+  # --origin-head lookup is skipped rather than failed against a directory that
+  # need not exist: --origin-head is then the only way to say what this clone
+  # tracks, and with neither it is simply empty and the fixed names speak.
   if [ -n "$origin_head" ]; then
     head=$(origin_head_ref "$main" "$origin_head")
   elif [ -z "$bookmarks" ]; then
@@ -658,9 +715,11 @@ base_chain() {
     END {
       # The answer the screen opens on. --no-base is the answer "no revision at
       # all" and --base names it outright, so neither asks the bookmarks for one;
-      # otherwise origin/HEAD -- the branch this clone says it is a clone of -- is
-      # asked before any fixed name -- and it is asked as that branch on origin,
-      # which is what the remote has rather than what this machine has.
+      # otherwise the branch this clone was told it comes from -- --origin-head,
+      # and empty when nobody said -- is asked before any fixed name, and it is
+      # asked as that branch on origin, which is what the remote has rather than
+      # what this machine has. Nothing here asks git, so with no answer given the
+      # fixed names below are the whole opening rule.
       if (no_base == "1") {
         open = ""
       } else if (base != "") {
@@ -670,9 +729,14 @@ base_chain() {
         open = base
       } else if (head != "") {
         # origin/develop is develop@origin, and the suffix is the first cut: git
-        # puts the remote first in a remote-tracking ref, jj puts it last.
+        # puts the remote first in a remote-tracking ref, jj puts it last. An
+        # answer already written the jj way -- main@origin -- is the same branch
+        # said in the same vocabulary, so its own remote comes off before
+        # origin is appended: the two spellings are one answer, never one
+        # answer with two suffixes.
         open = head
         sub(/^origin\//, "", open)
+        sub(/@[^@]*$/, "", open)
         open = open "@origin"
       } else if ("main@origin" in known) {
         open = "main@origin"
@@ -708,8 +772,9 @@ base_chain() {
 #
 # The revisions the branch question cycles through, the one it opens on first,
 # one per line. --base-bookmarks reads a saved `jj bookmark list` rendering
-# instead of asking jj, and --origin-head says what origin/HEAD names instead of
-# asking git; between them a test or a dry run needs no repository at all.
+# instead of asking jj, and --origin-head says what origin/HEAD names outright
+# instead of leaving it to the fixed names; between them a test or a dry run
+# needs no repository at all. Nothing here asks git.
 cmd_bases() {
   local main='' bookmarks='' origin_head='' base='' no_base=''
 
@@ -1021,8 +1086,8 @@ composer_cycle_base() {
 #
 # Trimming is not cosmetic. A pasted name usually arrives with whitespace around
 # it, whitespace is part of no branch name, and a trimmed space-then-Enter is
-# Enter -- accepting the name already in the field rather than failing
-# `git check-ref-format` on one that looks perfectly valid on screen.
+# Enter -- accepting the name already in the field rather than refusing one
+# that looks perfectly valid on screen.
 ask_branch() {
   local prefill=$1 project=${2:-} answer=''
   if on_screen; then
@@ -1397,22 +1462,57 @@ cmd_fzf_answer() {
   fzf_answer "$1"
 }
 
-# Whether worktrunk could create a branch with this name.
-# `git check-ref-format --branch` is the test, with one twist: it *expands* a
-# name like @{-1} and prints what that resolved to, so only an answer equal to
-# the input means the input itself is a branch name. Without the comparison the
-# literal @{-1} would pass the check and be created as a branch so named.
+# Whether the flow could create a branch (a jj bookmark) with this name.
 #
-# `@` is refused before git is asked. Git is willing to accept it, but this flow
-# speaks jj's revision language -- the base it hands gws is a jj revision -- and
-# in that language `@` is the working copy. A bookmark called `@` would be read
-# as an answer to a different question everywhere a revision is read, so it is
-# not a name to make, however willing git is.
+# The rule is git's, re-expressed here in the shell: `git check-ref-format
+# --branch` used to answer it, and a wrapper made with `jj git init --no-colocate`
+# has no git to ask -- while a name that worked yesterday must not stop working
+# today, so nothing git accepted is refused here. What git refused, and what this
+# refuses with it: nothing at all (the empty name), anything starting with `-`, a
+# `~`, `^`, `:`, `?`, `*`, `[`, `\`, a control character, whitespace, a `@{`, a
+# `..`, a `//`, or a trailing `/` or `.`. Everything else is a name -- letters,
+# digits, `.`, `_`, `-` and `/` in the places git allows them, and a backtick,
+# which git never had a quarrel with.
+#
+# `@` is refused *in addition*, and that is this flow's reading rather than
+# git's: git accepts `@`. It is git's working-copy shorthand and it is jj's too,
+# and every revision this picker hands to a workspace is spoken in jj's language,
+# where `@` is the working copy. A bookmark called `@` would be read as an answer
+# to a different question everywhere a revision is read, so it is not a name to
+# make, however willing git is.
+#
+# `@{` needs a word of its own for the same kind of reason. git refuses it, and
+# the reason it must be refused by this rule rather than by a comparison with
+# git's answer is that git *expands* such a name -- `@{-1}` came back as some
+# earlier branch, and the old check, which only compared git's answer with the
+# input, was what kept that literal from being created. There is no answer to
+# compare against any more, so the reflog form is refused outright.
+#
+# git also refused a few names this rule lets through -- a leading `/` or `.` on
+# a path component, the reserved `HEAD`, a `.lock` suffix. None of them is a name
+# a bead derives or a hand here types, and being wider than git costs nothing:
+# jj is what creates the bookmark, and it is asked next.
 valid_branch_name() {
-  local resolved
-  [ "$1" != '@' ] || return 1
-  resolved=$(git check-ref-format --branch "$1" 2>/dev/null) || return 1
-  [ "$resolved" = "$1" ]
+  local name=$1
+  # Belt and braces: `pick` refuses an empty branch before this is reached, and a
+  # name rule that would pass "" as a bookmark name is wrong on its own terms.
+  [ -n "$name" ] || return 1
+  [ "$name" != '@' ] || return 1
+  case $name in
+    -*) return 1 ;;
+  esac
+  case $name in
+    # Whitespace and control characters. The whitespace is spelled out rather than
+    # written as [[:space:]], because under a UTF-8 locale that class also holds
+    # U+00A0 and its neighbours, which git accepts: the class is the locale's, and
+    # this rule may not come out narrower than git because of it.
+    *[$' \t\n\r\v\f']* | *[[:cntrl:]]*) return 1 ;;
+    *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *'\'*) return 1 ;;
+    *'@{'*) return 1 ;;
+    *..* | *//*) return 1 ;;
+    */ | *.) return 1 ;;
+  esac
+  return 0
 }
 
 # The branch name READY's bead ID derives, or nothing: a bead the list did not
@@ -1450,7 +1550,7 @@ cmd_pick() {
   local prompt='' agent='' agent_choices=''
   local bead_set=0 prompt_set=0 agent_set=0 branch_set=0 dry_run=0 no_base=0
   local blank_set=0
-  local bd_json='' wt_json='' refs='' bookmarks='' origin_head=''
+  local bd_json='' workspaces='' bookmarks='' base_bookmarks='' origin_head=''
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -1521,19 +1621,22 @@ cmd_pick() {
         bd_json=$2
         shift 2
         ;;
-      --wt-json)
-        [ $# -ge 2 ] || usage_error 'pick: --wt-json needs a file'
-        wt_json=$2
+      --workspaces)
+        [ $# -ge 2 ] || usage_error 'pick: --workspaces needs a file'
+        workspaces=$2
         shift 2
         ;;
-      --refs)
-        [ $# -ge 2 ] || usage_error 'pick: --refs needs a file'
-        refs=$2
+      # The picker's branch list, one local bookmark name per line. Not
+      # --base-bookmarks: that is the base cycle's saved `jj bookmark list
+      # --all-remotes`, a different rendering of a different question.
+      --bookmarks)
+        [ $# -ge 2 ] || usage_error 'pick: --bookmarks needs a file'
+        bookmarks=$2
         shift 2
         ;;
       --base-bookmarks)
         [ $# -ge 2 ] || usage_error 'pick: --base-bookmarks needs a file'
-        bookmarks=$2
+        base_bookmarks=$2
         shift 2
         ;;
       --origin-head)
@@ -1575,31 +1678,33 @@ cmd_pick() {
 
   # The hand-back's paths are read by the Rex server, whose working directory is
   # not this one, so they have to say where they are. The Lua side derives both
-  # from git and they are always absolute; this is the guard for a hand-run.
+  # from the wrapper walk and they are always absolute; this is the guard for a
+  # hand-run.
   need_absolute 'pick: --main' "$main"
   need_absolute 'pick: --root' "$root"
 
-  # --main is where bd, wt and git are read, so a directory that is not there is
+  # --main is where bd and jj are read, so a directory that is not there is
   # refused here, by name: left to the pipelines below it reaches `cd` inside a
   # subshell, whose failure reads as a line number in this script rather than as a
   # place that does not exist. Only when one of those lookups will really be made:
   # a run given all four fixtures never touches --main.
-  if [ -z "$bd_json" ] || [ -z "$wt_json" ] || [ -z "$refs" ] ||
-    { [ -z "$bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
+  if [ -z "$bd_json" ] || [ -z "$workspaces" ] || [ -z "$bookmarks" ] ||
+    { [ -z "$base_bookmarks" ] && [ "$no_base" -eq 0 ]; }; then
     [ -d "$main" ] || die "pick: no such directory: $main"
-    # Being there is not enough: the new workspace is made by gws, so what this
-    # needs is the shape gws can build in -- the wrapper ginit makes, with .jj/repo
-    # as a *directory* beside the main worktree (main's own .jj/repo is a file
-    # there, and that file is how gws tells the two apart). A clone ginit'd where
+    # Being there is not enough: the new workspace is made by jws, so what this
+    # needs is the shape jws can build in -- the wrapper `jinit` makes, with
+    # .jj/repo as a *directory* beside the main worktree (main's own .jj/repo is a
+    # file there, and that file is how jws tells the two apart). A repo cut where
     # it stands is deliberately not accepted even though a loose ancestor walk
-    # would find its repo: gws runs its add from <wrapper>/main to inherit that
+    # would find its repo: jws runs its add from <wrapper>/main to inherit that
     # workspace's sparse patterns, so it refuses a wrapper with no main -- after
     # the bead is claimed, which is the outcome this check exists to prevent. A
-    # repo that was never ginit'd has no fallback here either, by design: a plain
-    # git worktree would quietly recreate the problem jj is there to solve, so
-    # this refuses and names the thing to run.
+    # repo outside the wrapper shape has no fallback here either, by design: a
+    # plain git worktree would quietly recreate the problem jj is there to solve,
+    # so this refuses and names the tools that make one -- `jinit` for an empty
+    # remote, `jclone` for one that already has history.
     [ -d "$(dirname "$main")/.jj/repo" ] ||
-      die "pick: $(dirname "$main") is not ginit'd — gws needs a wrapper with .jj/repo as a directory beside the main worktree; run ginit first"
+      die "pick: $(dirname "$main") is not a wrapper — jws needs a wrapper with .jj/repo as a directory beside the main worktree; run jinit or jclone to make one"
   fi
 
   # The screen's own requirements, before any work, and only where the screen
@@ -1615,28 +1720,34 @@ cmd_pick() {
     need fzf
     need gum
   fi
-  [ -n "$wt_json" ] || need wt
+  # djo is the workspace tool the tab's shim runs -- a new workspace's post-start
+  # hooks are dojjo's -- so it is named only where a tab will really be made: a
+  # --dry-run creates no workspace and hands its answers back, and a run holding
+  # the saved workspace listing is the same kind of scripted run. What the check
+  # buys is a machine that cannot finish a workspace refused before the screen
+  # opens rather than after the bead is claimed -- except a pick that turns out to
+  # be a switch, which runs jj alone and calls no djo; refusing before the screen
+  # is worth more than that accuracy.
+  [ "$dry_run" -eq 1 ] || [ -n "$workspaces" ] || need djo
   need jq
   [ -n "$bd_json" ] || need bd
-  # check-ref-format keeps an uncreatable name out of the new tab and
-  # for-each-ref is the branch list, so git is not optional either: without it
-  # every name would come back "not a valid branch name".
-  need git
-  # jj is only what reads the base cycle, so it is needed only where that cycle
-  # is really read: --base-bookmarks stands in for the bookmark list, and
-  # --no-base answers the base without asking it -- except on the screen, which
-  # resolves the whole cycle anyway so ctrl-r can cycle back to a revision from
-  # it. Every other lookup a pick makes is git's or a fixture's.
-  [ -n "$bookmarks" ] || { [ "$no_base" -eq 1 ] && ! on_screen; } || need jj
-  # gws is the one thing that knows how to make a jj colocated workspace, and it
-  # is a fish function rather than a program. Nothing on a --dry-run creates a
-  # workspace, so the check belongs where a tab will really be made -- and the
-  # pair comes last of the tools, so a run missing several names the first one it
-  # needed. A branch that turns out to have a worktree already is switched rather
-  # than created and calls gws not at all, so this can refuse a run that would
-  # have been fine: refusing before the screen is worth more than that accuracy,
-  # because the other order is a bead in progress and a pane with nothing in it.
-  [ "$dry_run" -eq 1 ] || need_fish_function gws
+  # jj is what reads the workspaces, the bookmarks and the base cycle, and each
+  # of the three has a fixture that stands in for it -- so a run needs jj unless
+  # all three are answered without it. This check is the cycle's alone, and it is
+  # the strictest of the three: --base-bookmarks stands in for that bookmark
+  # list, and --no-base answers the base without asking it -- except on the
+  # screen, which resolves the whole cycle anyway so ctrl-r can cycle back to a
+  # revision from it. A run holding both branch fixtures is therefore still asked
+  # for jj, which is only ever a check spent on a machine that has it.
+  [ -n "$base_bookmarks" ] || { [ "$no_base" -eq 1 ] && ! on_screen; } || need jj
+  # jws is the one thing that knows how to make a jj workspace, and it is a fish
+  # function rather than a program. Nothing on a --dry-run creates a workspace,
+  # so the check belongs where a tab will really be made -- and it comes last of
+  # the tools, so a run missing several names the first one it needed. Every tab
+  # calls jws, whichever of switch, attach and create it is, so this never refuses
+  # a run that would have been fine: the refusal is only ever a pane that could
+  # not have been made.
+  [ "$dry_run" -eq 1 ] || need_fish_function jws
 
   local ready rows
   if ! ready=$(ready_json "$main" "$bd_json"); then
@@ -1696,8 +1807,8 @@ cmd_pick() {
     fi
     # The base cycle, resolved once for the whole run: one bookmark list here,
     # and ctrl-r only ever moves the index into it.
-    base_chain "$main" "$bookmarks" "$origin_head" "$base" "$no_base" 'pick' \
-      >"$composer_state/bases"
+    base_chain "$main" "$base_bookmarks" "$origin_head" "$base" "$no_base" \
+      'pick' >"$composer_state/bases"
     state_put "$composer_state" base_index 1
     {
       printf '%s\n' "$prompt_row"
@@ -1723,7 +1834,7 @@ cmd_pick() {
     else
       local reply='' asked=0 answer=''
       reply=$(composer_screen "$composer_state" "$main" "$project" "$base" \
-        "$bookmarks" "$no_base" "$agent_choices" "$origin_head") || asked=$?
+        "$base_bookmarks" "$no_base" "$agent_choices" "$origin_head") || asked=$?
       if ! answer=$(printf '%s\n' "$reply" | fzf_answer "$asked"); then
         exit 1
       fi
@@ -1873,24 +1984,28 @@ cmd_pick() {
     exit "$cancelled"
   fi
 
-  # What the name means, decided here and once: switch to the worktree that
-  # already has it, make a worktree for a branch only git knows (an attach), or
+  # What the name means, decided here and once: switch to the workspace that
+  # already has it, make a workspace for a bookmark with none (an attach), or
   # create the branch. The two lists branch_mode reads are the ones candidates
-  # prints, and a picked name is read exactly as a dry run reads it: the mode is
-  # decided from those two lists alone, with no second look at the repository,
-  # and no worktrunk shortcut: ^, -, @, pr:N and mr:N named things worktrunk
-  # resolved for us, and nothing here asks it to any more. A name it would have
-  # resolved is just a name now, and an impossible one is refused on the line
-  # below.
+  # prints -- the workspaces jj lists, then the local bookmarks -- and a picked
+  # name is read exactly as a dry run reads it: the mode is decided from those
+  # two lists alone, with no second look at the repository. A workspace's name is
+  # the branch it is on, so the two lists are comparable by exact match, and a
+  # name that matches neither is a name to create -- there is no shortcut
+  # vocabulary left to resolve one for us.
   local mode
-  if ! mode=$(branch_mode "$branch" "$main" "$wt_json" "$refs"); then
-    die "pick: could not list the branches of $main"
+  if ! mode=$(branch_mode "$branch" "$main" "$workspaces" "$bookmarks"); then
+    # The read that failed has said which source it could not read and named it
+    # -- the fixture when one was given, the directory when jj was asked -- so
+    # this stops on that line rather than saying the same thing twice, less
+    # precisely, about a directory that may not have been the one at fault.
+    exit 1
   fi
 
-  # A name to create has to be one worktrunk can actually create: better to say
+  # A name to create has to be one the flow can actually create: better to say
   # so here, where the float is still on screen, than in the new tab's output.
   # Only a create is checked -- a switch and an attach name a ref that exists,
-  # and `git check-ref-format` has nothing to say about a branch that is already
+  # and valid_branch_name has nothing to say about a branch that is already
   # there.
   if [ "$mode" = create ] && ! valid_branch_name "$branch"; then
     printf '%s: not a valid branch name: %s\n' "$PROG" "$branch" >&2
@@ -1918,8 +2033,8 @@ cmd_pick() {
     elif [ "$no_base" -eq 1 ]; then
       base_default=1
     else
-      base_ref=$(base_chain "$main" "$bookmarks" "$origin_head" "$base" '' 'pick' |
-        sed -n 1p)
+      base_ref=$(base_chain "$main" "$base_bookmarks" "$origin_head" "$base" \
+        '' 'pick' | sed -n 1p)
     fi
   fi
 
@@ -2150,7 +2265,14 @@ done_main_move() {
   # blocker -- the person is told main was not refreshed, and the audit still
   # prints every other reason it found. jj's message itself stays on stderr.
   if [ "$contained" = yes ]; then
-    if ( cd "$main" && jj bookmark set main -r "$base" ); then
+    # The directory is entered before jj is asked anything, and on --no-fetch
+    # nothing has entered it yet -- so an entry that fails here is the one
+    # failure this step can meet that is not jj's own. Left to the write it
+    # would be reported as jj refusing the bookmark, with a remedy that cannot
+    # work, so it is said as itself.
+    if ! ( cd "$main" ) 2>/dev/null; then
+      done_blocker "  main was not moved: $main could not be entered; the bookmark and the working copy are as they were"
+    elif ( cd "$main" && jj bookmark set main -r "$base" ); then
       moved=yes
     else
       done_blocker "  main was not moved: jj refused to move its bookmark; run jj bookmark set main -r $base in $main"
@@ -2176,69 +2298,37 @@ done_main_move() {
   fi
 }
 
-# The worktrunk worktree list as JSON: --wt-json when one is given, else
-# `wt list` asked from the main worktree, which is the worktree every wt call
-# uses. Reads `main` and `wt_json` from cmd_done, its only caller.
-done_wt_list() {
-  if [ -n "$wt_json" ]; then
-    cat "$wt_json" ||
-      die "done: could not read the worktree list from $wt_json"
-  else
-    ( cd "$main" && wt list --format=json ) ||
-      die "done: could not read the worktrees of $main"
-  fi
-}
-
-# The worktrunk worktree path that is exactly $1, or nothing.
-done_wt_path() {
-  done_wt_list |
-    jq -r --arg path "$1" '
-      (.items // [])
-      | map(.worktree.path // "")
-      | map(select(. == $path))
-      | .[0] // ""
-    '
-}
-
-# The worktrunk worktree that owns $1, or nothing: the longest listed path
-# that is $1 or a directory of it, compared as whole path segments as jj's
-# roots are.
-done_wt_owner() {
-  done_wt_list |
-    jq -r --arg want "$1" '
-      (.items // [])
-      | map(.worktree.path // "")
-      | map(select(. as $path | $want == $path or ($want | startswith($path + "/"))))
-      | sort_by(length)
-      | .[-1] // ""
-    '
-}
-
 # The workspace the pane is in, left in the caller's `name` and `root_path`, or
 # a refusal. Reads `cwd`, `main`, `root` and `workspaces` from cmd_done, its
-# only caller -- and `wt_json` through done_wt_path -- and answers in those two
-# variables rather than on stdout, because a refusal printed inside a command
-# substitution would be caught by the capture instead of reaching the screen.
+# only caller, and answers in those two variables rather than on stdout,
+# because a refusal printed inside a command substitution would be caught by
+# the capture instead of reaching the screen.
 #
 # Roots nest -- jj's default workspace is the wrapper itself, main is a
 # directory inside it, and a branch's workspace is another -- so the longest
 # listed root that owns cwd is the answer, compared as whole path segments so
 # that /p/demo/feat-6c41 is not read as /p/demo/feat-6c4.
+#
+# jj is the only list there is: the workspaces this flow removes are the ones
+# jws made and djo remove forgets, and both are jj's own record. There is no
+# second opinion to reconcile a row with, so a row is the answer and the only
+# refusal left is the directory no row owns.
 done_workspace() {
   local listed jj_main='' row_name row_path
-  local best_name='' best_root='' wt_path='' wt_owner=''
+  local best_name='' best_root=''
 
-  # jj's own answer to "which worktree is main" is read before anything is
-  # refused, because the protection below is built from it: worktrunk's `main`
-  # flag is not trusted. In a bare-rooted wrapper, where gws adds every
-  # workspace detached, worktrunk has been seen to flag a leftover and not the
-  # real main worktree -- and its flag is what arrives here as --main. jj names
-  # the row, so jj is asked, and its answer is the one that protects.
+  # jj's own answer to "which workspace is main" is read before anything is
+  # refused, because the protection below is built from it. --main is the
+  # caller's answer -- Rex's reading of which project this pane belongs to --
+  # and a run cannot tell which of the two answers it would be acting in, so
+  # the two disagreeing is refused rather than resolved. A repo with no `main`
+  # row -- a main workspace under another name -- has one answer only, and
+  # --main is it.
   if [ -n "$workspaces" ]; then
     listed=$(cat "$workspaces") ||
       die "done: could not read the workspace list from $workspaces"
   else
-    listed=$( cd "$cwd" && jj workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
+    listed=$( cd "$cwd" && jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"' ) ||
       die "done: could not read the jj workspaces of $cwd"
   fi
 
@@ -2257,8 +2347,7 @@ done_workspace() {
   # Two answers that disagree about which worktree is main are refused rather
   # than resolved, before the fetch and before anything is moved or removed:
   # a run cannot tell which of the two it would be acting in, so no version of
-  # going ahead is safe. A repo with no `main` row -- a main workspace under
-  # another name -- has one answer only, and --main is it.
+  # going ahead is safe.
   if [ -n "$jj_main" ] && [ "$jj_main" != "$main" ]; then
     done_refuse "can't tear down $cwd" \
       "  jj says the main workspace is $jj_main, --main says $main: the two answers disagree about which worktree is main, so nothing was done"
@@ -2281,8 +2370,8 @@ done_workspace() {
     # The wrapper is jj's default workspace -- the directory main and the
     # branch workspaces sit in -- and it is refused above by name. Left in the
     # scan it would claim every directory under the wrapper that no other
-    # workspace owns, and read one of those as "a jj row with no worktree" when
-    # it is not a workspace at all.
+    # workspace owns, and read one of those as a workspace the flow could
+    # remove when it is not a workspace at all.
     [ "$row_path" != "$root" ] || continue
     case $cwd in
       "$row_path" | "$row_path"/*)
@@ -2295,25 +2384,8 @@ done_workspace() {
   done <<<"$listed"
 
   if [ -z "$best_root" ]; then
-    # A worktree jj has no row for is the other half of the same disagreement:
-    # worktrunk would be asked to remove a path jj does not believe is a
-    # workspace, so it is refused, naming the worktree and jj's silence both.
-    wt_owner=$(done_wt_owner "$cwd") || exit $?
-    if [ -n "$wt_owner" ]; then
-      done_refuse "can't tear down $wt_owner" \
-        "  worktrunk has a worktree at $wt_owner, but jj lists no workspace there"
-    fi
     done_refuse "can't tear down $cwd" \
       "  $cwd is not inside a jj workspace this wrapper knows about"
-  fi
-
-  # The two halves have to agree before anything is removed: a jj row with no
-  # worktree, or a worktree with no row, is the state that is hard to unpick --
-  # and the one a person cannot repair from the float.
-  wt_path=$(done_wt_path "$best_root") || exit $?
-  if [ -z "$wt_path" ]; then
-    done_refuse "can't tear down $best_name" \
-      "  jj lists this workspace at $best_root, but worktrunk has no worktree there"
   fi
 
   name=$best_name
@@ -2335,7 +2407,7 @@ cmd_done() {
   # blockers, the programs still running in the tab, main's fast-forward and the
   # hand-back. They are parsed here so a missing value is refused as a usage
   # error now rather than surfacing as an empty answer later.
-  local workspaces='' wt_json='' diff='' own_status=''
+  local workspaces='' diff='' own_status=''
   local changes='' main_state=''
   local bd_json='' bookmarks='' origin_head='' running=''
   local no_fetch=0 dry_run=0
@@ -2394,11 +2466,6 @@ cmd_done() {
       --workspaces)
         [ $# -ge 2 ] || usage_error 'done: --workspaces needs a file'
         workspaces=$2
-        shift 2
-        ;;
-      --wt-json)
-        [ $# -ge 2 ] || usage_error 'done: --wt-json needs a file'
-        wt_json=$2
         shift 2
         ;;
       --diff)
@@ -2472,17 +2539,19 @@ cmd_done() {
   while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root=${root%/}; done
 
   # Every payload this command reads is JSON, read through jq like the rest of
-  # this file's, and worktrunk is the other tool that answers -- unless a saved
-  # answer stands in for it, which is the seam a test or a dry run uses.
+  # this file's. jj is the tool that answers for the workspace listing, unless
+  # --workspaces stands in for it, which is the seam a test or a dry run uses.
   need jq
-  [ -n "$wt_json" ] || need wt
 
-  # jj is read from --cwd and worktrunk from --main, unless a saved answer
-  # stands in for one of them, so a directory that is not there is refused here
-  # by name: left to the `cd` in the subshell that reads it, the failure reads
-  # as a line number in this script rather than as a place that does not exist.
+  # jj is read from --cwd, unless a saved listing stands in for it, so a
+  # directory that is not there is refused here by name: left to the `cd` in
+  # the subshell that reads it, the failure reads as a line number in this
+  # script rather than as a place that does not exist. --main needs no guard of
+  # its own any more: the fetch is the first thing that enters it, and names a
+  # place it cannot enter itself -- and on --no-fetch the reads below are the
+  # first entry instead, which report a directory they cannot enter as a failed
+  # read of it.
   [ -n "$workspaces" ] || [ -d "$cwd" ] || die "done: no such directory: $cwd"
-  [ -n "$wt_json" ] || [ -d "$main" ] || die "done: no such directory: $main"
   done_workspace
 
   # The fetch comes before every comparison, because each one below is about what
@@ -2549,7 +2618,7 @@ cmd_done() {
   fi
 
   # A program still running in the tab is the next question: it is the one
-  # blocker the person can clear without touching jj or worktrunk, so it
+  # blocker the person can clear without touching jj or djo, so it
   # belongs on the same screen rather than on one of its own. The names are
   # already one comma-separated list, in the order the tab listed them.
   [ -z "$running" ] || done_blocker "  still running in this tab: $running"
@@ -2568,12 +2637,12 @@ cmd_done() {
     done_stop
   fi
 
-  # Nothing is in the way, so the removal goes back to Rex: worktrunk's steps,
-  # the hook and the two verifications are the tab's work, and what this script
-  # has left to say is which workspace it means. The five keys are the whole
-  # contract -- `workspace` is the name the tab carries and `path` the worktree
-  # worktrunk removes -- and jq builds them so a path with a quote or a space in
-  # it cannot break the hand-back.
+  # Nothing is in the way, so the removal goes back to Rex: dojjo's remove, the
+  # hook and the two verifications are the tab's work, and what this script has
+  # left to say is which workspace it means. The five keys are the whole
+  # contract -- `workspace` is the name the tab carries and `path` the directory
+  # the removal takes away -- and jq builds them so a path with a quote or a
+  # space in it cannot break the hand-back.
   local payload
   payload=$(jq -cn \
     --arg project "$project" --arg root "$root" --arg main "$main" \

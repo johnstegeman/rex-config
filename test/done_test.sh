@@ -39,16 +39,18 @@ printf 'contained yes\nat-empty yes\n' >"$tmp/clean-main"
 
 # The two moves run in --main, so a case that reaches them needs a directory
 # that is there: /p/demo/main is an answer, not a place. Cases that only
-# assert on the main worktree's path keep the /p/demo answer.
-mkdir -p "$tmp/real-main"
+# assert on the main worktree's path keep the /p/demo answer. real-ws is the
+# same trick for --cwd, for the one case that reads a listing from jj rather
+# than from a saved file.
+mkdir -p "$tmp/real-main" "$tmp/real-ws"
 
 # A PATH holding bash -- the script's own `#!/usr/bin/env bash` needs it -- with
-# jq and cat beside it, and no worktrunk. One case runs there, so "wt is missing"
-# is proven rather than left to the developer's machine.
-mkdir -p "$tmp/no-wt-bin"
-ln -sf "$(command -v bash)" "$tmp/no-wt-bin/bash"
-ln -sf "$(command -v jq)" "$tmp/no-wt-bin/jq"
-ln -sf "$(command -v cat)" "$tmp/no-wt-bin/cat"
+# jq and cat beside it, and no jj. One case runs there, so "jj is missing" is
+# proven rather than left to the developer's machine.
+mkdir -p "$tmp/no-jj-bin"
+ln -sf "$(command -v bash)" "$tmp/no-jj-bin/bash"
+ln -sf "$(command -v jq)" "$tmp/no-jj-bin/jq"
+ln -sf "$(command -v cat)" "$tmp/no-jj-bin/cat"
 
 # jj's workspace list with its `main` row where --main says. Every case below is
 # about the audit rather than about the two answers disagreeing about which
@@ -84,7 +86,6 @@ run_done() {
     --main "${DONE_MAIN_DIR:-/p/demo/main}" --root /p/demo --project demo \
     --session s1 --window w1 \
     --workspaces "${DONE_WS:-$(agreed_workspaces "${DONE_MAIN_DIR:-/p/demo/main}")}" \
-    --wt-json "${DONE_WT:-test/fixtures/done-wt-list.json}" \
     --diff "${DONE_DIFF:-$tmp/clean-diff}" \
     --own-status "${DONE_OWN:-$tmp/clean-own}" \
     --changes "${DONE_CHANGES:-$tmp/clean-changes}" \
@@ -167,7 +168,8 @@ want_out_has "the string-prefix sibling is refused as outside" "not inside a jj 
 
 # A trailing slash on --root is the same wrapper, and has to answer the same
 # way: roots are compared as strings, so without normalising it the wrapper row
-# would not be recognised and this would be a worktrunk disagreement instead.
+# would not be recognised, and a directory under the wrapper would then be read
+# as one no workspace owns.
 DONE_CWD=/p/demo/nope run_done --root /p/demo/
 want_status "a trailing slash on --root is the same wrapper" 4
 want_out "the no-workspace block with --root /p/demo/" "can't tear down /p/demo/nope
@@ -197,22 +199,24 @@ want_out "the main worktree block with --main /p/demo/main/" "can't tear down th
 
 nothing was removed; press any key"
 
-# --- Which worktree is main: jj's answer, not the one worktrunk flags ---
+# --- Which worktree is main: jj's row, and the caller's --main ---
 #
-# pi-rex is bare-rooted and every worktree in it is detached at the same
-# commit, and there worktrunk's listing flags the wrong one: it calls the
-# leftover feat/b9y main and the real main worktree not main. jj's own
-# workspace list is right, and it is what the protection is built from. The
-# two answers disagreeing is refused rather than resolved, before the fetch and
-# before anything is moved or removed: a repo whose two answers disagree about
-# which worktree is main is exactly the one this flow must not act in.
+# --main is what Rex resolved this pane's project to be, and jj's workspace
+# list has its own row named `main`. Those two answers used to disagree in the
+# field: pi-rex is bare-rooted and every worktree in it is detached at the same
+# commit, and the tool the flow used before jj called the leftover feat/b9y
+# main and the real main worktree not main. jj's own listing is right, and it is
+# what the protection is built from. The two answers disagreeing is refused
+# rather than resolved, before the fetch and before anything is moved or
+# removed: a repo whose two answers disagree about which worktree is main is
+# exactly the one this flow must not act in.
 #
-# The side that used to refuse with the wrong reason -- feat/b9y is the
-# workspace the flow exists to remove, and it is also what worktrunk calls
-# main, so --main is the directory the key was pressed in. DONE_FETCH=1 leaves
-# --no-fetch off so the ordering is real rather than given: the refusal screen
-# below is what proves it, and the empty jj argv corroborates it (--main here is
-# not a directory, so a fetch moved ahead would fail in its own cd).
+# The case that first exposed it -- feat/b9y is the workspace the flow exists to
+# remove, and it is also what --main named, because that is the directory the
+# key was pressed in. DONE_FETCH=1 leaves --no-fetch off so the ordering is real
+# rather than given: the refusal screen below is what proves it, and the empty
+# jj argv corroborates it (--main here is not a directory, so a fetch moved
+# ahead would fail in its own cd).
 DONE_WS=test/fixtures/workspaces-main-elsewhere.txt DONE_FETCH=1 \
   DONE_CWD=/p/pi-rex/feat-b9y DONE_MAIN_DIR=/p/pi-rex/feat-b9y \
   run_done --root /p/pi-rex
@@ -258,34 +262,26 @@ DONE_WS=test/fixtures/workspaces-no-main.txt DONE_MAIN_DIR=$tmp/real-main run_do
 want_status "no jj main row falls back to --main and carries on" 0
 want_out "a run with no jj main row prints nothing" ""
 
-# The other half of the disagreement: worktrunk has a worktree jj lists no
-# workspace for, and the block names both halves.
-DONE_WT=test/fixtures/done-wt-list-orphan.json DONE_CWD=/p/demo/orphan run_done
-want_status "a worktree jj does not list is refused" 4
-want_out "the reverse disagreement block" "can't tear down /p/demo/orphan
+# A repo whose jj listing has no `main` row -- a main workspace under another
+# name -- still protects --main: jj's silence is not a second answer, and the
+# one directory this flow must never remove is the one --main names.
+DONE_WS=test/fixtures/workspaces-no-main.txt DONE_MAIN_DIR=$tmp/real-main \
+  DONE_CWD=$tmp/real-main run_done
+want_status "no jj main row still protects --main" 4
+want_out "the no-main-row block" "can't tear down the main worktree
 
-  worktrunk has a worktree at /p/demo/orphan, but jj lists no workspace there
-
-nothing was removed; press any key"
-
-# jj lists the row, worktrunk does not.
-DONE_WT=test/fixtures/done-wt-list-no-feat.json run_done
-want_status "jj and worktrunk disagreeing is refused" 4
-want_out "the disagreement block" "can't tear down feat/6c4
-
-  jj lists this workspace at /p/demo/feat-6c4, but worktrunk has no worktree there
+  $tmp/real-main is the main worktree, not a workspace this flow removes
 
 nothing was removed; press any key"
 
 # A subdirectory that is a workspace of its own answers to the longer root: the
 # longest listed root that owns the cwd wins, not the first one that matches.
-DONE_CWD=/p/demo/feat-6c4/sub run_done
-want_status "the longest matching root is the workspace" 4
-want_out "the nested-workspace block names the nested workspace" "can't tear down feat/6c4-sub
-
-  jj lists this workspace at /p/demo/feat-6c4/sub, but worktrunk has no worktree there
-
-nothing was removed; press any key"
+# jj is the only list, so there is nothing to reconcile the row with -- the row
+# is the answer, and the hand-back carries the nested workspace's name.
+DONE_MAIN_DIR=$tmp/real-main DONE_CWD=/p/demo/feat-6c4/sub run_done --dry-run
+want_status "the longest matching root is the workspace" 0
+want_out "the nested workspace is the one handed back" \
+  "rex do work_done_go --args '{\"project\":\"demo\",\"root\":\"/p/demo\",\"main\":\"$tmp/real-main\",\"workspace\":\"feat/6c4-sub\",\"path\":\"/p/demo/feat-6c4/sub\"}'"
 
 # A relative path cannot mean what it says: Rex resolves it against its own cwd.
 DONE_CWD=feat-6c4 run_done
@@ -305,22 +301,37 @@ ran=$((ran + 1))
 grep -q 'cd:' "$tmp/err" &&
   fail "a cwd that is not there is not bash's cd error" "stderr: $(cat "$tmp/err")"
 
+# A saved workspace listing that cannot be read is the caller's mistake, and it
+# is named as the file it is: left to `cat`, the failure would read as a line of
+# this script rather than as a file that is not there.
+run_done --workspaces "$tmp/no-such-listing.txt"
+want_status "an unreadable workspace listing dies" 1
+want_err_has "an unreadable workspace listing names the file" \
+  "done: could not read the workspace list from $tmp/no-such-listing.txt"
+
 # An option this command does not have is a script that cannot mean what it
 # says, not something to ignore.
 run_done --nonsense x
 want_status "an unknown option is a usage error" 2
 
-# With no saved worktree list worktrunk is asked, and a machine without it says
-# so by name -- not by bash's "command not found", which would read as the
-# repository's worktrees being unreadable. --main is a real directory here, so
-# the run reaches the worktrunk question rather than stopping earlier.
-mkdir -p "$tmp/real-main"
-DONE_PATH=$tmp/no-wt-bin run_done --wt-json '' --main "$tmp/real-main"
-want_status "a missing wt is a missing tool" 1
-want_err_has "a missing wt is named" 'wt not found on PATH'
+# --wt-json went with worktrunk: a run that still passes it is a script that
+# cannot mean what it says, refused as the unknown option it now is.
+run_done --wt-json /nonexistent
+want_status "--wt-json is no longer an option" 2
+
+# With no saved workspace listing jj is asked from --cwd, and a machine without
+# it is told so by name. bash's own "jj: command not found" is on stderr too --
+# the subshell that ran it prints it -- so what this case pins is the line a
+# reader is given: the flow's own names the tool and the place, where the
+# shell's reads as the repository's workspaces being unreadable. --cwd is a real
+# directory here, so the run reaches the jj read rather than stopping earlier.
+DONE_PATH=$tmp/no-jj-bin run_done --workspaces '' --cwd "$tmp/real-ws"
+want_status "a missing jj is a missing tool" 1
+want_err_has "a missing jj is named" \
+  "done: could not read the jj workspaces of $tmp/real-ws"
 ran=$((ran + 1))
 grep -q 'cd:' "$tmp/err" &&
-  fail "a missing wt is not bash's cd error" "stderr: $(cat "$tmp/err")"
+  fail "a missing jj is not bash's cd error" "stderr: $(cat "$tmp/err")"
 
 # --- The store blockers: what the branch has, and what the working copy has ---
 
@@ -384,14 +395,12 @@ want_out_has "the base comes from --origin-head, not a fixed name" \
   "changes not merged into develop@origin: 3 changes, 4 paths"
 
 # With no saved diff the comparison is really made, and it is made against
-# <branch>@origin. jj is asked from the workspace root, so the two lists point
-# at a directory that is there -- the /p/demo ones are answers, not places.
-mkdir -p "$tmp/real-ws"
+# <branch>@origin. jj is asked from the workspace root, so the workspace row and
+# --main point at directories that are there -- the /p/demo ones are answers,
+# not places.
 printf 'feat/6c4\t%s\n' "$tmp/real-ws" >"$tmp/ws-real.txt"
-printf '{"items":[{"branch":"main","worktree":{"path":"%s","main":true}},{"branch":"feat/6c4","worktree":{"path":"%s","main":false}}]}' \
-  "$tmp/real-main" "$tmp/real-ws" >"$tmp/wt-real.json"
 run_done --cwd "$tmp/real-ws" --workspaces "$tmp/ws-real.txt" \
-  --wt-json "$tmp/wt-real.json" --main "$tmp/real-main" \
+  --main "$tmp/real-main" \
   --diff '' --own-status ''
 want_status "a run with no saved diff asks jj for it" 0
 ran=$((ran + 1))
@@ -416,7 +425,6 @@ PATH="$tmp/failbin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args 
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
   --project demo --session s1 --window w1 \
   --workspaces "$(agreed_workspaces "$tmp/real-main")" \
-  --wt-json test/fixtures/done-wt-list.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
   --bd-json test/fixtures/ready.json \
@@ -439,15 +447,14 @@ ran=$((ran + 1))
 
 # A --main that cannot be entered fails the fetch's own `cd`, so jj never runs and
 # there is no jj output to put after the colon: the block would end in nothing at
-# all. It names the place instead. --wt-json is the seam that gets a run this far,
-# because without it the worktrunk read needs --main first.
+# all. It names the place instead. --workspaces is the seam that gets a run this
+# far, because the listing is the only thing read before the fetch.
 ran=$((ran + 1))
 rm -f "$tmp/jj-args"
 PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/no-such-main" --root /p/demo \
   --project demo --session s1 --window w1 \
   --workspaces "$(agreed_workspaces "$tmp/no-such-main")" \
-  --wt-json test/fixtures/done-wt-list.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
   --bd-json test/fixtures/ready.json \
@@ -601,7 +608,6 @@ PATH="$tmp/bin:$PATH" REX_ARGS_FILE=$tmp/rex-args JJ_ARGS_FILE=$tmp/jj-args \
   ./new-work.sh done --cwd /p/demo/feat-6c4 --main "$tmp/real-main" --root /p/demo \
   --project demo --session s1 --window w1 \
   --workspaces "$(agreed_workspaces "$tmp/real-main")" \
-  --wt-json test/fixtures/done-wt-list.json \
   --diff "$tmp/clean-diff" --own-status "$tmp/clean-own" \
   --changes "$tmp/clean-changes" --main-state "$tmp/clean-main" \
   --bd-json test/fixtures/ready.json \
@@ -801,8 +807,8 @@ ran=$((ran + 1))
 # nothing else. --main is a directory that is there, because the flow moves it
 # before it hands back and because the close runs in it; /p/demo/main is an
 # answer, not a place, and cd would fail there after the workspace is gone.
-# The payload carries the path for worktrunk and the workspace name for the
-# tab, both as cmd_done resolved them.
+# The payload carries the path the removal step deletes and the workspace name
+# the tab carries, both as cmd_done resolved them.
 want_line="rex do work_done_go --args '{\"project\":\"demo\",\"root\":\"/p/demo\",\"main\":\"$tmp/real-main\",\"workspace\":\"feat/6c4\",\"path\":\"/p/demo/feat-6c4\"}'"
 DONE_MAIN_DIR=$tmp/real-main run_done --dry-run
 want_status "a clean dry run exits 0" 0

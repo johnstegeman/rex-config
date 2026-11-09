@@ -206,21 +206,111 @@ end
 local rex_stub = fresh_rex()
 local M = dofile(here .. "/../init.lua")
 
--- A stub that answers the way a worktrunk project with a beads database does,
--- so each refusal test only has to break the one thing it is about.
+-- The project fixture, on disk ----------------------------------------------
+--
+-- project_for finds the wrapper by walking for `.jj/repo` as a directory, so a
+-- project that is only a string no longer answers: these directories are made
+-- once for the whole file and removed at the end, the way the shell tests use a
+-- mktemp -d and a trap. Only the wrapper, main and the branch workspace need to
+-- exist -- jj's own listing is the fixture text below, because no jj runs here.
+local function mktemp_dir()
+  local pipe = io.popen("mktemp -d 2>/dev/null")
+  if pipe == nil then return nil end
+  local path = pipe:read("l")
+  pipe:close()
+  if path == nil or path == "" then return nil end
+  return (path:gsub("/+$", ""))
+end
+
+-- One shell word, whatever the path holds, so a TMPDIR with a space in it is a
+-- directory rather than two arguments. Quoted here rather than through the
+-- module's own shell_quote, so the fixture does not lean on the code under test.
+local function quote(text) return "'" .. tostring(text):gsub("'", "'\\''") .. "'" end
+
+local function mkdirp(path)
+  os.execute("mkdir -p " .. quote(path))
+end
+
+local function write_file(path, text)
+  local handle = assert(io.open(path, "w"))
+  handle:write(text)
+  handle:close()
+end
+
+-- Whether PATH exists, asked with `test -e` because a `.jj` is a directory and
+-- io.open opens one as happily as a file.
+local function exists(path)
+  local ok, _, code = os.execute("test -e " .. quote(path))
+  if type(ok) == "number" then return ok == 0 end
+  return ok == true
+end
+
+-- The nearest directory at or above PATH that holds a `.jj`, or nil. The
+-- fixture root is a fresh mktemp -d, but its ancestors are the machine's: /tmp
+-- on this machine is a jj workspace dojjo left behind, and a walk that reached
+-- it would answer for it rather than for the code.
+local function jj_above(path)
+  local dir = tostring(path):gsub("/+$", "")
+  while dir ~= "" do
+    if exists(dir .. "/.jj") then
+      return dir
+    end
+    dir = dir:match("^(.*)/[^/]+$") or ""
+  end
+  return nil
+end
+
+local TMP = assert(mktemp_dir(), "mktemp -d failed")
+local ROOT = TMP .. "/pmm-iris"
+local MAIN = ROOT .. "/main"
+local FEAT = ROOT .. "/feat-6c4"
+mkdirp(ROOT .. "/.jj/repo")
+mkdirp(MAIN)
+-- The branch workspace's own `.jj/repo` is a *file* -- the relative path of the
+-- store it borrows -- which is what the wrapper shape really looks like. A bare
+-- directory would be shaped like no workspace at all, and the branch-workspace
+-- cases below would be walking something this flow never makes.
+mkdirp(FEAT .. "/.jj")
+write_file(FEAT .. "/.jj/repo", "../../.jj/repo\n")
+
+-- A directory in no wrapper, for the refusals. It is a fixture of its own
+-- rather than /tmp, because /tmp on this machine is a wrapper in its own right
+-- (dojjo keeps one there), and a case that passed there would pass for the
+-- wrong reason.
+local BARE = TMP .. "/bare/inside"
+mkdirp(BARE)
+-- The fixture root has to be a directory in no wrapper, or every "in no wrapper"
+-- case below passes for the machine's reason rather than this code's: asserted
+-- once, before the first of them, so a failure here reads as the machine's shape
+-- rather than as a bug in the walk.
+eq("the fixture root has no .jj above it", jj_above(TMP), nil)
+
+-- jj's workspace list, as `main_workspace` reads it: one name, one tab, the
+-- root, one newline per row. The same command new-work.sh's done runs.
+local JJ = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
+
+-- jj's answer as that template prints it. A non-zero code is jj refusing -- a
+-- failed read rather than a listing with no main row -- and its line is on
+-- stderr, the way a real jj's is.
+local function jj_rows(stdout, code)
+  code = code or 0
+  return { ok = code == 0, code = code, stdout = code == 0 and stdout or "",
+    stderr = code == 0 and "" or stdout }
+end
+
+-- The repo's own rows: the wrapper's default workspace, main, and the branch
+-- workspace the tab is in.
+local JJ_ROWS = "default\t" .. ROOT .. "\nmain\t" .. MAIN .. "\nfeat/6c4\t" .. FEAT .. "\n"
+
+-- A stub that answers the way a wrapper project with a beads database does, so
+-- each refusal test only has to break the one thing it is about: jj's own
+-- listing names main, and bd answers from it.
 local function project_stub()
   local stub = fresh_rex()
-  stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pmm-iris/.git\n", stderr = "" }
-  stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "wt list", stderr = "" }
-  stub.json_replies["wt list"] = {
-    items = {
-      { worktree = { path = "/x/pmm-iris/main", main = true } },
-      { worktree = { path = "/x/pmm-iris/bug-1", main = false } },
-    },
-  }
+  stub.exec_replies[JJ] = jj_rows(JJ_ROWS)
   stub.exec_replies["bd ready --json"] = { ok = true, code = 0, stdout = "[]", stderr = "" }
   stub.process_reply = {
-    foreground = { name = "pi", cwd = "/x/pmm-iris/main" },
+    foreground = { name = "pi", cwd = MAIN },
     child = { name = "login" },
   }
   return stub
@@ -359,168 +449,76 @@ eq("a table with one bad value applies none of it", M.options, options_before)
 -- The login shell -------------------------------------------------------
 --
 -- Rex runs an action with its own PATH, which has no mise or Homebrew installs
--- on it, so wt and bd -- the tools the design puts on the login shell's PATH --
--- are asked for through SHELL, in place of Rex's PATH.
+-- on it, so jj and bd -- the tools on the login shell's PATH -- are asked for
+-- through SHELL, in place of Rex's PATH.
 
-local stub = fresh_rex()
-stub.exec_replies.git = { ok = false, code = 128, stdout = "", stderr = "fatal: not a git repository\n" }
-M.project_for("/tmp")
-eq("git runs as given, with no shell in the way", call_for(stub, "git").argv,
-  { "git", "-C", "/tmp", "rev-parse", "--path-format=absolute", "--git-common-dir" })
-
-stub = project_stub()
-stub.exec_replies["wt list --format=json"] = nil
-M.project_for("/x/pmm-iris/main")
-eq("wt is run in the login shell", call_for(stub, "wt list --format=json").argv,
-  { shell(), "-lc", "wt list --format=json" })
-eq("wt still runs in the project root", call_for(stub, "wt list --format=json").cwd, "/x/pmm-iris")
+local stub = project_stub()
+M.project_for(MAIN)
+eq("jj is asked through the login shell", call_for(stub, JJ).argv, { shell(), "-lc", JJ })
+eq("jj is asked in the wrapper", call_for(stub, JJ).cwd, ROOT)
 
 -- project_for() -------------------------------------------------------------
 
+-- Nothing here runs a subprocess to find the project: the wrapper is the nearest
+-- directory above the cwd holding .jj/repo as a directory, so a directory in no
+-- wrapper is refused without asking anything at all.
 stub = fresh_rex()
-stub.exec_replies.git = { ok = false, code = 128, stdout = "",
-  stderr = "fatal: not a git repository (or any of the parent directories): .git\n" }
-local project, message = M.project_for("/tmp")
-eq("not a repository returns nil", project, nil)
-eq("not a repository message", message, "not a git repository: /tmp")
-eq("git is asked for the absolute common dir", call_for(stub, "git").argv,
-  { "git", "-C", "/tmp", "rev-parse", "--path-format=absolute", "--git-common-dir" })
+local outside, outside_reason = M.project_for(BARE)
+eq("a directory in no wrapper returns nil", outside, nil)
+contains("that refusal names .jj", outside_reason, ".jj")
+eq("a directory in no wrapper runs nothing", #stub.exec_calls, 0)
 
 stub = project_stub()
-project = M.project_for("/x/pmm-iris/main")
-eq("project root", project and project.root, "/x/pmm-iris")
+local project = M.project_for(MAIN)
+eq("project root", project and project.root, ROOT)
 eq("project name", project and project.name, "pmm-iris")
-eq("project main worktree", project and project.main, "/x/pmm-iris/main")
-eq("wt list is one command in the login shell", call_for(stub, "wt list --format=json").argv,
-  { shell(), "-lc", "wt list --format=json" })
-eq("wt list runs in the project root", call_for(stub, "wt list --format=json").cwd, "/x/pmm-iris")
+eq("project main", project and project.main, MAIN)
 
--- The path that matters: worktrunk reports schema 2, and only a decoded
--- boolean main flag finds the main worktree.
-stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/main", main = false } } } }
-eq("no main worktree message", select(2, M.project_for("/x/pmm-iris/main")),
-  "no main worktree found for /x/pmm-iris")
-
--- Where the main worktree comes from ---------------------------------------
---
--- jj's own workspace list, by name. A bare-rooted wrapper whose worktrees are all
--- detached -- pi-rex -- is one worktrunk flags wrongly (it called a branch
--- workspace main), while jj's `main` row is the name every part of this flow
--- already assumes when it says "main". worktrunk's flag is the fallback, for a
--- repository whose main workspace has another name or a jj that cannot be read.
-local JJ = [[jj --ignore-working-copy workspace list -T 'name ++ "\t" ++ root ++ "\n"']]
-
--- jj's answer as the template above prints it: one name, one tab, the root, one
--- newline per row. A non-zero code is jj refusing, which is not a main row.
-local function jj_rows(stdout, code)
-  code = code or 0
-  return { ok = code == 0, code = code, stdout = stdout, stderr = "" }
+-- The pane's cwd is not normalised into an answer: the wrapper itself, a branch
+-- workspace beneath it, and either of them with a trailing slash all name the
+-- same project.
+local places = {
+  { "the wrapper", ROOT }, { "the wrapper with a slash", ROOT .. "/" },
+  { "a branch workspace", FEAT }, { "a branch workspace with a slash", FEAT .. "/" },
+}
+for _, place in ipairs(places) do
+  stub = project_stub()
+  local found = M.project_for(place[2])
+  eq("the wrapper is found from " .. place[1], found and found.root, ROOT)
+  eq("and its main comes with it from " .. place[1], found and found.main, MAIN)
 end
 
--- The pi-rex shape measured live: worktrunk flags the branch workspace, jj names
--- main at the other one.
+-- A wrapper whose listing names no main row -- a plain colocated repo, or one
+-- whose main workspace was forgotten -- has no fallback left to answer for it.
 stub = project_stub()
-stub.exec_replies.git = { ok = true, code = 0, stdout = "/x/pi-rex/.git\n", stderr = "" }
-stub.exec_replies[JJ] = jj_rows("default\t/x/pi-rex\nfeat/b9y\t/x/pi-rex/feat-b9y\nmain\t/x/pi-rex/main\n")
-stub.json_replies["wt list"] = {
-  items = {
-    { worktree = { path = "/x/pi-rex/feat-b9y", main = true } },
-    { worktree = { path = "/x/pi-rex/main", main = false } },
-  },
-}
-project = M.project_for("/x/pi-rex/feat-b9y")
-eq("jj's main workspace is the main worktree, not wt's flag",
-  project and project.main, "/x/pi-rex/main")
-eq("the project root is still git's", project and project.root, "/x/pi-rex")
-eq("jj is asked for its workspaces in the login shell", (call_for(stub, JJ) or {}).argv,
-  { shell(), "-lc", JJ })
-eq("jj is asked in the project root", (call_for(stub, JJ) or {}).cwd, "/x/pi-rex")
-eq("worktrunk is not asked when jj names main",
-  call_for(stub, "wt list --format=json"), nil)
+stub.exec_replies[JJ] = jj_rows("default\t" .. ROOT .. "\ntrunk\t" .. ROOT .. "/trunk\n")
+eq("no main row message", select(2, M.project_for(MAIN)),
+  "the wrapper " .. ROOT .. " has no jj workspace named main")
 
--- No row named main -- and a row whose name only starts with it, which is a
--- different workspace and not the answer -- leaves worktrunk's flag to answer
--- as it did before.
+-- A row called maintenance is another workspace, and a wrapper has no other
+-- answer to fall back on.
 stub = project_stub()
-stub.exec_replies[JJ] = jj_rows(
-  "default\t/x/pmm-iris\ntrunk\t/x/pmm-iris/trunk\nmaintenance\t/x/pmm-iris/elsewhere\n")
-stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
-project = M.project_for("/x/pmm-iris/feat-1")
-eq("without a main row the wt flag is the main worktree",
-  project and project.main, "/x/pmm-iris/feat-1")
+stub.exec_replies[JJ] = jj_rows("default\t" .. ROOT .. "\nmaintenance\t" .. ROOT .. "/elsewhere\n")
+eq("a workspace only named like main is no main row", select(2, M.project_for(MAIN)),
+  "the wrapper " .. ROOT .. " has no jj workspace named main")
 
--- The jj read is optional: a jj that refuses, and one the login shell cannot
--- find at all, both fall back to the flag rather than failing the project.
+-- jj's root is used as a path, so a trailing slash and a blank line may not hide
+-- the row or carry into the answer.
+stub = project_stub()
+stub.exec_replies[JJ] = jj_rows("\nmaintenance\t" .. ROOT .. "/elsewhere\nmain\t" .. MAIN .. "/\n")
+eq("a trailing slash on jj's root is dropped", (M.project_for(MAIN) or {}).main, MAIN)
+
+-- A jj that refuses is a failed read, not an empty one: saying which it was is
+-- what keeps "jj is broken" from reading as "this wrapper has no main".
 stub = project_stub()
 stub.exec_replies[JJ] = jj_rows("Error: not a jj repository\n", 1)
-stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
-eq("a jj that fails falls back to the wt flag",
-  (M.project_for("/x/pmm-iris/feat-1") or {}).main, "/x/pmm-iris/feat-1")
+eq("a jj that fails is reported", select(2, M.project_for(MAIN)),
+  "could not list the jj workspaces of " .. ROOT .. ": Error: not a jj repository")
 
 stub = project_stub()
-stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
-eq("a jj the login shell cannot find falls back to the wt flag",
-  (M.project_for("/x/pmm-iris/feat-1") or {}).main, "/x/pmm-iris/feat-1")
-
--- Neither source naming a main worktree is still the same refusal.
-stub = project_stub()
-stub.exec_replies[JJ] = jj_rows("default\t/x/pmm-iris\ntrunk\t/x/pmm-iris/trunk\n")
-stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/main", main = false } } } }
-eq("no main worktree in either source message", select(2, M.project_for("/x/pmm-iris/main")),
-  "no main worktree found for /x/pmm-iris")
-
--- jj's root is used as a path, so a trailing slash and a blank line are not
--- allowed to hide the row or carry into the answer. The fallback here names a
--- different directory, so a pass cannot come from worktrunk's flag.
-stub = project_stub()
-stub.exec_replies[JJ] = jj_rows("\nmaintenance\t/x/pmm-iris/elsewhere\nmain\t/x/pmm-iris/main/\n")
-stub.json_replies["wt list"] = { items = { { worktree = { path = "/x/pmm-iris/feat-1", main = true } } } }
-eq("a trailing slash on jj's root is dropped",
-  (M.project_for("/x/pmm-iris/main") or {}).main, "/x/pmm-iris/main")
-
-stub = project_stub()
-stub.exec_replies["wt list --format=json"] = { ok = false, code = 1, stdout = "", stderr = "not a worktrunk repo\nsecond line\n" }
-eq("wt failure message", select(2, M.project_for("/x/pmm-iris/main")),
-  "worktrunk could not list worktrees for /x/pmm-iris: not a worktrunk repo")
-
-stub = project_stub()
-stub.exec_replies["wt list --format=json"] = { ok = false, code = 127, stdout = "", stderr = "wt: command not found\n" }
-eq("a wt the login shell cannot find is reported", select(2, M.project_for("/x/pmm-iris/main")),
-  "worktrunk could not list worktrees for /x/pmm-iris: wt: command not found")
-
--- The cross-task contract: a relative common dir names no project, so it is
--- refused rather than turned into empty strings.
-stub = project_stub()
-stub.exec_replies.git = { ok = true, code = 0, stdout = ".git\n", stderr = "" }
-local relative_project, relative_message = M.project_for("/x/pmm-iris/main")
-eq("a relative common dir returns nil", relative_project, nil)
-contains("a relative common dir names the directory", relative_message, "/x/pmm-iris/main")
-
-stub = project_stub()
-stub.exec_replies.git = nil
-eq("a git that cannot start says so", select(2, M.project_for("/tmp")),
-  "git could not be run: git: executable file not found in PATH")
-
--- An unreadable listing is not the same as a listing with no main worktree, and
--- rex.json.decode answers bad text with nil plus a reason instead of raising.
-stub = project_stub()
-stub.json_replies["wt list"] = nil          -- stdout was not JSON
-eq("garbage listing message", select(2, M.project_for("/x/pmm-iris/main")),
-  "could not read the worktrunk listing for /x/pmm-iris: rex.json.decode: text is not valid JSON")
-
-stub = project_stub()
-stub.exec_replies["wt list --format=json"] = { ok = true, code = 0, stdout = "", stderr = "" }
-eq("empty listing message", select(2, M.project_for("/x/pmm-iris/main")),
-  "could not read the worktrunk listing for /x/pmm-iris: rex.json.decode: text is not valid JSON")
-
--- Valid JSON that is not an object -- a string, a number, null -- decodes without
--- a reason, so the message has to say what arrived instead of claiming there was
--- no value at all.
-stub = project_stub()
-stub.json_replies["wt list"] = "just a string"
-eq("a listing that is not an object message", select(2, M.project_for("/x/pmm-iris/main")),
-  "could not read the worktrunk listing for /x/pmm-iris: the listing decoded to a string, not an object")
-
+stub.exec_replies[JJ] = nil
+eq("a jj the login shell cannot find is reported", select(2, M.project_for(MAIN)),
+  "jj could not be run in " .. ROOT .. ": " .. JJ .. ": executable file not found in PATH")
 -- has_beads() ---------------------------------------------------------------
 
 stub = fresh_rex()
@@ -577,9 +575,9 @@ eq("the float uses the configured bounds", layer.bounds, { 0.15, 0.1, 0.7, 0.8 }
 eq("the float takes focus", layer.focus, true)
 eq("the float holds a shell", layer.layout.block.flavor, "com.superlogical.terminal.shell")
 eq("the float's label", layer.layout.block.label, "new work")
-eq("the picker starts in the main worktree", layer.layout.block.options.cwd, "/x/pmm-iris/main")
+eq("the picker starts in the main worktree", layer.layout.block.options.cwd, MAIN)
 eq("the picker command", layer.layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+  { M.options.script, "pick", "--main", MAIN, "--root", ROOT,
     "--project", "pmm-iris", "--agents", "pi" })
 
 -- A second press replaces the picker instead of stacking another one.
@@ -597,25 +595,30 @@ eq("an unknown directory fails", ok_no_cwd, false)
 contains("an unknown directory is named as the reason", no_cwd_message, "cannot tell which directory")
 eq("an unknown directory opens nothing", #stub.layers, 0)
 
--- The foreground process has no directory, so the shell behind it answers.
+-- The foreground process has no directory, so the shell behind it answers: the
+-- branch workspace it names is under the wrapper, and the picker opens on the
+-- main workspace that wrapper holds.
 stub = project_stub()
-stub.process_reply = { foreground = { name = "login" }, child = { name = "login", cwd = "/tmp" } }
+stub.process_reply = { foreground = { name = "login" }, child = { name = "login", cwd = FEAT } }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("the shell's directory is used when the foreground has none", call_for(stub, "git").argv[3], "/tmp")
+eq("the shell's directory is used when the foreground has none",
+  stub.layers[1] and stub.layers[1].layout.block.options.cwd, MAIN)
 
+-- A directory in no wrapper: there is no project to open a picker on, and the
+-- refusal names the directory it was asked about.
 stub = project_stub()
-stub.exec_replies.git = { ok = false, code = 128, stdout = "", stderr = "fatal: not a git repository\n" }
+stub.process_reply = { foreground = { name = "fish", cwd = BARE } }
 local ok_outside, outside_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("a directory outside a repository fails", ok_outside, false)
-eq("a directory outside a repository is named", outside_message, "not a git repository: /x/pmm-iris/main")
-eq("a directory outside a repository opens nothing", #stub.layers, 0)
+eq("a directory in no wrapper fails", ok_outside, false)
+contains("a directory in no wrapper names it", outside_message, BARE)
+eq("a directory in no wrapper opens nothing", #stub.layers, 0)
 
 stub = project_stub()
 stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "", stderr = "no beads database found\n" }
 local ok_no_beads, no_beads_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("a project without beads fails", ok_no_beads, false)
 eq("a project without beads says beads is required", no_beads_message,
-  "beads is required, but no beads database was found in /x/pmm-iris/main")
+  "beads is required, but no beads database was found in " .. MAIN)
 eq("a project without beads opens nothing", #stub.layers, 0)
 
 -- A beads database that is there but cannot be asked is not a missing one.
@@ -625,19 +628,20 @@ stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
 local ok_broken_bd, broken_bd_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("a bd that cannot be consulted fails", ok_broken_bd, false)
 eq("a bd that cannot be consulted is not called a missing database", broken_bd_message,
-  "bd failed in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
+  "bd failed in " .. MAIN .. ": mise ERROR bd is not a valid shim.")
 eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
 
--- base = false means "let worktrunk choose", so there is no ref to name -- and
--- the picker is told so, because a picker that is told nothing resolves the
--- remote's default branch and opens the screen on a base the configuration
--- opted out of. The screen then opens on "wt default" and ctrl-r can still move
--- off it: the opt-out sets the answer it starts on, it does not pin the field.
+-- base = false means "no revision at all", so there is no ref to name -- and
+-- the picker is told so, because a picker that is told nothing resolves its own
+-- opening base (main@origin, then master@origin, then @) and the screen would
+-- open on one the configuration opted out of. The screen then opens on the
+-- `base: none` header -- ctrl-r can still move off it: the opt-out sets the
+-- answer it starts on, it does not pin the field.
 stub = project_stub()
 M.setup{ base = false }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("no --base when base is false", stub.layers[1].layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+  { M.options.script, "pick", "--main", MAIN, "--root", ROOT,
     "--project", "pmm-iris", "--no-base", "--agents", "pi" })
 
 -- The agent question is a list, so every name is handed over in order: the first
@@ -648,7 +652,7 @@ M.setup{ base = "@", agents = { "pi", "claude" } }
 pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
 eq("configured agent names are all offered, in order",
   stub.layers[1].layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
+  { M.options.script, "pick", "--main", MAIN, "--root", ROOT,
     "--project", "pmm-iris", "--base", "@", "--agents", "pi", "--agents", "claude" })
 
 -- agents is the picker's list, so it reaches the float as one --agents per name:
@@ -675,7 +679,7 @@ contains("a number in agents names the option", number_message, "agents")
 -- tab is still running. Nothing else is resolved here; the float's script asks
 -- the project for the rest.
 
--- A worktrunk project whose session has one tab, feat/6c4, holding the pane the
+-- A wrapper project whose session has one tab, feat/6c4, holding the pane the
 -- action was pressed in and one other (blocks lists them, two by default).
 -- What each block is running is answered per block, because "the pane's own
 -- directory" and "what the tab is running" are the same question asked about
@@ -708,8 +712,8 @@ end
 -- A tab of shells: the audit opens on the pane's own worktree, and the tab it
 -- will close travels with it.
 stub = done_stub({
-  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
-  ["block:2"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:1"] = { foreground = { name = "fish", cwd = FEAT } },
+  ["block:2"] = { foreground = { name = "fish", cwd = FEAT } },
 })
 local ok_done, done_layer = pcall(M.work_done,
   { block_id = "block:1", session_id = "session:1", origin = "key" })
@@ -727,10 +731,10 @@ eq("the done float holds a shell",
   done_float.layout.block.flavor, "com.superlogical.terminal.shell")
 eq("the done float's label", done_float.layout.block.label, "done")
 eq("the audit starts in the main worktree", done_float.layout.block.options.cwd,
-  "/x/pmm-iris/main")
+  MAIN)
 eq("the audit command", done_float.layout.block.options.command,
-  { M.options.script, "done", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--cwd", "/x/pmm-iris/feat-6c4",
+  { M.options.script, "done", "--main", MAIN, "--root", ROOT,
+    "--project", "pmm-iris", "--cwd", FEAT,
     "--session", "session:1", "--window", "window:feat" })
 
 -- A second press replaces the audit instead of stacking another one, the way
@@ -738,8 +742,8 @@ eq("the audit command", done_float.layout.block.options.command,
 -- worktree, so the one already on screen goes first. The counts are relative to
 -- this stub, so the case holds wherever it sits.
 stub = done_stub({
-  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
-  ["block:2"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:1"] = { foreground = { name = "fish", cwd = FEAT } },
+  ["block:2"] = { foreground = { name = "fish", cwd = FEAT } },
 })
 local ok_press, first_press = pcall(M.work_done,
   { block_id = "block:1", session_id = "session:1", origin = "key" })
@@ -761,14 +765,14 @@ eq("the float is closed in the terminal's session",
 -- could never work out for itself. Two of them, in the order the tab lists
 -- them, because the refusal names them in that order.
 stub = done_stub({
-  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:1"] = { foreground = { name = "fish", cwd = FEAT } },
   ["block:2"] = { foreground = { name = "node" } },
   ["block:3"] = { foreground = { name = "pi" } },
 }, { "block:1", "block:2", "block:3" })
 pcall(M.work_done, { block_id = "block:1", session_id = "session:1", origin = "key" })
 eq("the running programs travel with the audit", stub.layers[1].layout.block.options.command,
-  { M.options.script, "done", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--cwd", "/x/pmm-iris/feat-6c4",
+  { M.options.script, "done", "--main", MAIN, "--root", ROOT,
+    "--project", "pmm-iris", "--cwd", FEAT,
     "--session", "session:1", "--window", "window:feat",
     "--running", "node", "--running", "pi" })
 
@@ -782,21 +786,18 @@ contains("work_done's unknown directory is named", done_no_cwd_message,
   "cannot tell which directory")
 eq("work_done with an unknown directory opens nothing", #stub.layers, 0)
 
--- A directory in no repository: there would be no project to audit.
-stub = done_stub({ ["block:1"] = { foreground = { name = "fish", cwd = "/tmp" } } })
-stub.exec_replies.git = { ok = false, code = 128, stdout = "",
-  stderr = "fatal: not a git repository\n" }
+-- A directory in no wrapper: there would be no project to audit.
+stub = done_stub({ ["block:1"] = { foreground = { name = "fish", cwd = BARE } } })
 local ok_done_outside, done_outside_message = pcall(M.work_done,
   { block_id = "block:1", session_id = "session:1" })
-eq("work_done outside a repository fails", ok_done_outside, false)
-eq("work_done outside a repository names the directory", done_outside_message,
-  "not a git repository: /tmp")
-eq("work_done outside a repository opens nothing", #stub.layers, 0)
+eq("work_done in no wrapper fails", ok_done_outside, false)
+contains("work_done in no wrapper names the directory", done_outside_message, BARE)
+eq("work_done in no wrapper opens nothing", #stub.layers, 0)
 
 -- A pane in no tab: the flow cannot name the window whose tab it would close,
 -- so it refuses rather than open an audit whose last step would fail.
 stub = done_stub({
-  ["block:1"] = { foreground = { name = "fish", cwd = "/x/pmm-iris/feat-6c4" } },
+  ["block:1"] = { foreground = { name = "fish", cwd = FEAT } },
 })
 stub.call_replies["session.attach"] = {
   client_id = "client:app",
@@ -808,5 +809,14 @@ eq("work_done with no tab fails", ok_done_no_tab, false)
 contains("work_done's refusal names the tab", done_no_tab_message, "cannot tell which tab")
 eq("work_done with no tab opens nothing", #stub.layers, 0)
 
-if fails > 0 then os.exit(1) end
-print("ok " .. count .. " assertions")
+-- The fixture wrapper goes with the file on either way out: a run that failed
+-- is the one most likely to be re-run, and a mktemp tree left under it is litter
+-- nobody goes looking for. So the removal and the exit are one step, the removal
+-- first. TMP is this file's own, so nothing else is named.
+local function finish()
+  os.execute("rm -rf " .. quote(TMP))
+  if fails > 0 then os.exit(1) end
+  print("ok " .. count .. " assertions")
+end
+
+finish()
