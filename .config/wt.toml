@@ -1,0 +1,2 @@
+[post-remove]
+jj = "jj workspace forget {{ branch }} 2>/dev/null || true"
