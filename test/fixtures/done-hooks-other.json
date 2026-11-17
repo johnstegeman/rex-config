@@ -1,9 +1,0 @@
-[
-  {
-    "type": "post-remove",
-    "source": "project",
-    "name": "cleanup",
-    "template": "rm -rf .venv 2>/dev/null || true",
-    "needs_approval": false
-  }
-]
