@@ -1,4 +1,0 @@
-main@
-main@git
-main@origin
-topic@origin
