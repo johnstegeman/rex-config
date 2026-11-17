@@ -1,3 +1,0 @@
-bug/a4l
-feat/6c4
-main
