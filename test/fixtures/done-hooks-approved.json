@@ -1,0 +1,9 @@
+[
+  {
+    "type": "post-remove",
+    "source": "project",
+    "name": "jj",
+    "template": "jj workspace forget {{ branch }} 2>/dev/null || true",
+    "needs_approval": false
+  }
+]
