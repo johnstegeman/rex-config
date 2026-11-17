@@ -1,3 +1,0 @@
-default	/p/pi-rex
-feat/b9y	/p/pi-rex/feat-b9y
-main	/p/pi-rex/main
