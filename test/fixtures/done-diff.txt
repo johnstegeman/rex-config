@@ -1,4 +1,0 @@
-M init.lua
-M new-work.sh
-A docs/plan.md
-M test/run.sh
