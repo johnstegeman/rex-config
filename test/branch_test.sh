@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# `new-work.sh branch-default`, `new-work.sh candidates` and `new-work.sh bases`.
+# `new-work.sh branch-default` and `new-work.sh bases`.
 #
-# branch-default turns a bead's issue_type and id into the branch name the
-# picker offers; candidates collects the branch names that already exist so the
-# picker can offer them too. bases resolves the ref a new branch starts from and
-# the short cycle of bases around it. All three run without fzf.
+# branch-default turns a bead's issue_type and id into the branch name the branch
+# question offers; bases resolves the ref a new branch starts from and the short
+# cycle of bases around it. The flow is create-only, so nothing lists the
+# branches that already exist any more.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -76,132 +76,6 @@ elif ! grep -qF 'branch-default: --id pmm-iris- leaves no name to use' "$tmp/err
 fi
 run_branch_default_missing --id pmm-iris-a4l
 run_branch_default_missing
-
-# Existing branch names, one per line: worktree branches first, then local
-# branches, de-duplicated in that order, and never a ref ending in /HEAD.
-cat >"$tmp/refs" <<'EOF'
-feat/abc123
-main
-origin/HEAD
-johnstegeman/k1ier
-fix/cleanup
-EOF
-
-cat >"$tmp/candidates.expected" <<'EOF'
-main
-chore/p4pip
-feat/abc123
-johnstegeman/k1ier
-fix/cleanup
-EOF
-
-ran=$((ran + 1))
-./new-work.sh candidates --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 0 ]; then
-  fail "candidates listing" "exit $status: $(cat "$tmp/err")"
-elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
-  fail "candidates listing" "output differs from the expected branch list"
-fi
-
-# The same call with no fzf anywhere on PATH: the script must not need it.
-ran=$((ran + 1))
-mkdir -p "$tmp/bin"
-for tool in bash jq awk cat; do
-  ln -s "$(command -v "$tool")" "$tmp/bin/$tool"
-done
-PATH=$tmp/bin ./new-work.sh candidates --wt-json test/fixtures/wt-list.json \
-  --refs "$tmp/refs" >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 0 ]; then
-  fail "candidates needs no fzf" "exit $status: $(cat "$tmp/err")"
-elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
-  fail "candidates needs no fzf" "output differs from the expected branch list"
-fi
-
-# Reading the branches out of a real repository: --main with no fixtures.
-ran=$((ran + 1))
-git init -q "$tmp/repo" && git -C "$tmp/repo" -c user.email=t@example.com \
-  -c user.name=t commit -q --allow-empty -m init &&
-  git -C "$tmp/repo" branch feat/real-one && git -C "$tmp/repo" branch fix/real-two
-./new-work.sh candidates --main "$tmp/repo" >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 0 ]; then
-  fail "candidates from a repository" "exit $status: $(cat "$tmp/err")"
-else
-  for want in feat/real-one fix/real-two; do
-    if ! grep -qx "$want" "$tmp/out"; then
-      fail "candidates from a repository" "missing $want in: $(cat "$tmp/out")"
-    fi
-  done
-  if sort "$tmp/out" | uniq -d | grep -q .; then
-    fail "candidates from a repository" "duplicate rows in: $(cat "$tmp/out")"
-  fi
-fi
-
-ran=$((ran + 1))
-./new-work.sh candidates >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 2 ]; then
-  fail "candidates without --main exits 2" "exit $status: $(cat "$tmp/err")"
-fi
-
-# A --main that is not there is refused by name, before anything is read from
-# it: left to candidate_rows it surfaces as bash's own `cd` error, which names a
-# line of this script rather than a place on the disk.
-ran=$((ran + 1))
-./new-work.sh candidates --main "$tmp/nowhere" >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 1 ]; then
-  fail "candidates with a --main that is not there exits 1" \
-    "exit $status: $(cat "$tmp/err")"
-elif ! grep -qF "new-work.sh: candidates: no such directory: $tmp/nowhere" "$tmp/err"; then
-  fail "candidates with a --main that is not there is named" "stderr: $(cat "$tmp/err")"
-elif grep -q 'cd:' "$tmp/err"; then
-  fail "candidates with a --main that is not there is named" \
-    "bash's own cd error is still in: $(cat "$tmp/err")"
-fi
-
-# ... but only when it will really be read: with both fixtures --wt-json and
-# --refs are the two sources candidates has, so --main is never touched and a
-# directory that is not there costs nothing. The same shape pick accepts, since
-# it is how the tests and dry runs call both commands.
-ran=$((ran + 1))
-./new-work.sh candidates --main "$tmp/nowhere" \
-  --wt-json test/fixtures/wt-list.json --refs "$tmp/refs" \
-  >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 0 ]; then
-  fail "candidates with both fixtures ignores an unread --main" \
-    "exit $status: $(cat "$tmp/err")"
-elif ! diff -u "$tmp/candidates.expected" "$tmp/out"; then
-  fail "candidates with both fixtures ignores an unread --main" \
-    "output differs from the expected branch list"
-fi
-
-# A worktrunk that cannot read the repository: its worktree rows are lost, but
-# git's branches still come through -- and the partial list says so, naming the
-# directory, because a branch missing from it is one the picker would offer to
-# create rather than switch to.
-mkdir -p "$tmp/bad-wt"
-cat >"$tmp/bad-wt/wt" <<'EOF'
-#!/bin/sh
-printf 'wt: not a worktrunk repository\n' >&2
-exit 1
-EOF
-chmod +x "$tmp/bad-wt/wt"
-ran=$((ran + 1))
-PATH="$tmp/bad-wt:$PATH" ./new-work.sh candidates --main "$tmp/repo" \
-  >"$tmp/out" 2>"$tmp/err"
-status=$?
-if [ "$status" -ne 0 ]; then
-  fail "a failed wt list still lists git's branches" "exit $status: $(cat "$tmp/err")"
-elif ! grep -qx 'feat/real-one' "$tmp/out"; then
-  fail "a failed wt list still lists git's branches" "output: $(cat "$tmp/out")"
-elif ! grep -qF "could not read the worktrees of $tmp/repo" "$tmp/err"; then
-  fail "a failed wt list is said out loud" "stderr: $(cat "$tmp/err")"
-fi
 
 # The refs of a pretend repository, as bases reads them: exactly what
 #
@@ -293,8 +167,8 @@ base_refs_file "$tmp/refs.local-master" refs/heads/master ''
 run_bases 'a local master opens it when there is no main at all' \
   $'master\t\n@\t' --base-refs "$tmp/refs.local-master"
 
-# The candidates are compared as whole refnames, so a branch that merely looks
-# like main -- or sits under it -- leaves nothing resolvable and @ opens.
+# Refs are compared as whole refnames, so a branch that merely looks like main --
+# or sits under it -- leaves nothing resolvable and @ opens.
 base_refs_file "$tmp/refs.maint" refs/heads/maint ''
 run_bases 'a local maint is not the main entry' \
   $'@\t' --base-refs "$tmp/refs.maint"
@@ -349,7 +223,7 @@ run_bases '--no-base opens on an empty ref' \
   $'\t\n@\t\nmain\t\nmaster\t' --base-refs "$tmp/refs.base" --no-base
 
 # --base-refs is the whole source, so --main is never opened -- and a directory
-# that is not there therefore costs nothing. The mirror of the candidates case.
+# that is not there therefore costs nothing.
 run_bases '--base-refs is read instead of --main' \
   $'origin/main\torigin\n@\t\nmain\t\nmaster\t' \
   --main "$tmp/nowhere" --base-refs "$tmp/refs.base"
