@@ -1051,21 +1051,13 @@ do
   eq("blank is declared a boolean", spec and spec.args.properties.blank, { type = "boolean" })
 end
 
--- work_new_go is the picker's hand-back, and until the picker is gone it has to
--- keep starting the work from a payload. It is deleted with the float.
+-- The float's hand-back action is gone with the float: one action answers the
+-- key, and it asks its own questions.
+eq("work_new_go is not an action any more", M.work_new_go, nil)
 do
-  local stub = project_stub()
-  local ok, result = pcall(in_memory, M.work_new_go,
-    { origin = "cli" },
-    { project = PROJECT, root = ROOT, main = MAIN, branch = BRANCH,
-      bead = BEAD, title = "Phase 3 follow-on", agent = "pi",
-      base = "origin/main", base_remote = "origin", worktree = "bug-58h",
-      prompt = "/brainstorming for bead " .. BEAD })
-  eq("work_new_go still starts the work", ok, true)
-  eq("work_new_go makes the tab", field(result, "created"), true)
-  eq("work_new_go asks no questions", #stub.questions, 0)
-  eq("work_new_go hands the answers to the tab",
-    request_of(stub, "session.new_window").layout.block.options.command[8], "../bug-58h")
+  local names = {}
+  for _, spec in ipairs(rex_stub.actions) do names[#names + 1] = spec.name end
+  eq("work_new is the only action registered", names, { "work_new" })
 end
 
 if fails > 0 then os.exit(1) end

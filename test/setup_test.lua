@@ -249,19 +249,24 @@ eq("no_bead_prompt default", M.options.no_bead_prompt, "")
 -- Unset, so the picker resolves the remote's own default branch rather than
 -- being told one here: a configured base moves the cycle's first entry instead.
 eq("base default", M.options.base, nil)
-eq("bounds default", M.options.bounds, { 0.15, 0.1, 0.7, 0.8 })
 eq("script default is new-work.sh", (tostring(M.options.script):match("/new%-work%.sh$") ~= nil), true)
 local script_file = io.open(tostring(M.options.script), "r")
 eq("script default exists beside the module", script_file ~= nil, true)
 if script_file then script_file:close() end
 
-eq("setup registers two actions", #rex_stub.actions, 2)
-eq("action names", action_names(rex_stub.actions), { "work_new", "work_new_go" })
+eq("setup registers one action", #rex_stub.actions, 1)
+eq("action names", action_names(rex_stub.actions), { "work_new" })
 eq("work_new title", rex_stub.actions[1].title, "New work: from a bead…")
 eq("work_new category", rex_stub.actions[1].category, "New work")
-eq("work_new_go category", rex_stub.actions[2].category, "New work")
 eq("work_new run", type(rex_stub.actions[1].run), "function")
-eq("work_new_go run", type(rex_stub.actions[2].run), "function")
+-- The float is gone, and the action that existed only to take its hand-back went
+-- with it: the key asks its own questions now.
+eq("work_new_go is not registered", M.work_new_go, nil)
+-- The float's geometry option went with the float.
+eq("bounds is not an option any more", M.options.bounds, nil)
+local ok_bounds = pcall(M.setup, { bounds = { 0, 0, 1, 1 } })
+eq("a bounds setting is still accepted as an unknown option", ok_bounds, true)
+eq("a bounds setting is not kept", M.options.bounds, nil)
 
 M.setup{ agent = "claude" }
 eq("a caller's agent wins", M.options.agent, "claude")
@@ -273,7 +278,7 @@ eq("the warning's level", rex_stub.warns[#rex_stub.warns].level, "warn")
 contains("the warning names the option", rex_stub.warns[#rex_stub.warns].message, "nope")
 eq("an unknown option is not kept", M.options.nope, nil)
 eq("an unknown option leaves the others alone", M.options.agent, "claude")
-eq("a repeated setup registers nothing new", #rex_stub.actions, 2)
+eq("a repeated setup registers nothing new", #rex_stub.actions, 1)
 
 -- A string where a list belongs is one ipairs away from failing in the middle of
 -- building a tab, so setup refuses it by name.

@@ -155,7 +155,7 @@ M.NO_BEAD = "\0none"
 M.NO_AGENT = "\0none"
 M.WT_DEFAULT = "\0default"
 
--- The icon a bead's row carries, by issue type: names the app's picker knows.
+-- The icon a bead's row carries, by issue type: names rex.ui.pick knows.
 local BEAD_ICON = {
   epic = "package", feature = "star", bug = "branch", chore = "gear",
   spike = "code", decision = "tag",
@@ -360,7 +360,6 @@ M.options = {
   -- question's first entry, and false is "let worktrunk choose" -- no --base
   -- word at all.
   base = nil,
-  bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
 }
 
@@ -659,11 +658,14 @@ function M.new_tab_argv(project, args)
   return argv
 end
 
-local OPTION_NAMES = { "agent", "agent_args", "agents", "bead_prompt", "no_bead_prompt", "base", "bounds", "script" }
+local OPTION_NAMES = { "agent", "agent_args", "agents", "bead_prompt", "no_bead_prompt", "base", "script" }
 local KNOWN_OPTION = {}
 for _, name in ipairs(OPTION_NAMES) do
   KNOWN_OPTION[name] = true
 end
+
+-- An option that is no longer known is warned about by name, which is what
+-- `bounds` -- the float's geometry -- now gets: there is no float to place.
 
 -- Rex runs an action with its own PATH -- /usr/bin:/bin:/usr/sbin:/sbin on this
 -- Mac -- which knows nothing of mise or Homebrew installs, while the design puts
@@ -844,18 +846,6 @@ local function block_cwd(ctx)
   return nil
 end
 
--- The picker this client opened last, so a second press replaces it instead of
--- stacking another float on top.
-local picker = {}
-
-local function close_picker()
-  if picker.layer_id == nil then
-    return
-  end
-  pcall(rex.session.close_layer, { session_id = picker.session_id, layer_id = picker.layer_id })
-  picker.session_id, picker.layer_id = nil, nil
-end
-
 -- The agent names the agent question offers, in the order it offers them: the
 -- first is the one an unasked question takes. Unset means the one configured
 -- agent, so a configuration that names no list still gets the question -- the
@@ -866,64 +856,6 @@ local function agent_choices()
     return { M.options.agent }
   end
   return agents
-end
-
--- argv for new-work.sh's picker, every word of it built here and nowhere else.
--- base = false means "let worktrunk choose", so there is no ref to pass on --
--- but the picker still has to be told, because a picker told nothing resolves
--- the remote's default branch itself and the screen would open on a base the
--- configuration opted out of. So false is --no-base: the cycle opens on the
--- worktrunk-default sentinel, and ctrl-r can still move off it.
-local function picker_command(project)
-  local command = {
-    M.options.script, "pick",
-    "--main", project.main,
-    "--root", project.root,
-    "--project", project.name,
-  }
-  if M.options.base == false then
-    command[#command + 1] = "--no-base"
-  elseif M.options.base ~= nil then
-    command[#command + 1] = "--base"
-    command[#command + 1] = M.options.base
-  end
-  -- The agent names are handed over only where the screen has a field to cycle
-  -- them in: the picker seeds its header from the first, ctrl-a walks the rest and
-  -- then none, and a list is the whole of what it needs to do that.
-  for _, name in ipairs(agent_choices()) do
-    if name ~= "" then
-      command[#command + 1] = "--agents"
-      command[#command + 1] = name
-    end
-  end
-  return command
-end
-
--- Open the picker in a floating terminal and return at once: a key-bound
--- action cannot wait for input, so the float asks the questions and hands its
--- answer back with `rex do work_new_go`.
-local function open_picker(ctx, project)
-  close_picker()
-  local called, layer, reason = pcall(rex.session.new_layer, {
-    session_id = ctx.session_id,
-    bounds = M.options.bounds,
-    focus = true,
-    layout = {
-      block = {
-        flavor = "com.superlogical.terminal.shell",
-        label = "new work",
-        options = { command = picker_command(project), cwd = project.main },
-      },
-    },
-  })
-  if not called then
-    error("could not open the picker: " .. tostring(layer), 0)
-  end
-  if type(layer) ~= "table" then
-    error("could not open the picker: " .. tostring(reason), 0)
-  end
-  picker.session_id, picker.layer_id = ctx.session_id, layer.layer_id
-  return { layer_id = layer.layer_id }
 end
 
 -- The ready beads as records, from new-work.sh's tested filter: the jq that
@@ -1550,37 +1482,8 @@ function M.work_new(ctx, args)
   })
 end
 
--- Action work_new_go: the picker's hand-back, kept while new-work.sh still
--- hands one back. The key runs the wizard above; this only turns a payload into
--- the answers it would have collected and starts the work.
-function M.work_new_go(ctx, args)
-  ctx, args = ctx or {}, args or {}
-
-  -- The hand-back is the only source of these, so one that is missing is
-  -- refused before anything is made.
-  for _, name in ipairs({ "project", "root", "main", "branch" }) do
-    local value = args[name]
-    if type(value) ~= "string" or value == "" then
-      error("the picker's answer has no " .. name, 0)
-    end
-  end
-
-  -- Rex reads the paths against its own working directory rather than the
-  -- picker's, so a relative one would make the tab somewhere else entirely, and
-  -- fail there with nothing on screen to explain it. new-work.sh refuses them
-  -- for a picker run; this action is also a public `rex do` entry point, so it
-  -- checks for itself.
-  for _, name in ipairs({ "root", "main" }) do
-    if args[name]:sub(1, 1) ~= "/" then
-      error("the picker's answer has a relative " .. name .. ": " .. args[name], 0)
-    end
-  end
-
-  return start_work(ctx, { name = args.project, root = args.root, main = args.main }, args)
-end
-
--- Options from the configuration file, then the actions. run takes the
--- action's context, and for work_new its optional answers as a second argument.
+-- Options from the configuration file, then the action. run takes the action's
+-- context and its optional answers.
 local actions_registered = false
 
 function M.setup(opts)
@@ -1658,50 +1561,7 @@ function M.setup(opts)
       return M.work_new(ctx, args)
     end,
   }
-  rex.action{
-    name = "work_new_go",
-    title = "New work: start the branch the picker chose",
-    category = "New work",
-    -- This Rex build refuses a *named* undeclared pair -- `rex do work_new_go
-    -- blank=true` is rejected outright without the declaration -- while an
-    -- `--args` object reaches the action whole, undeclared fields and all. The
-    -- picker hands back exactly these pairs, so every one of them is declared
-    -- here: the declaration is what the named path is checked against, and no
-    -- pair the picker sends is left to depend on which path a caller took.
-    args = {
-      type = "object",
-      properties = {
-        project = { type = "string" },
-        root = { type = "string" },
-        main = { type = "string" },
-        branch = { type = "string" },
-        -- The agent the picker chose -- an empty string is its "none" -- and the
-        -- prompt the user typed there, when they typed one.
-        agent = { type = "string" },
-        prompt = { type = "string" },
-        bead = { type = "string" },
-        title = { type = "string" },
-        create = { type = "boolean" },
-        -- What the branch is created from, and the remote that ref lives on.
-        -- The base is three-valued -- a string is the ref, false is worktrunk's
-        -- own default (no --base word at all), and absent means the picker never
-        -- answered -- so both types are declared: a `string` alone would call
-        -- the picker's sentinel an illegal value, and a validator that took that
-        -- at its word would drop it and let a configured base speak instead.
-        -- The remote is present only for a remote-tracking ref.
-        base = { type = { "string", "boolean" } },
-        base_remote = { type = "string" },
-        -- ctrl-n: an agent, and nothing to say. Not a prompt and not the
-        -- configured template, so a payload without it keeps the template.
-        blank = { type = "boolean" },
-      },
-      required = { "project", "root", "main", "branch" },
-    },
-    run = function(ctx, args)
-      return M.work_new_go(ctx, args)
-    end,
-  }
-  -- Set only once both are in, so a registration Rex rejects leaves the flag
+  -- Set only once the action is in, so a registration Rex rejects leaves the flag
   -- alone and a retry registers again.
   actions_registered = true
 
