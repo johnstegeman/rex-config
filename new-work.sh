@@ -13,10 +13,11 @@ usage: new-work.sh <command> [options]
 
 commands:
   beads --main DIR [--bd-json FILE]
-      list pickable ready beads, one "id<TAB>title" row each, sorted by
-      priority then id
+      list pickable ready beads, one
+      "id<TAB>title<TAB>issue_type<TAB>priority" row each, sorted by priority then
+      id
   preview ID --main DIR
-      print one bead's full text, for the picker's preview pane
+      print one bead's full text
   branch-default --type TYPE --id ID
       print the branch name to offer for a bead, e.g. bug/pmm-iris-a4l
   candidates --main DIR [--wt-json FILE] [--refs FILE]
@@ -212,11 +213,12 @@ ready_json() {
 # Rows for the beads a person can actually start work on, from `bd ready --json`
 # on stdin. Out go the things that are not work: molecule steps (dotted ids),
 # molecule and gate container beads, step:* labels, and a record with no id at
-# all, which nothing could pick. Rows are "id<TAB>title", sorted by priority
-# then id. A title is flattened to one line and a missing priority gets a value,
-# so a producer that is not bd itself cannot split a row or stop the listing;
-# what the picker hands back is read from the JSON again, so this is for reading
-# only.
+# all, which nothing could pick. A row is
+# "id<TAB>title<TAB>issue_type<TAB>priority", sorted by priority then id: the id
+# and the title name the bead, the type picks the row's icon, and the priority is
+# its P number. A title is flattened to one line, and a bead bd gave no priority
+# to gets an empty last field rather than a made-up rank, so a producer that is
+# not bd itself cannot split a row or stop the listing.
 pickable_rows() {
   jq -r '
     [ .[]
@@ -229,7 +231,7 @@ pickable_rows() {
     ]
     | sort_by(.priority, .id)
     | .[]
-    | "\(.id)\t\((.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))"
+    | "\(.id)\t\((.title // "") | tostring | gsub("[\\t\\n\\r]+"; " "))\t\((.issue_type // "") | tostring | gsub("[\\t\\n\\r]+"; " "))\t\(if .priority == 999 then "" else (.priority | tostring) end)"
   '
 }
 

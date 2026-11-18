@@ -243,7 +243,9 @@ eq("setup returns the module", M.setup{} == M, true)
 eq("agent default", M.options.agent, "pi")
 eq("agent_args default", M.options.agent_args, {})
 eq("bead_prompt default", M.options.bead_prompt, "/brainstorming for bead {id}")
-eq("no_bead_prompt default", M.options.no_bead_prompt, "/brainstorming")
+-- The default says nothing: a branch with no bead is usually started with no
+-- instruction at all, so the prompt question opens empty.
+eq("no_bead_prompt default", M.options.no_bead_prompt, "")
 -- Unset, so the picker resolves the remote's own default branch rather than
 -- being told one here: a configured base moves the cycle's first entry instead.
 eq("base default", M.options.base, nil)
@@ -424,106 +426,10 @@ eq("has_beads false when bd cannot start", beads, false)
 eq("bd that cannot start reports why", beads_reason,
   "bd could not be run in /x/main: bd ready --json: executable file not found in PATH")
 
--- work_new() ----------------------------------------------------------------
-
--- The options at their defaults: an earlier assertion in this file left the
--- agent set to claude, and the picker's default list is built from it.
-M.setup{ agent = "pi" }
-
-stub = project_stub()
-local ok, result = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("work_new opens the picker", ok, true)
-eq("work_new returns the layer id", type(result) == "table" and result.layer_id or result, "layer:1")
-eq("the terminal's process is asked about this block", stub.block_calls[1].request.block_id, "block:1")
-eq("the terminal's process is asked in this session", stub.block_calls[1].request.session_id, "session:1")
-eq("the terminal's process is the terminal's", stub.block_calls[1].creator, "com.superlogical.terminal")
-eq("the terminal's process method", stub.block_calls[1].method, "process")
-
-eq("one float is opened", #stub.layers, 1)
-local layer = stub.layers[1]
-eq("the float opens in the terminal's session", layer.session_id, "session:1")
-eq("the float uses the configured bounds", layer.bounds, { 0.15, 0.1, 0.7, 0.8 })
-eq("the float takes focus", layer.focus, true)
-eq("the float holds a shell", layer.layout.block.flavor, "com.superlogical.terminal.shell")
-eq("the float's label", layer.layout.block.label, "new work")
-eq("the picker starts in the main worktree", layer.layout.block.options.cwd, "/x/pmm-iris/main")
-eq("the picker command", layer.layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--agents", "pi" })
-
--- A second press replaces the picker instead of stacking another one.
-local ok_again, result_again = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("a second press succeeds", ok_again, true)
-eq("the second press opens its own float", type(result_again) == "table" and result_again.layer_id or result_again, "layer:2")
-eq("the first float is closed", #stub.closed_layers, 1)
-eq("the float that closed is the first one", stub.closed_layers[1].layer_id, "layer:1")
-
--- A terminal whose directory Rex cannot tell.
-stub = project_stub()
-stub.process_reply = nil
-local ok_no_cwd, no_cwd_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("an unknown directory fails", ok_no_cwd, false)
-contains("an unknown directory is named as the reason", no_cwd_message, "cannot tell which directory")
-eq("an unknown directory opens nothing", #stub.layers, 0)
-
--- The foreground process has no directory, so the shell behind it answers.
-stub = project_stub()
-stub.process_reply = { foreground = { name = "login" }, child = { name = "login", cwd = "/tmp" } }
-pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("the shell's directory is used when the foreground has none", call_for(stub, "git").argv[3], "/tmp")
-
-stub = project_stub()
-stub.exec_replies.git = { ok = false, code = 128, stdout = "", stderr = "fatal: not a git repository\n" }
-local ok_outside, outside_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("a directory outside a repository fails", ok_outside, false)
-eq("a directory outside a repository is named", outside_message, "not a git repository: /x/pmm-iris/main")
-eq("a directory outside a repository opens nothing", #stub.layers, 0)
-
-stub = project_stub()
-stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "", stderr = "no beads database found\n" }
-local ok_no_beads, no_beads_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("a project without beads fails", ok_no_beads, false)
-eq("a project without beads says beads is required", no_beads_message,
-  "beads is required, but no beads database was found in /x/pmm-iris/main")
-eq("a project without beads opens nothing", #stub.layers, 0)
-
--- A beads database that is there but cannot be asked is not a missing one.
-stub = project_stub()
-stub.exec_replies["bd ready --json"] = { ok = false, code = 1, stdout = "",
-  stderr = "mise ERROR bd is not a valid shim.\n" }
-local ok_broken_bd, broken_bd_message = pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("a bd that cannot be consulted fails", ok_broken_bd, false)
-eq("a bd that cannot be consulted is not called a missing database", broken_bd_message,
-  "bd failed in /x/pmm-iris/main: mise ERROR bd is not a valid shim.")
-eq("a bd that cannot be consulted opens nothing", #stub.layers, 0)
-
--- base = false means "let worktrunk choose", so there is no ref to name -- and
--- the picker is told so, because a picker that is told nothing resolves the
--- remote's default branch and opens the screen on a base the configuration
--- opted out of. The screen then opens on "wt default" and ctrl-r can still move
--- off it: the opt-out sets the answer it starts on, it does not pin the field.
-stub = project_stub()
-M.setup{ base = false }
-pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("no --base when base is false", stub.layers[1].layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--no-base", "--agents", "pi" })
-
--- The agent question is a list, so every name is handed over in order: the first
--- is the one the picker offers as its default. A configured list replaces the
--- single agent rather than adding to it.
-stub = project_stub()
-M.setup{ base = "@", agents = { "pi", "claude" } }
-pcall(M.work_new, { block_id = "block:1", session_id = "session:1" })
-eq("configured agent names are all offered, in order",
-  stub.layers[1].layout.block.options.command,
-  { M.options.script, "pick", "--main", "/x/pmm-iris/main", "--root", "/x/pmm-iris",
-    "--project", "pmm-iris", "--base", "@", "--agents", "pi", "--agents", "claude" })
-
--- agents is the picker's list, so it reaches the float as one --agents per name:
--- a string here is the same mistake as a string agent_args, and a name that is
--- not a name would reach the picker as nothing at all. pairs() cannot carry a
--- nil, so the unset state is put back by hand.
+-- agents is the agent question's list, so a string here is the same mistake as a
+-- string agent_args, and a name that is not a name would reach the question as
+-- nothing at all. pairs() cannot carry a nil, so the unset state is put back by
+-- hand.
 M.options.agents = nil
 eq("agents has no default of its own", M.options.agents, nil)
 local ok_agents, agents_message = pcall(M.setup, { agents = "pi" })

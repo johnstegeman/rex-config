@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # `new-work.sh beads`: turn `bd ready --json` into the picker's rows.
 #
-# Kept issues come out as "id<TAB>title" sorted by priority then id; molecule
-# steps (dotted ids), molecule/gate issue types and step:* labels never show up.
+# Kept issues come out as "id<TAB>title<TAB>issue_type<TAB>priority" sorted by
+# priority then id; molecule steps (dotted ids), molecule/gate issue types and
+# step:* labels never show up.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -65,10 +66,9 @@ elif ! grep -q jq "$tmp/err"; then
   fail "missing jq names jq" "stderr: $(cat "$tmp/err")"
 fi
 
-# A title carrying a tab and a newline: the row is "id<TAB>title", so either
-# would split it -- the picker would show fragments, and cut -f1 in pick would
-# read a made-up id. The payload's title comes from the JSON instead, so this is
-# the row only.
+# A title carrying a tab and a newline: a row is field-separated by tabs, so
+# either would split it -- the caller would show fragments and read a made-up id.
+# The title is flattened to one line, and so is the issue type beside it.
 cat >"$tmp/quirky.json" <<'EOF'
 [
   { "id": "pmm-iris-t1", "title": "tab\there\nand a newline", "priority": 2, "issue_type": "task" },
@@ -97,14 +97,14 @@ ran=$((ran + 1))
 status=$?
 if [ "$status" -ne 0 ]; then
   fail "a numeric title is still a row" "exit $status: $(cat "$tmp/err")"
-elif [ "$(cat "$tmp/out")" != "$(printf 'pmm-iris-n1\t42')" ]; then
+elif [ "$(cat "$tmp/out")" != "$(printf 'pmm-iris-n1\t42\ttask\t1')" ]; then
   fail "a numeric title is still a row" "rows: $(cat "$tmp/out")"
 fi
 
 # Fields a producer left out: a record with no id at all is dropped -- there is
 # nothing to hand back for it -- while a bead that simply has no priority is still
-# a row, sorted last. Neither is a reason to lose the whole list, and a null id
-# would otherwise stop jq outright.
+# a row, with an empty priority field and sorted last. Neither is a reason to lose
+# the whole list, and a null id would otherwise stop jq outright.
 cat >"$tmp/sparse.json" <<'EOF'
 [
   { "id": "pmm-iris-s1", "title": "no priority", "issue_type": "task" },
@@ -121,9 +121,9 @@ if [ "$status" -ne 0 ]; then
 elif [ "$(wc -l <"$tmp/out" | tr -d ' ')" != 2 ]; then
   fail "a bead with no id is dropped, one with no priority is not" \
     "one row per real bead, got: $(cat "$tmp/out")"
-elif [ "$(sed -n '1p' "$tmp/out")" != "$(printf 'pmm-iris-s3\tone')" ]; then
+elif [ "$(sed -n '1p' "$tmp/out")" != "$(printf 'pmm-iris-s3\tone\ttask\t1')" ]; then
   fail "a bead with no id is dropped, one with no priority is not" "rows: $(cat "$tmp/out")"
-elif [ "$(sed -n '2p' "$tmp/out")" != "$(printf 'pmm-iris-s1\tno priority')" ]; then
+elif [ "$(sed -n '2p' "$tmp/out")" != "$(printf 'pmm-iris-s1\tno priority\ttask\t')" ]; then
   fail "a bead with no id is dropped, one with no priority is not" "rows: $(cat "$tmp/out")"
 fi
 
