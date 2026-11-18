@@ -110,7 +110,14 @@ end
 -- what an empty listing prints.
 function M.parse_rows(text)
   local rows = {}
-  for raw in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+  -- The listing is hoisted into a local first: a gmatch called on a
+  -- concatenation whose left operand is itself a call --
+  -- `(tostring(x) .. "\n"):gmatch(..)` -- panics Rex's own Lua with
+  -- "invalid memory address or nil pointer dereference", which no pcall
+  -- catches. Hoisting is the fix; stock Lua never shows the difference,
+  -- so this is invisible to the test suite and visible only in Rex.
+  local listing = tostring(text or "") .. "\n"
+  for raw in listing:gmatch("([^\n]*)\n") do
     local line = raw:gsub("\r$", "")
     if line ~= "" then
       local fields = {}
@@ -321,7 +328,9 @@ end
 -- wrote it -- so a file left behind by an older install still reads, and every
 -- way the file can be wrong is "nothing remembered" rather than an error.
 function M.agent_from_state(text)
-  for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+  -- Hoisted for the same reason as M.parse_rows above.
+  local listing = tostring(text or "") .. "\n"
+  for line in listing:gmatch("([^\n]*)\n") do
     local name = line:match("^agent=(.*)$")
     if name ~= nil then
       return name
