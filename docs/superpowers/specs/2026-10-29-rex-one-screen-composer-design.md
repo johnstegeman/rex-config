@@ -1,7 +1,35 @@
 # rex-config: one screen for `ctrl+space>n`
 
+> **Superseded, 2026-11-18 — see the bead `rex-config-0js`.**
+>
+> This design was built and then reversed. Rex grew `rex.ui.input` and
+> `rex.ui.pick` (control API revision 18), which pause an action's run and ask
+> in the command palette, so `work_new` no longer has to return at once and hand
+> its answers back through `rex do work_new_go`. The float this document
+> describes — one fzf invocation, a header of live answers, keys that repaint it,
+> a gum field for the `✎` row — is gone, and the flow asks six questions in
+> sequence instead.
+>
+> The reversal is deliberate and its cost was accepted: the intent below was
+> "one screen instead of three questions in a row", and what replaced it is six
+> questions in a row, with the bead preview dropped (a `rex.ui` prompt has no
+> preview pane and no geometry — the width request is filed upstream as
+> "rex.ui geometry"). What the port buys is the whole float architecture: no
+> layer, no second terminal, no `--args` hand-back, no shell-quoted fzf
+> bindings, and a flow whose logic is unit-testable against a stubbed `rex.ui`.
+>
+> Read this document for the reasoning that produced the screen — the blank
+> answer, the `-` prompt guard, `GIT_TERMINAL_PROMPT=0`, the base cycle — most of
+> which survives in the wizard. Everything about fzf, gum and `work_new_go` here
+> is history.
+>
+> The decision is on the bead — `bd show rex-config-0js` — and the design of
+> record is its "ACCEPTED SPEC (user, 2026-11-18)" comment. This document keeps
+> its place as the reasoning that produced the screen: it is history, not a
+> description of what the plugin does now.
+
 **Date:** 2026-10-29
-**Status:** design, approved in conversation
+**Status:** superseded by rex-config-0js (2026-11-18)
 **Owner:** John Stegeman
 
 ## Intent

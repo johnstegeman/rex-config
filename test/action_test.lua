@@ -1,14 +1,23 @@
--- Tests for work_new_go: the session, the tab and the claim the picker's
--- hand-back asks for.
+-- Tests for work_new: the six questions it asks, and the session, tab and claim
+-- it makes once they are answered.
 --
 -- A stub `rex` global stands in for the app, as in setup_test.lua: rex.call
 -- answers from a table per method, rex.exec answers through the stub shell, and
 -- anything the module calls that a test has not stubbed raises rather than
--- answering plausibly. The shapes are the live ones: rex.call reports a failed
--- request by returning nil and a message, session.create and session.new_window
--- answer with the window they made, and rex.layout.block returns a layout node.
+-- answering plausibly. rex.ui is the same seam: a test scripts the answers it
+-- wants, in the order the flow asks for them, and every question is recorded so
+-- the prompt a person would have read can be asserted.
+--
+-- No test here reads or writes the developer's own agent memory: the flow is
+-- run with io taken away, which is the module's own "this host has no io" path,
+-- so the memory lives in the process and every case starts from what it put
+-- there.
 
 local here = (arg and arg[0] or ""):match("^(.*)/") or "."
+-- The stock `lua` here is 5.5, where unpack moved to the table library; the
+-- module itself is written for what Rex embeds (5.1), so the tests stay portable
+-- the same way.
+local unpack = table.unpack or unpack
 local fails = 0
 local count = 0
 
@@ -62,9 +71,7 @@ local function eq(name, got, want)
 end
 
 -- The guard on the guard: a map table whose value changed, and one that lost
--- its only key, each have to compare unequal. Without this the comparison
--- above could quietly go back to element lists and every map assertion in
--- this file would pass no matter what it was handed.
+-- its only key, each have to compare unequal, as in the other files.
 local function not_eq(name, got, want)
   count = count + 1
   if same(got, want) then
@@ -76,28 +83,6 @@ end
 not_eq("a map whose value changed does not compare equal",
   { type = "string" }, { type = "boolean" })
 not_eq("a map that lost its key does not compare equal", {}, { type = "boolean" })
-
--- The guard on eq() itself, not only on same(): the two proofs above pass
--- whichever comparison eq() uses, so re-inlining the old element-wise one into
--- eq() would leave every map assertion in this file passing no matter what it
--- was handed. A probe that has to fail proves the wiring. Its own FAIL line is
--- sent to /dev/null -- a green run should not print one -- and the totals are
--- put back, so the probe leaves no trace in them.
-do
-  local fails_before, count_before = fails, count
-  local saved_stderr, sink = io.stderr, io.open("/dev/null", "w")
-  if sink ~= nil then
-    io.stderr = sink
-  end
-  eq("the eq wiring probe", { type = "string" }, { type = "boolean" })
-  if sink ~= nil then
-    io.stderr = saved_stderr
-    sink:close()
-  end
-  local recorded = fails - fails_before
-  fails, count = fails_before, count_before
-  eq("eq records a map mismatch", recorded, 1)
-end
 
 -- For messages, where only the part that names the problem matters.
 local function contains(name, text, needle)
@@ -122,7 +107,9 @@ local function sorted_keys(table_)
 end
 
 -- The stub `rex` global. call_replies and exec_replies are keyed by the method
--- or command the module asks for; a reply may be a value or a function.
+-- or command the module asks for; exec_matches answers by a fragment of the
+-- command, which is how a test keys the one word it cares about instead of
+-- reproducing the argv the module builds.
 local function stub_rex()
   local stub = {
     actions = {},
@@ -131,6 +118,8 @@ local function stub_rex()
     queued = {},
     call_replies = {},
     exec_replies = {},
+    exec_matches = {},
+    questions = {},
     -- What happened, in order: a rex.call by method name, a rex.exec by the
     -- command it ran. Ordering is half of the safety of the flow, so it is
     -- asserted rather than assumed.
@@ -141,7 +130,7 @@ local function stub_rex()
 
   function stub.log(level, message) end
 
-  -- Anything this task's code does not call raises rather than answering: a stub
+  -- Anything this file's code does not call raises rather than answering: a stub
   -- that returned a plausible value would hide a future misuse instead of
   -- failing on it.
   local function unused(name)
@@ -164,16 +153,37 @@ local function stub_rex()
   end
 
   -- A login-shell probe is one argv away from the command itself, so the reply
-  -- is keyed by the command the way setup_test.lua does it.
-  function stub.exec(argv, opts)
-    stub.exec_calls[#stub.exec_calls + 1] = { argv = argv, cwd = opts and opts.cwd }
+  -- is keyed by the command the way setup_test.lua does it. A reply that is not
+  -- keyed exactly is looked up by fragment next, last registered first, so a
+  -- test overrides one reply of a project stub by registering it again.
+  local function reply_for(argv)
     local program = argv[1]
     if argv[2] == "-lc" then program = argv[3] end
+    return stub.exec_replies[program], program
+  end
+
+  function stub.exec(argv, opts)
+    stub.exec_calls[#stub.exec_calls + 1] = { argv = argv, cwd = opts and opts.cwd }
+    local reply, program = reply_for(argv)
+    if reply == nil then
+      local joined = table.concat(argv, " ")
+      for index = #stub.exec_matches, 1, -1 do
+        local match = stub.exec_matches[index]
+        if joined:find(match.needle, 1, true) ~= nil then
+          reply = match.reply
+          break
+        end
+      end
+    end
     stub.events[#stub.events + 1] = program
-    local reply = stub.exec_replies[program]
     if type(reply) == "function" then return reply(argv, opts) end
     if reply == nil then return nil, program .. ": executable file not found in PATH" end
     return reply
+  end
+
+  -- The answer to a rex.exec whose argv contains NEEDLE anywhere.
+  function stub.on_exec(needle, reply)
+    stub.exec_matches[#stub.exec_matches + 1] = { needle = needle, reply = reply }
   end
 
   function stub.client_queue(action, args)
@@ -188,6 +198,51 @@ local function stub_rex()
   stub.block = { call = unused("block.call") }
   stub.session = { new_layer = unused("session.new_layer"), close_layer = unused("session.close_layer") }
   stub.json = { decode = unused("json.decode"), encode = unused("json.encode") }
+  stub.ui = { pick = unused("ui.pick"), input = unused("ui.input") }
+
+  -- The answers a test scripts, one per question in the order the flow asks
+  -- them. An entry is the value to answer with, a function of the question, or
+  -- a table { value = ..., reason = ... } for a question nobody answers. Every
+  -- question is recorded as { kind, question }, so what the person was shown is
+  -- assertable, and one asked with nothing scripted for it fails by name.
+  function stub.ask(...)
+    local queue = { ... }
+    local asked = 0
+    local function next_answer(kind, question)
+      asked = asked + 1
+      stub.questions[#stub.questions + 1] = { kind = kind, question = question }
+      local answer = queue[asked]
+      if answer == nil then
+        error("action_test: question " .. asked .. " (" .. kind .. ", " .. tostring(question.title)
+          .. ") was asked with no scripted answer", 2)
+      end
+      if type(answer) == "function" then return answer(question) end
+      if type(answer) == "table" and (answer.value ~= nil or answer.reason ~= nil) then
+        return answer.value, answer.reason
+      end
+      return answer
+    end
+    stub.ui.pick = function(question) return next_answer("pick", question) end
+    stub.ui.input = function(question) return next_answer("input", question) end
+  end
+
+  -- The question with this title, which is how a test finds one of the six
+  -- without counting. last_question is the same for a test that runs the flow
+  -- more than once and cares what a later run opened on.
+  function stub.question(title)
+    for _, asked in ipairs(stub.questions) do
+      if asked.question.title == title then return asked.question, asked.kind end
+    end
+    return nil
+  end
+
+  function stub.last_question(title)
+    for index = #stub.questions, 1, -1 do
+      if stub.questions[index].question.title == title then return stub.questions[index].question end
+    end
+    return nil
+  end
+
   return stub
 end
 
@@ -201,22 +256,27 @@ local M = dofile(here .. "/../init.lua")
 M.setup{}
 
 -- The project every test uses: a worktrunk repository whose main worktree is
--- main/, with a beads database reachable from it.
+-- main/, with a beads database reachable from it. The key was pressed in a
+-- directory inside that worktree.
 local PROJECT = "pmm-iris"
 local ROOT = "/x/pmm-iris"
 local MAIN = "/x/pmm-iris/main"
+local CWD = "/x/pmm-iris/main/lib"
 local BRANCH = "bug/58h"
 local BEAD = "pmm-iris-58h"
 
--- What the picker hands back for a new branch on that bead.
-local function payload(overrides)
-  local args = {
-    project = PROJECT, root = ROOT, main = MAIN,
-    branch = BRANCH, bead = BEAD, title = "Diff the thing", create = true,
-  }
-  for key, value in pairs(overrides or {}) do args[key] = value end
-  return args
-end
+-- new-work.sh's rows, exactly as that script prints them.
+local BEAD_ROWS = "pmm-iris-58h\tPhase 3 follow-on\ttask\t1\n"
+  .. "pmm-iris-a4l\tTreat index pages as non-extractable\tbug\t2\n"
+local BASE_ROWS = "origin/main\torigin\n@\t\nmain\t\n"
+
+-- What the picker questions are called, so a test can find one by name.
+local BEAD_Q = "Bead for " .. PROJECT
+local BRANCH_Q = "Branch for the new worktree"
+local WORKTREE_Q = "Worktree name"
+local BASE_Q = "Base for the new branch"
+local AGENT_Q = "Agent for the new tab"
+local PROMPT_Q = "Prompt for the agent"
 
 -- The login shell is the module's SHELL, and the stub answers for it by that
 -- same path.
@@ -231,18 +291,35 @@ local function program(call)
   return call.argv[1]
 end
 
--- The recorded argv and cwd of NAME, or an empty table when it never ran, so an
--- absent call gives a named FAIL rather than a Lua error.
-local function exec_for(stub, name)
+-- The words of a command the module built. It quotes every word for the shell,
+-- so "… 'beads' '--main' '/x/main'" reads back as the list it started as. Only
+-- a word holding a single quote would need more than this, and no path, branch,
+-- id or agent name in these tests does.
+local function words(command)
+  local list = {}
+  for word in tostring(command):gmatch("'([^']*)'") do list[#list + 1] = word end
+  return list
+end
+
+-- The recorded argv and cwd of the call whose command contains NEEDLE, or an
+-- empty table when it never ran, so an absent call gives a named FAIL rather
+-- than a Lua error.
+local function exec_with(stub, needle)
   for _, call in ipairs(stub.exec_calls) do
-    if program(call) == name then return call end
+    if program(call):find(needle, 1, true) ~= nil then return call end
   end
   return {}
 end
 
--- The one recorded rex.call for a method, and how many there were. The request
--- is empty rather than nil for the same reason: a missing call has to read as a
--- failed assertion, not as a crash.
+-- Whether a command ran at all, for the assertions that are about it not
+-- running.
+local function ran(stub, needle)
+  return exec_with(stub, needle).argv ~= nil
+end
+
+-- The one recorded rex.call for a method. The request is empty rather than nil
+-- for the same reason: a missing call has to read as a failed assertion, not as
+-- a crash.
 local function call_for(stub, method)
   for _, call in ipairs(stub.calls) do
     if call.method == method then return call end
@@ -262,36 +339,560 @@ local function calls_to(stub, method)
   return found
 end
 
--- A stub for a project with no tab for the branch yet: the session does not
--- exist, so it is created, then the tab is made.
-local function new_branch_stub()
+-- The flow is run with io taken away: the agent memory is a file in whoever runs
+-- the tests' own state directory, and a test may neither read nor write it. No
+-- io is the module's own path for a host without it -- the memory then lives in
+-- the process -- so what a case sees is what it put there.
+local function in_memory(fn, ...)
+  local saved = io
+  io = nil
+  local ok, result, extra = pcall(fn, ...)
+  io = saved
+  if not ok then error(result, 0) end
+  return result, extra
+end
+
+-- A stub for the whole flow: the project resolves, bd has a database, the
+-- script prints its rows, and a new branch on BEAD gets its tab. A test that
+-- wants one step to fail overrides that one reply and nothing else.
+local function project_stub(overrides)
   local stub = fresh_rex()
+  overrides = overrides or {}
+
+  stub.block = {
+    call = function(creator, method, request)
+      if overrides.no_cwd then return nil, "no terminal here" end
+      return { foreground = { name = "pi", cwd = CWD } }
+    end,
+  }
+
+  -- Project resolution: git names the repository, worktrunk names the main
+  -- worktree.
+  stub.json = {
+    decode = function(text)
+      if text == overrides.wt_json_in then
+        return overrides.wt_json
+      end
+      return { items = { { worktree = { path = MAIN, main = true } } } }
+    end,
+    encode = function() error("action_test: rex.json.encode was called, but no test stubs it", 2) end,
+  }
+  stub.on_exec("rev-parse --path-format=absolute",
+    { ok = true, code = 0, stdout = ROOT .. "/.git\n", stderr = "" })
+  stub.on_exec("wt list --format=json", { ok = true, code = 0, stdout = "wt list", stderr = "" })
+  -- A database is there: bd answers.
+  stub.on_exec("bd ready --json", { ok = true, code = 0, stdout = "[]", stderr = "" })
+  -- The script's three listing verbs.
+  stub.on_exec("'beads'", { ok = true, code = 0, stdout = overrides.beads or BEAD_ROWS, stderr = "" })
+  stub.on_exec("'bases'", { ok = true, code = 0, stdout = overrides.bases or BASE_ROWS, stderr = "" })
+  stub.on_exec("'branch-default'",
+    { ok = true, code = 0, stdout = overrides.branch_default or (BRANCH .. "\n"), stderr = "" })
+  -- git is the judge of the branch name, and wt says it knows --path.
+  stub.on_exec("check-ref-format", function(argv)
+    if overrides.branch_check ~= nil then return overrides.branch_check end
+    return { ok = true, code = 0, stdout = argv[4] .. "\n", stderr = "" }
+  end)
+  stub.on_exec("wt switch --help", { ok = true, code = 0, stdout = "Options:\n  --path <PATH>\n", stderr = "" })
+  -- The claim, and the tab it makes.
+  stub.on_exec("bd update " .. BEAD .. " --claim", { ok = true, code = 0, stdout = "", stderr = "" })
+
   stub.call_replies["session.list"] = { sessions = { { session_id = "session:rex", label = "rex-config" } } }
   stub.call_replies["session.create"] = {
     session_id = "session:iris",
     initial_windows = { { window_id = "window:main", block_ids = { "block:main" }, revision = 1 } },
   }
-  -- The attach reply carries the session's view, which is where the existing
-  -- tabs come from.
   stub.call_replies["session.attach"] = {
     client_id = "client:app",
-    view = {
-      session_id = "session:iris",
-      windows = { { window_id = "window:main", label = "main" } },
-    },
+    view = { session_id = "session:iris", windows = { { window_id = "window:main", label = "main" } } },
   }
   stub.call_replies["session.new_window"] = {
     window_id = "window:tab", block_ids = { "block:tab" }, revision = 2,
   }
   stub.call_replies["client.list"] = { clients = { { client_id = "client:app" } } }
   stub.call_replies["client.perform"] = { performed_by = "client:app" }
-  stub.exec_replies["bd update " .. BEAD .. " --claim"] = { ok = true, code = 0, stdout = "", stderr = "" }
   return stub
 end
 
--- The same project, but the tab for the branch is already there.
-local function existing_tab_stub()
-  local stub = new_branch_stub()
+-- A key press: the app is running the action, so the selection is queued.
+local function ctx()
+  return { origin = "key", session_id = "session:rex", block_id = "block:1" }
+end
+
+-- The six answers the flow wants for a new branch on BEAD, in the order it asks
+-- them, so a test overrides only the one it is about.
+local function answers(overrides)
+  local scripted = {
+    BEAD,                                   -- a. the bead
+    BRANCH,                                 -- b. the branch
+    "bug-58h",                              -- c. the worktree
+    "origin/main",                          -- d. the base
+    "pi",                                   -- e. the agent
+    "/brainstorming for bead " .. BEAD,      -- f. the prompt
+  }
+  for index, value in pairs(overrides or {}) do scripted[index] = value end
+  return scripted
+end
+
+-- Script a run's answers, or several runs' in order: one table of six per run.
+-- They are flattened here rather than by `{ answers(), answers() }`, because a
+-- table constructor keeps only the first value of every call but the last.
+local function script(stub, ...)
+  local flat = {}
+  for _, run in ipairs({ ... }) do
+    for index = 1, #run do flat[#flat + 1] = run[index] end
+  end
+  stub.ask(unpack(flat, 1, #flat))
+end
+
+-- session_for() and find_tab() -------------------------------------------------
+
+eq("session_for finds the project's session",
+  M.session_for({ { label = PROJECT, session_id = "s1" } }, PROJECT), "s1")
+eq("session_for ignores a session whose label only starts the same way",
+  M.session_for({ { label = PROJECT .. "-2", session_id = "s2" } }, PROJECT), nil)
+eq("find_tab finds the branch's tab",
+  M.find_tab({ { label = BRANCH, window_id = "w1" } }, BRANCH), "w1")
+eq("find_tab needs the whole label",
+  M.find_tab({ { label = BRANCH, window_id = "w1" } }, "bug/58"), nil)
+
+-- The front door ---------------------------------------------------------------
+
+-- Every reason the flow cannot start is refused before a question is asked: a
+-- prompt for something that would only fail later is a prompt nobody should
+-- have seen.
+do
+  local stub = project_stub{ no_cwd = true }
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a terminal with no directory fails", ok, false)
+  contains("a terminal with no directory is named", message, "cannot tell which directory")
+  eq("a terminal with no directory asks nothing", #stub.questions, 0)
+end
+
+do
+  local stub = project_stub()
+  stub.on_exec("rev-parse --path-format=absolute",
+    { ok = false, code = 128, stdout = "", stderr = "fatal: not a git repository\n" })
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a directory outside a repository fails", ok, false)
+  eq("a directory outside a repository is named", message, "not a git repository: " .. CWD)
+  eq("a directory outside a repository asks nothing", #stub.questions, 0)
+end
+
+do
+  local stub = project_stub()
+  stub.on_exec("bd ready --json",
+    { ok = false, code = 1, stdout = "", stderr = "Error: no beads database found\n" })
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a project without beads fails", ok, false)
+  contains("a project without beads says beads is required", message, "beads is required")
+  eq("a project without beads asks nothing", #stub.questions, 0)
+end
+
+do
+  local stub = project_stub()
+  stub.on_exec("bd ready --json",
+    { ok = false, code = 1, stdout = "", stderr = "mise ERROR bd is not a valid shim.\n" })
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a bd that cannot be asked fails", ok, false)
+  contains("a bd that cannot be asked is not called a missing database", message,
+    "bd failed in " .. MAIN .. ": mise ERROR bd is not a valid shim.")
+  eq("a bd that cannot be asked asks nothing", #stub.questions, 0)
+end
+
+do
+  local stub = project_stub()
+  stub.ui = nil
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a Rex build without rex.ui fails", ok, false)
+  contains("a Rex build without rex.ui says so", message, "cannot ask anything")
+  eq("a Rex build without rex.ui makes nothing", #stub.calls, 0)
+end
+
+-- Nobody answered ---------------------------------------------------------------
+
+-- A cancelled question is the person saying no: the action returns nothing and
+-- says nothing, and nothing is made. It is asked at each of the six in turn, so
+-- a cancel at any point in the flow ends it the same way.
+do
+  local titles = { BEAD_Q, BRANCH_Q, WORKTREE_Q, BASE_Q, AGENT_Q, PROMPT_Q }
+  local cancel = { value = nil, reason = "cancelled" }
+  for index = 1, 6 do
+    local scripted = answers()
+    scripted[index] = cancel
+    local stub = project_stub()
+    stub.ask(unpack(scripted, 1, index))
+    local ok, result = pcall(in_memory, M.work_new, ctx(), {})
+    eq("a cancel at question " .. index .. " succeeds quietly", ok, true)
+    eq("a cancel at question " .. index .. " returns nothing", result, nil)
+    eq("a cancel at question " .. index .. " was the one asked last",
+      #stub.questions, index)
+    eq("a cancel at question " .. index .. " is the " .. titles[index] .. " question",
+      stub.questions[index].question.title, titles[index])
+    eq("a cancel at question " .. index .. " makes no session", #calls_to(stub, "session.create"), 0)
+    eq("a cancel at question " .. index .. " claims nothing", ran(stub, "bd update"), false)
+    eq("a cancel at question " .. index .. " makes no tab", #calls_to(stub, "session.new_window"), 0)
+  end
+end
+
+-- Any other reason is a refusal that names the question: a bare "timeout" says
+-- nothing about what went unanswered.
+do
+  for _, reason in ipairs({ "timeout", "busy", "no_client", "unsupported", "failed" }) do
+    local refused = { value = nil, reason = reason }
+    local stub = project_stub()
+    stub.ask(refused)
+    local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+    eq("a " .. reason .. " answer fails", ok, false)
+    contains("a " .. reason .. " answer names the question", message, "the bead question could not be answered")
+    contains("a " .. reason .. " answer names the reason", message, reason)
+    eq("a " .. reason .. " answer makes nothing", #stub.calls, 0)
+  end
+end
+
+-- The bead ---------------------------------------------------------------------
+
+do
+  local stub = project_stub()
+  script(stub, answers())
+  local ok, result = pcall(in_memory, M.work_new, ctx(), {})
+
+  eq("a bead run succeeds", ok, true)
+  eq("a bead run reports the tab it made", field(result, "window_id"), "window:tab")
+  eq("a bead run reports that it created the tab", field(result, "created"), true)
+
+  -- The six questions, in order, and what each one showed.
+  eq("six questions were asked", #stub.questions, 6)
+  eq("the questions are the six the flow has, in order", {
+    stub.questions[1].question.title, stub.questions[2].question.title,
+    stub.questions[3].question.title, stub.questions[4].question.title,
+    stub.questions[5].question.title, stub.questions[6].question.title,
+  }, { BEAD_Q, BRANCH_Q, WORKTREE_Q, BASE_Q, AGENT_Q, PROMPT_Q })
+  eq("the bead question is a pick", stub.questions[1].kind, "pick")
+  eq("the branch question is typed", stub.questions[2].kind, "input")
+
+  local bead_items = stub.questions[1].question.items
+  eq("the ready beads are the rows the script printed, then no bead", #bead_items, 3)
+  eq("a bead row is its title", bead_items[1].title, "Phase 3 follow-on")
+  eq("a bead row says its id and type", bead_items[1].subtitle, "pmm-iris-58h · task")
+  eq("a bead row says its priority", bead_items[1].detail, "P1")
+  eq("the last row is the no-bead answer", bead_items[3].id, M.NO_BEAD)
+
+  eq("the branch question opens on the name the bead derives",
+    stub.questions[2].question.value, BRANCH)
+  eq("the branch question says what it starts from",
+    stub.questions[2].question.placeholder, "starts from origin/main")
+  eq("the worktree question opens on the branch's directory name",
+    stub.questions[3].question.value, "bug-58h")
+  eq("the base question opens on the script's first row",
+    stub.questions[4].question.items[1].id, "origin/main")
+  eq("the agent question offers the configured agent, then none",
+    { stub.questions[5].question.items[1].id, stub.questions[5].question.items[2].id },
+    { "pi", M.NO_AGENT })
+  eq("the prompt question opens on the bead's template",
+    stub.questions[6].question.value, "/brainstorming for bead " .. BEAD)
+
+  -- The claim, and the tab it is claimed for. The claim comes first: an agent
+  -- never starts on a bead that is not its own.
+  eq("the bead is claimed from the main worktree",
+    exec_with(stub, "bd update " .. BEAD .. " --claim").cwd, MAIN)
+  eq("the bead is claimed",
+    program(exec_with(stub, "bd update " .. BEAD .. " --claim")),
+    "bd update " .. BEAD .. " --claim")
+  do
+    local claim_at, tab_at
+    for i, event in ipairs(stub.events) do
+      if event == "bd update " .. BEAD .. " --claim" then claim_at = i end
+      if event == "session.new_window" then tab_at = i end
+    end
+    eq("the bead is claimed before the tab is made",
+      claim_at ~= nil and tab_at ~= nil and claim_at < tab_at, true)
+  end
+
+  -- The rows the script printed came from the main worktree, through the login
+  -- shell whose PATH knows bd and jq.
+  do
+    local listing = exec_with(stub, "'beads'")
+    eq("the ready beads are listed by the script", words(listing.argv[3]),
+      { M.options.script, "beads", "--main", MAIN })
+    eq("the beads are listed in the main worktree", listing.cwd, MAIN)
+    eq("the bases are read from the script", words(exec_with(stub, "'bases'").argv[3]),
+      { M.options.script, "bases", "--main", MAIN })
+    eq("the branch name the bead derives comes from the script",
+      words(exec_with(stub, "'branch-default'").argv[3]),
+      { M.options.script, "branch-default", "--type", "task", "--id", BEAD })
+  end
+
+  -- The tab: one window, in the project's session, labelled with the branch, in
+  -- the main worktree, running the wrapper with the answers as parameters.
+  do
+    local request = request_of(stub, "session.new_window")
+    local options = request.layout.block.options
+    eq("the tab is made in the project's session", request.session_id, "session:iris")
+    eq("the tab is labelled with the branch", request.window_label, BRANCH)
+    eq("the tab starts in the main worktree", options.cwd, MAIN)
+    eq("the tab runs the wrapper",
+      options.command, M.new_tab_argv(PROJECT, {
+        branch = BRANCH, bead = BEAD, title = "Phase 3 follow-on",
+        worktree = "bug-58h", base = "origin/main", base_remote = "origin",
+        agent = "pi", prompt = "/brainstorming for bead " .. BEAD,
+      }))
+    eq("the wrapper is given the branch", options.command[5], BRANCH)
+    eq("the wrapper is given the base", options.command[6], "origin/main")
+    eq("the wrapper is given the remote to fetch", options.command[7], "origin")
+    eq("the wrapper is given the worktree name", options.command[8], "../bug-58h")
+    local exit = options.exit
+    eq("the tab is not kept open after the agent exits",
+      exit == nil or exit.on_completion ~= false, true)
+  end
+
+  eq("the session is created from the project's name", request_of(stub, "session.create").label, PROJECT)
+  eq("the session is attached to", request_of(stub, "session.attach").session_id, "session:iris")
+  eq("a key press queues the selection",
+    stub.queued[1] and stub.queued[1].action, "session.select")
+  eq("a key press asks no client directly", #calls_to(stub, "client.perform"), 0)
+end
+
+-- The no-bead row ---------------------------------------------------------------
+
+do
+  local stub = project_stub()
+  script(stub, { M.NO_BEAD, "feat/x", "", "origin/main", "pi", "/brainstorming" })
+  local ok, result = pcall(in_memory, M.work_new, ctx(), {})
+
+  eq("the no-bead row starts the work", ok, true)
+  eq("the no-bead row makes a tab", field(result, "created"), true)
+  eq("the no-bead row claims nothing", ran(stub, "bd update"), false)
+  eq("the no-bead row sends the no-bead prompt",
+    request_of(stub, "session.new_window").layout.block.options.command[10], "/brainstorming")
+end
+
+-- An empty ready list still opens, with the no-bead row, and says why in the
+-- title: the pick cannot say it any other way.
+do
+  local stub = project_stub{ beads = "" }
+  script(stub, { M.NO_BEAD, "feat/x", "", "origin/main", "pi", "" })
+  local ok = pcall(in_memory, M.work_new, ctx(), {})
+  eq("an empty ready list still starts the work", ok, true)
+  eq("an empty ready list opens on the no-bead row alone",
+    #stub.questions[1].question.items, 1)
+  eq("an empty ready list says so in the title",
+    stub.questions[1].question.title, "no ready beads in " .. PROJECT)
+end
+
+-- The branch ---------------------------------------------------------------------
+
+-- With no bead there is no name to derive, so the question opens on a made-up
+-- one -- a name, not a number, and still one git accepts. Accepting what it was
+-- opened on is a bare Return, which is what answer() here does.
+do
+  local stub = project_stub()
+  script(stub, { M.NO_BEAD, function(question) return question.value end, "", "origin/main", "pi", "" })
+  local ok = pcall(in_memory, M.work_new, ctx(), {})
+  local opened = stub.question(BRANCH_Q).value
+  eq("a flow with no bead starts the work", ok, true)
+  eq("a flow with no bead opens the branch question on a random name",
+    opened:match("^feat/[a-z]+%-[a-z]+$") ~= nil, true)
+  eq("the random name travels as the branch",
+    request_of(stub, "session.new_window").layout.block.options.command[5], opened)
+  eq("no branch-default is asked for a flow with no bead",
+    ran(stub, "'branch-default'"), false)
+end
+
+-- A name git will not take is refused with git's own reason, rather than being
+-- handed to worktrunk in the tab.
+do
+  local stub = project_stub()
+  stub.on_exec("check-ref-format",
+    { ok = false, code = 128, stdout = "", stderr = "fatal: 'bad name' is not a valid branch name\n" })
+  stub.ask(BEAD, "bad name")
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a branch name git refuses fails", ok, false)
+  contains("a branch name git refuses is named", message, "not a branch name: bad name")
+  contains("a branch name git refuses says what git said", message, "is not a valid branch name")
+  eq("a branch name git refuses claims nothing", ran(stub, "bd update"), false)
+  eq("a branch name git refuses makes no tab", #calls_to(stub, "session.new_window"), 0)
+end
+
+-- git *expands* a name like @{-1} and prints what it resolved to, so the reply
+-- has to be the name that went in.
+do
+  local stub = project_stub()
+  stub.on_exec("check-ref-format", { ok = true, code = 0, stdout = "feat/other\n", stderr = "" })
+  stub.ask(BEAD, "@{-1}")
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a name git only expands fails", ok, false)
+  contains("a name git only expands is refused", message, "not a branch name: @{-1}")
+end
+
+-- The worktree -------------------------------------------------------------------
+
+-- Blank is worktrunk's own worktree-path template: no --path word at all.
+do
+  local stub = project_stub()
+  script(stub, answers{ [3] = "" })
+  local ok = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a blank worktree name still starts the work", ok, true)
+  eq("a blank worktree name sends no --path word",
+    request_of(stub, "session.new_window").layout.block.options.command[8], "")
+  eq("a blank worktree name asks wt nothing about --path",
+    ran(stub, "wt switch --help"), false)
+end
+
+do
+  local stub = project_stub()
+  script(stub, answers())
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("a worktree name sends its sibling directory",
+    request_of(stub, "session.new_window").layout.block.options.command[8], "../bug-58h")
+  eq("a worktree name is checked against this wt",
+    program(exec_with(stub, "wt switch --help")), "wt switch --help")
+end
+
+do
+  local stub = project_stub()
+  script(stub, answers{ [3] = "a/b" })
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a worktree path is refused", ok, false)
+  contains("a worktree path is refused by name", message, "not a path: a/b")
+  eq("a worktree path claims nothing", ran(stub, "bd update"), false)
+end
+
+-- --path is experimental in worktrunk 0.82: a wt without it would ignore the
+-- name, so the name is refused with a message instead.
+do
+  local stub = project_stub()
+  stub.on_exec("check-ref-format", function(argv)
+    return { ok = true, code = 0, stdout = argv[4] .. "\n", stderr = "" }
+  end)
+  stub.on_exec("wt switch --help", { ok = true, code = 0, stdout = "Options:\n  --create\n", stderr = "" })
+  script(stub, answers())
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a wt without --path fails", ok, false)
+  contains("a wt without --path says so", message, "no --path")
+  contains("a wt without --path says what has it", message, "0.82")
+  eq("a wt without --path claims nothing", ran(stub, "bd update"), false)
+end
+
+-- The base ------------------------------------------------------------------------
+
+-- The base question is asked whenever it was not answered -- create-only means
+-- every branch needs one -- and the answer travels with the remote it lives on.
+do
+  local stub = project_stub()
+  script(stub, answers{ [4] = "@" })
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("the base question is asked", type(stub.question(BASE_Q)), "table")
+  eq("a base answer travels as the base",
+    request_of(stub, "session.new_window").layout.block.options.command[6], "@")
+  eq("a local base carries no remote",
+    request_of(stub, "session.new_window").layout.block.options.command[7], "")
+end
+
+-- An empty ref is worktrunk's own choice, and travels as false so a configured
+-- base cannot speak in its place.
+do
+  local saved = M.options.base
+  M.options.base = "main"
+  local stub = project_stub{ bases = "\torigin\n@" .. "\t\n" }
+  script(stub, answers{ [4] = M.WT_DEFAULT })
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("the worktrunk-default row sends no --base word",
+    request_of(stub, "session.new_window").layout.block.options.command[6], "")
+  eq("the worktrunk-default row says what it is",
+    stub.question(BASE_Q).items[1].title, "worktrunk's default")
+  M.options.base = saved
+end
+
+-- The agent --------------------------------------------------------------------
+
+do
+  local stub = project_stub()
+  script(stub, answers{ [5] = M.NO_AGENT })
+  pcall(in_memory, M.work_new, ctx(), {})
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("the none row starts no agent", command[9], "")
+  eq("the none row still carries the prompt", command[#command],
+    "/brainstorming for bead " .. BEAD)
+  eq("the configured agent is left alone", M.options.agent, "pi")
+end
+
+do
+  local stub = project_stub()
+  script(stub, answers{ [5] = "claude" })
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("the agent the pick chose is the one the tab starts",
+    request_of(stub, "session.new_window").layout.block.options.command[9], "claude")
+end
+
+-- The remembered agent arrives as the question's filter, which is the only way
+-- a single-choice pick can open on an answer: the list narrows to that row and a
+-- bare Return takes it.
+do
+  local agents = M.options.agents
+  M.setup{ agents = { "pi", "claude" } }
+  local stub = project_stub()
+  script(stub, answers{ [5] = "claude" }, answers{ [5] = M.NO_AGENT }, answers())
+  pcall(in_memory, M.work_new, ctx(), {})
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("the agent the last launch chose is what the next question opens filtered on",
+    stub.last_question(AGENT_Q).value, "claude")
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("the remembered none opens on the row named for it",
+    stub.last_question(AGENT_Q).value, "(none)")
+  M.options.agents = agents
+end
+
+-- The prompt -------------------------------------------------------------------
+
+-- A cleared field is an answer: the agent starts and is told nothing. The
+-- template's text must not be put back in its place on the way to the tab.
+do
+  local stub = project_stub()
+  script(stub, answers{ [6] = "" })
+  pcall(in_memory, M.work_new, ctx(), {})
+  local command = request_of(stub, "session.new_window").layout.block.options.command
+  eq("a cleared prompt sends no prompt word", #command, 9)
+  eq("a cleared prompt leaves the agent last", command[#command], "pi")
+end
+
+do
+  local stub = project_stub()
+  script(stub, answers{ [6] = "why is the guard flaky?" })
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("a typed prompt is the prompt",
+    request_of(stub, "session.new_window").layout.block.options.command[10],
+    "why is the guard flaky?")
+end
+
+-- A bead-less flow opens the prompt question empty, because the configured
+-- no-bead prompt now says nothing.
+do
+  local stub = project_stub()
+  script(stub, { M.NO_BEAD, "feat/x", "", "origin/main", "pi", "" })
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("a bead-less flow opens the prompt question empty",
+    stub.question(PROMPT_Q).value, "")
+end
+
+-- The rest of the flow --------------------------------------------------------
+
+-- Nothing requires the answers to come from the questions: a hand-run
+-- `rex do work_new bead=<id> branch=<name>` asks only for what it was not given.
+do
+  local stub = project_stub()
+  script(stub, answers())
+  local ok, result = pcall(in_memory, M.work_new, ctx(),
+    { bead = BEAD, branch = BRANCH, worktree = "", base = "origin/main", base_remote = "origin",
+      agent = "pi", prompt = "/brainstorming for bead " .. BEAD })
+  eq("an answer given as an argument is not asked for", ok, true)
+  eq("only the ungiven questions are asked", #stub.questions, 0)
+  eq("a fully answered run makes the tab", field(result, "created"), true)
+end
+
+-- A second press for the same branch finds its tab: one tab, one worktree and
+-- one claim, whatever the questions were answered with.
+do
+  local stub = project_stub()
   stub.call_replies["session.list"] = { sessions = { { session_id = "session:iris", label = PROJECT } } }
   stub.call_replies["session.attach"] = {
     client_id = "client:app",
@@ -303,561 +904,160 @@ local function existing_tab_stub()
       },
     },
   }
-  return stub
-end
-
--- session_for() ---------------------------------------------------------------
-
-eq("session_for finds the project's session",
-  M.session_for({ { label = PROJECT, session_id = "s1" } }, PROJECT), "s1")
-eq("session_for ignores a session whose label only starts the same way",
-  M.session_for({ { label = PROJECT .. "-2", session_id = "s2" } }, PROJECT), nil)
-eq("session_for takes the exact label among many", M.session_for({
-  { label = "rex-config", session_id = "s0" },
-  { label = PROJECT, session_id = "s1" },
-  { label = PROJECT .. "-2", session_id = "s2" },
-}, PROJECT), "s1")
-eq("session_for with no sessions", M.session_for(nil, PROJECT), nil)
-
--- find_tab() ------------------------------------------------------------------
-
-eq("find_tab finds the branch's tab",
-  M.find_tab({ { label = BRANCH, window_id = "w1" } }, BRANCH), "w1")
-eq("find_tab needs the whole label",
-  M.find_tab({ { label = BRANCH, window_id = "w1" } }, "bug/58"), nil)
-eq("find_tab takes the branch's tab among the others", M.find_tab({
-  { label = "main", window_id = "w0" },
-  { label = BRANCH, window_id = "w1" },
-}, BRANCH), "w1")
-eq("find_tab with no windows", M.find_tab(nil, BRANCH), nil)
-
--- new_tab_argv() --------------------------------------------------------------
-
--- The tab does not run one program any more: it runs a POSIX sh wrapper that
--- switches the worktree, starts the agent in it, and leaves a login shell
--- behind when the agent exits. Everything the flow knows travels as a
--- positional parameter --
---
---   sh -c SCRIPT sh <create 0|1> <branch> <base> <remote> <agent> <agent args…>
---
--- because that is the only way a branch, a prompt or an agent name can reach
--- the wrapper without any shell parsing it as text. These assertions pin the
--- shape element by element.
-
--- The program the wrapper's sh is handed, as the module builds it: the one
--- string an interpolating implementation would have rewritten with the answer.
-local WRAPPER = M.new_tab_argv(PROJECT, { branch = BRANCH, create = false })[3]
-eq("the wrapper program is text", type(WRAPPER), "string")
-
--- sh -c takes the program, then the *next* word as $0: naming it "sh" is what
--- keeps $1 the create flag rather than the program's own name.
-eq("sh is told what $0 is", M.new_tab_argv(PROJECT, { branch = BRANCH })[4], "sh")
-
-eq("new_tab_argv for an existing worktree",
-  M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "", "pi", "/brainstorming for bead " .. BEAD })
-
--- A create with no base answered and none configured: the picker resolves the
--- default itself, so the wrapper is told nothing and adds no --base.
-eq("new_tab_argv for a new branch",
-  M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD, title = "Diff" }),
-  { "sh", "-c", WRAPPER, "sh", "1", BRANCH, "", "", "pi", "/brainstorming for bead " .. BEAD })
-
-eq("new_tab_argv without a bead asks for plain brainstorming",
-  M.new_tab_argv(PROJECT, { branch = "x", create = true, bead = "" }),
-  { "sh", "-c", WRAPPER, "sh", "1", "x", "", "", "pi", "/brainstorming" })
-
--- A missing bead and an empty one are the same answer: no bead.
-eq("new_tab_argv with no bead field at all",
-  M.new_tab_argv(PROJECT, { branch = "x", create = false }),
-  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "pi", "/brainstorming" })
-
--- A hand-back always says whether to create, but leaving the field out must not
--- read as "create": that would add a worktree nobody asked for.
-eq("new_tab_argv with no create field switches, creating nothing",
-  M.new_tab_argv(PROJECT, { branch = "x", bead = "" }),
-  { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "pi", "/brainstorming" })
-
--- base = false is the picker's "let worktrunk choose": an empty base parameter,
--- which is the wrapper's "no --base at all" -- and no remote to fetch.
-do
-  local base = M.options.base
-  M.options.base = false
-  eq("no base parameter when the option says so",
-    M.new_tab_argv(PROJECT, { branch = "x", create = true })[7], "")
-  eq("no remote parameter when the option says so",
-    M.new_tab_argv(PROJECT, { branch = "x", create = true })[8], "")
-  M.options.base = base
-end
-
--- The answer is data, never program text: a prompt with spaces, quotes and a
--- newline, and a branch with a slash, each arrive as one argument, and none of
--- it appears in the script the shell parses. A bead title can carry a newline,
--- and a newline is the one character that would split a value into two
--- commands if it were pasted into a program.
-do
-  local bead_prompt, agent_args = M.options.bead_prompt, M.options.agent_args
-  M.options.bead_prompt = 'work on {branch}: "don\'t" $(id)\nsecond line; {id}'
-  M.options.agent_args = { "--thinking", "high" }
-  local prompt = 'work on bug/58h: "don\'t" $(id)\nsecond line; ' .. BEAD
-  local argv = M.new_tab_argv(PROJECT, { branch = BRANCH, create = true, bead = BEAD })
-  eq("the branch is one argument", argv[6], BRANCH)
-  eq("the agent's arguments and the prompt are arguments too",
-    { argv[9], argv[10], argv[11], argv[12] }, { "pi", "--thinking", "high", prompt })
-  eq("the prompt keeps its newline", argv[12]:match("\n(.*)$"), "second line; " .. BEAD)
-  eq("the number of arguments is the number of values", #argv, 12)
-  eq("the branch is not pasted into the program text", argv[3]:find(BRANCH, 1, true), nil)
-  eq("the prompt is not pasted into the program text", argv[3]:find(prompt, 1, true), nil)
-  eq("the prompt's second line is not in the program text",
-    argv[3]:find("second line", 1, true), nil)
-  M.options.bead_prompt, M.options.agent_args = bead_prompt, agent_args
-end
-
--- The configured placeholders all arrive: the prompt is the plugin's, not one
--- baked into this file.
-do
-  local bead_prompt, agent = M.options.bead_prompt, M.options.agent
-  M.options.bead_prompt = "work on {project}/{branch} for {id}: {title}"
-  M.options.agent = "claude"
-  eq("new_tab_argv renders the configured prompt",
-    M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff" }),
-    { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "", "claude",
-      "work on pmm-iris/bug/58h for " .. BEAD .. ": Diff" })
-  M.options.bead_prompt, M.options.agent = bead_prompt, agent
-end
-
--- Without a branch or an agent there is nothing to start, and a tab that ran
--- something arbitrary would be worse than a refusal. A *configured* agent has to
--- be a program; only the picker's answer may be "none".
-eq("a tab needs a branch", pcall(M.new_tab_argv, PROJECT, {}), false)
-do
-  local agent = M.options.agent
-  M.options.agent = ""
-  eq("a tab needs an agent", pcall(M.new_tab_argv, PROJECT, { branch = "x" }), false)
-  M.options.agent = agent
-end
-
--- The picker's two other answers. The agent it names is the one this tab starts
--- -- it is an answer about one tab, so it overrides the configured default per
--- tab rather than changing it -- and the prompt typed there is what the agent is
--- asked, in place of either template.
-eq("new_tab_argv starts the agent the picker chose",
-  M.new_tab_argv(PROJECT, { branch = BRANCH, create = false, bead = BEAD, title = "Diff", agent = "claude" }),
-  { "sh", "-c", WRAPPER, "sh", "0", BRANCH, "", "", "claude", "/brainstorming for bead " .. BEAD })
-
-eq("new_tab_argv sends the prompt the picker was given",
-  M.new_tab_argv(PROJECT, { branch = "x", create = true, prompt = "why is the guard flaky?" }),
-  { "sh", "-c", WRAPPER, "sh", "1", "x", "", "", "pi", "why is the guard flaky?" })
-
-eq("a typed prompt wins over the bead's",
-  M.new_tab_argv(PROJECT, { branch = "x", bead = BEAD, title = "Diff", prompt = "just look" })[10],
-  "just look")
-
--- "none" is an empty agent parameter, and an empty parameter is what keeps the
--- wrapper from exec'ing nothing. With no agent there is nobody to be prompted,
--- so a prompt the user did not type themselves is not sent at all -- the
--- templates are for an agent that is about to start -- and the one they did type
--- is, because the wrapper prints it above the shell it leaves. The agent's own
--- arguments stop with the agent: there is no program left to give them to.
-do
-  local agent_args = M.options.agent_args
-  M.options.agent_args = { "--thinking", "high" }
-  eq("new_tab_argv with no agent",
-    M.new_tab_argv(PROJECT, { branch = "x", agent = "" }),
-    { "sh", "-c", WRAPPER, "sh", "0", "x", "", "", "", "" })
-  eq("new_tab_argv with no agent keeps a prompt that was typed",
-    M.new_tab_argv(PROJECT, { branch = "x", agent = "", prompt = "look first" })[10],
-    "look first")
-  M.options.agent_args = agent_args
-end
-
--- work_new_go(): the whole flow ----------------------------------------------
-
--- The hand-back from the picker arrives from `rex do`, whose origin is not a
--- key: the app clients are asked to show the session directly.
-local stub = new_branch_stub()
-local ok, result = pcall(M.work_new_go, { origin = "cli", session_id = "session:rex" }, payload())
-
-eq("work_new_go succeeds", ok, true)
-eq("work_new_go reports the tab it made", field(result, "window_id"), "window:tab")
-eq("work_new_go reports that it created the tab", field(result, "created"), true)
-
--- The session: looked up by label, made when it is not there, and attached to so
--- that the session's own methods answer this connection.
-eq("the sessions are listed", #calls_to(stub, "session.list"), 1)
-eq("the session is created from the hand-back's project name",
-  request_of(stub, "session.create").label, PROJECT)
-do
-  local window = request_of(stub, "session.create").initial_windows[1]
-  eq("the new session opens with a main tab", window.window_label, "main")
-  eq("the main tab starts in the main worktree", window.layout.block.options.cwd, MAIN)
-  eq("the main tab is a shell", window.layout.block.flavor, "com.superlogical.terminal.shell")
-end
-eq("the session is attached to", request_of(stub, "session.attach").session_id, "session:iris")
--- The tabs come from that reply, not from a second session.view call: an
--- unstubbed rex.call raises, so the attach assertion above is what proves it
--- -- a view request here would abort this file, not assert.
-
--- The bead is claimed from the main worktree, through the login shell that has
--- bd on its PATH.
-eq("the bead is claimed", exec_for(stub, "bd update " .. BEAD .. " --claim").argv,
-  { shell(), "-lc", "bd update " .. BEAD .. " --claim" })
-eq("the claim runs in the main worktree", exec_for(stub, "bd update " .. BEAD .. " --claim").cwd, MAIN)
-
--- The order matters: the bead is claimed before the tab is made, so an agent
--- never starts on a bead that is not its own.
-do
-  local claim_at, tab_at
-  for i, event in ipairs(stub.events) do
-    if event == "bd update " .. BEAD .. " --claim" then claim_at = i end
-    if event == "session.new_window" then tab_at = i end
-  end
-  eq("the flow starts by listing Rex's sessions", stub.events[1], "session.list")
-  eq("the bead is claimed before the tab is made",
-    claim_at ~= nil and tab_at ~= nil and claim_at < tab_at, true)
-end
-
--- The tab: one window, in the project's session, labelled with the branch, in
--- the main worktree, running the wrapper that switches, starts the agent and
--- leaves a login shell behind.
-do
-  local request = request_of(stub, "session.new_window")
-  local options = request.layout.block.options
-  eq("the tab is made in the project's session", request.session_id, "session:iris")
-  eq("the tab is labelled with the branch", request.window_label, BRANCH)
-  eq("the tab's block is labelled too", request.layout.block.label, BRANCH)
-  eq("the tab starts in the main worktree", options.cwd, MAIN)
-  eq("the tab runs the wrapper", options.command, M.new_tab_argv(PROJECT, payload()))
-  eq("the wrapper is asked to create the worktree", options.command[5], "1")
-  eq("the wrapper is given the branch", options.command[6], BRANCH)
-  eq("the wrapper is given the prompt", options.command[#options.command],
-    "/brainstorming for bead " .. BEAD)
-  -- The login shell the wrapper leaves behind is the tab's last program, so the
-  -- pane closes when the shell exits; a kept-open pane with no program in it is
-  -- the dead tab this task exists to remove. Asserted as a property, not as
-  -- "nothing is set": what the requirement forbids is a pane outliving its
-  -- program, which is what an exit of on_completion = false asks for. A future
-  -- exit setting that still closes the pane with its program is not this
-  -- regression, and is not refused here.
-  local exit = options.exit
-  eq("the tab is not kept open after the agent exits",
-    exit == nil or exit.on_completion ~= false, true)
-end
-
--- Showing it: the app client is asked, and asked for the tab rather than just
--- the session, so the branch is what comes into view.
-eq("the app client is asked to show it", request_of(stub, "client.perform").client_id, "client:app")
-eq("the client shows the session", request_of(stub, "client.perform").action, "session.select")
-do
-  local args = request_of(stub, "client.perform").args
-  eq("the client's args name the session", args.session_id, "session:iris")
-  eq("the client shows the tab", args.window_id, "window:tab")
-end
-eq("the client is told where the request came from",
-  request_of(stub, "client.perform").origin, "cli")
-eq("nothing is queued without an invocation", #stub.queued, 0)
-
--- From a key the app is running the action itself, so the selection is queued
--- instead of being performed by another client.
-stub = new_branch_stub()
-ok = pcall(M.work_new_go, { origin = "key", session_id = "session:rex" }, payload())
-eq("a key press succeeds", ok, true)
-eq("a key press queues the selection", stub.queued[1] and stub.queued[1].action, "session.select")
-do
-  local args = stub.queued[1] and stub.queued[1].args or {}
-  eq("the queued selection names the session", args.session_id, "session:iris")
-  eq("the queued selection names the tab", args.window_id, "window:tab")
-end
-eq("a key press asks no client directly", #calls_to(stub, "client.perform"), 0)
-
--- The palette goes the same way as a key.
-stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "palette", session_id = "session:rex" }, payload())
-eq("the palette queues the selection", stub.queued[1] and stub.queued[1].action, "session.select")
-
--- A second press for the same branch: the tab is there, so it is selected and
--- nothing else happens -- one tab, one worktree, one claim.
-stub = existing_tab_stub()
-local ok_again, again = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a repeat press succeeds", ok_again, true)
-eq("a repeat press selects the tab that is already there", field(again, "window_id"), "window:tab")
-eq("a repeat press creates nothing", field(again, "created"), false)
-eq("a repeat press makes no tab", #calls_to(stub, "session.new_window"), 0)
-eq("a repeat press claims nothing", #stub.exec_calls, 0)
-eq("a repeat press makes no session", #calls_to(stub, "session.create"), 0)
-do
-  local args = request_of(stub, "client.perform").args
-  eq("a repeat press still shows the session", args.session_id, "session:iris")
-  eq("a repeat press still shows the tab", args.window_id, "window:tab")
+  script(stub, answers())
+  local ok, result = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a repeat press succeeds", ok, true)
+  eq("a repeat press selects the tab that is already there", field(result, "window_id"), "window:tab")
+  eq("a repeat press creates nothing", field(result, "created"), false)
+  eq("a repeat press makes no tab", #calls_to(stub, "session.new_window"), 0)
+  eq("a repeat press claims nothing", ran(stub, "bd update"), false)
+  eq("a repeat press makes no session", #calls_to(stub, "session.create"), 0)
 end
 
 -- A session whose label merely starts with the project's name is not the
 -- project's session: the flow makes the right one.
-stub = new_branch_stub()
-stub.call_replies["session.list"] = { sessions = {
-  { session_id = "session:other", label = PROJECT .. "-2" },
-} }
-pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a look-alike session is not adopted", request_of(stub, "session.create").label, PROJECT)
-eq("the tab goes to the session the flow made",
-  request_of(stub, "session.new_window").session_id, "session:iris")
-
--- A session that cannot be attached to is refused before anything is made: the
--- attach is what every later session method depends on.
-stub = new_branch_stub()
-stub.call_replies["session.attach"] = function() return nil, "session not found" end
-local ok_unattached, unattached = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a session that cannot be attached to fails", ok_unattached, false)
-contains("the failure says it could not attach", unattached, "could not attach to the " .. PROJECT .. " session")
-contains("the failure says what Rex said", unattached, "session not found")
-eq("a session that cannot be attached to claims nothing", #stub.exec_calls, 0)
-eq("a session that cannot be attached to makes no tab", #calls_to(stub, "session.new_window"), 0)
-
--- An attach that answers without a view leaves the flow with no list of tabs, and
--- "no list" is not "no tabs": read as one, every press would make another tab and
--- take another claim. It is refused instead.
-stub = new_branch_stub()
-stub.call_replies["session.attach"] = { client_id = "client:app" }
-local ok_no_view, no_view = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("an attach with no view fails", ok_no_view, false)
-contains("the failure says the view is missing", no_view, "returned no view")
-contains("the failure names the tab list", no_view, "list of tabs")
-eq("an attach with no view claims nothing", #stub.exec_calls, 0)
-eq("an attach with no view makes no tab", #calls_to(stub, "session.new_window"), 0)
+do
+  local stub = project_stub()
+  stub.call_replies["session.list"] = { sessions = { { session_id = "session:other", label = PROJECT .. "-2" } } }
+  script(stub, answers())
+  pcall(in_memory, M.work_new, ctx(), {})
+  eq("a look-alike session is not adopted", request_of(stub, "session.create").label, PROJECT)
+end
 
 -- A view without windows is a session with no tabs -- the server leaves an empty
 -- list out -- so that is where a first tab comes from, not a reason to refuse.
-stub = new_branch_stub()
-stub.call_replies["session.attach"] = {
-  client_id = "client:app",
-  view = { session_id = "session:iris", label = PROJECT, revision = 0 },
-}
-local ok_empty, empty = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a session with no windows still gets its tab", ok_empty, true)
-eq("a session with no windows makes the tab", field(empty, "created"), true)
-eq("a session with no windows still claims the bead", #stub.exec_calls, 1)
-
--- A windows field that is there and is not a list is a shape this cannot read,
--- not a session with no tabs: refused by name, so a second press cannot make a
--- second tab and take a second claim.
-stub = new_branch_stub()
-stub.call_replies["session.attach"] = {
-  client_id = "client:app",
-  view = { session_id = "session:iris", windows = "main, tab" },
-}
-local ok_bad_windows, bad_windows = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a view whose windows are not a list fails", ok_bad_windows, false)
-contains("the failure names what the windows were", bad_windows, "windows are a string")
-contains("the failure still names the tab list", bad_windows, "list of tabs")
-eq("a view whose windows are not a list makes no tab", #calls_to(stub, "session.new_window"), 0)
-eq("a view whose windows are not a list claims nothing", #stub.exec_calls, 0)
-
--- A bead that cannot be claimed stops the flow before a tab is made: an agent
--- started on an unclaimed bead is worse than an error.
-stub = new_branch_stub()
-stub.exec_replies["bd update " .. BEAD .. " --claim"] = {
-  ok = false, code = 1, stdout = "", stderr = "mise ERROR bd is not a valid shim.\nsecond line\n",
-}
-local ok_unclaimed, unclaimed = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a bead that cannot be claimed fails", ok_unclaimed, false)
-contains("the failure names the bead", unclaimed, BEAD)
-contains("the failure says what bd said", unclaimed, "mise ERROR bd is not a valid shim.")
-eq("a bead that cannot be claimed makes no tab", #calls_to(stub, "session.new_window"), 0)
-
--- A bd that cannot even start is the same: no tab.
-stub = new_branch_stub()
-stub.exec_replies["bd update " .. BEAD .. " --claim"] = nil
-local ok_no_bd, no_bd = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a bd that cannot start fails", ok_no_bd, false)
-contains("a bd that cannot start is named", no_bd, "executable file not found in PATH")
-eq("a bd that cannot start makes no tab", #calls_to(stub, "session.new_window"), 0)
-
--- A bead id is the one thing from the hand-back that travels inside a command
--- line, so one that is not id-shaped is refused rather than run.
-stub = new_branch_stub()
-local ok_bad_id, bad_id = pcall(M.work_new_go, { origin = "cli" }, payload{ bead = "x; rm -rf /" })
-eq("a bead id that is not one fails", ok_bad_id, false)
-contains("a bead id that is not one is named", bad_id, "not a bead id")
-eq("a bead id that is not one runs nothing", #stub.exec_calls, 0)
-eq("a bead id that is not one makes no tab", #calls_to(stub, "session.new_window"), 0)
-
--- No bead: no claim at all, and the plain prompt.
-stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "cli" }, payload{ bead = "", title = "" })
-eq("no bead means no claim", #stub.exec_calls, 0)
-eq("no bead means the plain prompt",
-  request_of(stub, "session.new_window").layout.block.options.command,
-  M.new_tab_argv(PROJECT, payload{ bead = "", title = "" }))
-
--- The picker's other two answers reach the tab as well: an empty agent is its
--- "none", and the prompt it could not deliver still travels, because the wrapper
--- is what prints it above the shell it leaves behind.
-stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "cli" },
-  payload{ bead = "", title = "", agent = "", prompt = "look before you leap" })
 do
-  local command = request_of(stub, "session.new_window").layout.block.options.command
-  eq("no agent means a tab that starts none", command[9], "")
-  eq("no agent still carries the prompt", command[#command], "look before you leap")
+  local stub = project_stub()
+  stub.call_replies["session.attach"] = {
+    client_id = "client:app",
+    view = { session_id = "session:iris", label = PROJECT, revision = 0 },
+  }
+  script(stub, answers())
+  local ok, result = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a session with no windows still gets its tab", ok, true)
+  eq("a session with no windows makes the tab", field(result, "created"), true)
 end
 
-stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "cli" }, payload{ agent = "claude" })
-eq("the agent the picker chose is the one the tab starts",
-  request_of(stub, "session.new_window").layout.block.options.command[9], "claude")
-eq("the configured agent is left alone", M.options.agent, "pi")
+-- An attach with no view leaves no list of tabs, and "no list" is not "no tabs".
+do
+  local stub = project_stub()
+  stub.call_replies["session.attach"] = { client_id = "client:app" }
+  script(stub, answers())
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("an attach with no view fails", ok, false)
+  contains("an attach with no view says the view is missing", message, "returned no view")
+  eq("an attach with no view claims nothing", ran(stub, "bd update"), false)
+end
 
--- Switching to a worktree that already exists, with no tab for it yet: the tab
--- is made without --create, so no second worktree appears.
-stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "cli" }, payload{ create = false })
-eq("an existing worktree is switched to",
-  request_of(stub, "session.new_window").layout.block.options.command,
-  M.new_tab_argv(PROJECT, payload{ create = false }))
-eq("an existing worktree sends no base",
-  request_of(stub, "session.new_window").layout.block.options.command[7], "")
+-- A windows field that is there and is not a list is a shape this cannot read.
+do
+  local stub = project_stub()
+  stub.call_replies["session.attach"] = {
+    client_id = "client:app",
+    view = { session_id = "session:iris", windows = "main, tab" },
+  }
+  script(stub, answers())
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a view whose windows are not a list fails", ok, false)
+  contains("a view whose windows are not a list names them", message, "windows are a string")
+end
+
+-- A bd that cannot even start is no claim, and no tab.
+do
+  local stub = project_stub()
+  -- Registered with no reply, which is a program Rex cannot start.
+  stub.on_exec("bd update " .. BEAD .. " --claim", nil)
+  script(stub, answers())
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a bd that cannot start fails", ok, false)
+  contains("a bd that cannot start is named", message, "executable file not found in PATH")
+  eq("a bd that cannot start makes no tab", #calls_to(stub, "session.new_window"), 0)
+end
+
+-- A bead id is the one answer that travels inside a command line, so one that is
+-- not id-shaped is refused rather than run.
+do
+  local stub = project_stub()
+  script(stub, answers{ [1] = "x; rm -rf /" })
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a bead id that is not one fails", ok, false)
+  contains("a bead id that is not one is named", message, "not a bead id")
+  eq("a bead id that is not one makes no tab", #calls_to(stub, "session.new_window"), 0)
+end
+
+-- A tab that cannot be made is the one failure that leaves a claim behind, so
+-- the error has to say how to give it back.
+do
+  local stub = project_stub()
+  stub.call_replies["session.new_window"] = function() return nil, "no such session" end
+  script(stub, answers())
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a tab that cannot be made fails", ok, false)
+  contains("a tab that cannot be made says what Rex said", message, "no such session")
+  contains("a tab that cannot be made says the bead is claimed", message, "still claimed")
+  contains("a tab that cannot be made says how to release the claim", message, "bd unclaim " .. BEAD)
+end
+
+do
+  local stub = project_stub()
+  stub.call_replies["session.new_window"] = function() return nil, "no such session" end
+  script(stub, { M.NO_BEAD, "feat/x", "", "origin/main", "pi", "" })
+  local ok, message = pcall(in_memory, M.work_new, ctx(), {})
+  eq("a tab that cannot be made fails without a bead too", ok, false)
+  eq("no bead means no release advice", tostring(message):find("bd unclaim", 1, true), nil)
+end
 
 -- A session that cannot be shown leaves the tab in place and says so, rather
 -- than throwing the work away.
-stub = new_branch_stub()
-stub.call_replies["client.list"] = { clients = {} }
-local ok_no_client, no_client = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a session that cannot be shown fails", ok_no_client, false)
-contains("the failure says the tab was made", no_client, "was created")
-contains("the failure names the reason", no_client, "no app client")
-eq("the tab is still there", #calls_to(stub, "session.new_window"), 1)
-
--- A client that refuses is reported the same way.
-stub = new_branch_stub()
-stub.call_replies["client.perform"] = function() return nil, "no app client is connected" end
-local ok_refused, refused = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a client that refuses fails", ok_refused, false)
-contains("a client that refuses is named", refused, "no app client is connected")
-
--- A hand-back that is missing what the flow needs is refused before anything is
--- made.
-stub = new_branch_stub()
-local ok_no_branch, no_branch = pcall(M.work_new_go, { origin = "cli" }, payload{ branch = "" })
-eq("a hand-back with no branch fails", ok_no_branch, false)
-contains("the failure names the branch", no_branch, "branch")
-eq("a hand-back with no branch makes nothing", #stub.calls, 0)
-eq("a hand-back with no branch claims nothing", #stub.exec_calls, 0)
-
-stub = new_branch_stub()
-local ok_no_project, no_project = pcall(M.work_new_go, { origin = "cli" }, { branch = BRANCH, main = MAIN })
-eq("a hand-back with no project fails", ok_no_project, false)
-contains("the failure names the project", no_project, "project")
-eq("a hand-back with no project makes nothing", #stub.calls, 0)
-
--- The hand-back's paths are the one part of it that Rex resolves against its
--- own working directory rather than the float's, so a relative one has to be
--- refused where it arrives. new-work.sh refuses them for the picker's own
--- runs; this action is also a `rex do` entry point, so it checks for itself.
-for _, name in ipairs({ "main", "root" }) do
-  stub = new_branch_stub()
-  local ok_relative, relative = pcall(M.work_new_go, { origin = "cli" }, payload{
-    [name] = "pmm-iris/main",
-  })
-  eq("a relative " .. name .. " fails", ok_relative, false)
-  contains("a relative " .. name .. " is named", relative, "relative " .. name)
-  eq("a relative " .. name .. " makes nothing", #stub.calls, 0)
-  eq("a relative " .. name .. " claims nothing", #stub.exec_calls, 0)
+do
+  local stub = project_stub()
+  stub.call_replies["client.list"] = { clients = {} }
+  script(stub, answers())
+  local ok, message = pcall(in_memory, M.work_new, { origin = "cli" }, {})
+  eq("a session that cannot be shown fails", ok, false)
+  contains("a session that cannot be shown says the tab was made", message, "was created")
+  contains("a session that cannot be shown names the reason", message, "no app client")
+  eq("the tab is still there", #calls_to(stub, "session.new_window"), 1)
 end
 
--- The bead is claimed before the tab is made, so a tab that cannot be made is
--- the one failure that leaves a claim behind: the error has to say how to
--- give it back, or the bead stays in progress with nothing working on it.
-stub = new_branch_stub()
-stub.call_replies["session.new_window"] = function() return nil, "no such session" end
-local ok_no_tab, no_tab = pcall(M.work_new_go, { origin = "cli" }, payload())
-eq("a tab that cannot be made fails", ok_no_tab, false)
-contains("the failure says what Rex said", no_tab, "no such session")
-contains("the failure says the bead is claimed", no_tab, "still claimed")
-contains("the failure says how to release the claim", no_tab, 'bd unclaim ' .. BEAD)
-
--- With no bead there is no claim to release, so the remedy has no business
--- in the message.
-stub = new_branch_stub()
-stub.call_replies["session.new_window"] = function() return nil, "no such session" end
-local ok_no_tab_no_bead, no_tab_no_bead = pcall(M.work_new_go, { origin = "cli" },
-  payload{ bead = "", title = "" })
-eq("a tab that cannot be made fails without a bead too", ok_no_tab_no_bead, false)
-contains("no bead means no claim to release", no_tab_no_bead, "no such session")
-eq("no bead means no release advice", tostring(no_tab_no_bead):find("bd unclaim", 1, true), nil)
-
--- The action's declaration ----------------------------------------------------
-
--- Rex silently drops KEY=VALUE pairs an action does not declare, so work_new_go
--- has to declare every field the picker hands back.
+-- Hand-run from `rex do`, there is no invocation to queue against, so the app's
+-- clients are asked directly and told where the request came from.
 do
-  local go
-  for _, spec in ipairs(rex_stub.actions) do
-    if spec.name == "work_new_go" then go = spec end
+  local stub = project_stub()
+  script(stub, answers())
+  local ok = pcall(in_memory, M.work_new, { origin = "cli" }, {})
+  eq("a hand-run flow succeeds", ok, true)
+  eq("a hand-run flow asks the app client", request_of(stub, "client.perform").client_id, "client:app")
+  eq("a hand-run flow tells the client where it came from",
+    request_of(stub, "client.perform").origin, "cli")
+  eq("a hand-run flow queues nothing", #stub.queued, 0)
+end
+
+-- The action's declaration -------------------------------------------------------
+
+-- Rex silently drops KEY=VALUE pairs an action does not declare, so every answer
+-- a hand-run `rex do work_new` may name has to be declared.
+do
+  local spec
+  for _, candidate in ipairs(rex_stub.actions) do
+    if candidate.name == "work_new" then spec = candidate end
   end
-  eq("work_new_go is registered", type(go), "table")
-  eq("work_new_go declares its arguments", sorted_keys(go and go.args and go.args.properties),
-    { "agent", "base", "base_remote", "bead", "blank", "branch", "create",
-      "main", "project", "prompt", "root", "title" })
-  eq("work_new_go requires what the picker always sends",
-    go and go.args.required, { "project", "root", "main", "branch" })
-  eq("the arguments are typed", go and go.args.properties.create, { type = "boolean" })
-  eq("blank is declared a boolean", go and go.args.properties.blank,
-    { type = "boolean" })
+  eq("work_new is registered", type(spec), "table")
+  eq("work_new declares its optional answers", sorted_keys(spec and spec.args and spec.args.properties),
+    { "agent", "base", "base_remote", "bead", "blank", "branch", "prompt", "title", "worktree" })
+  eq("work_new requires nothing: an ungiven answer is a question", spec and spec.args.required, nil)
   eq("base admits both the ref and the wt-default sentinel",
-    go and go.args.properties.base, { type = { "string", "boolean" } })
-  eq("base_remote is declared a string", go and go.args.properties.base_remote,
-    { type = "string" })
+    spec and spec.args.properties.base, { type = { "string", "boolean" } })
+  eq("blank is declared a boolean", spec and spec.args.properties.blank, { type = "boolean" })
 end
 
--- The answers the last two tasks added, taken through Rex rather than handed
--- to the action directly. An action only sees the pairs its schema declares --
--- `rex do work_new_go blank=true` is refused outright without the declaration,
--- and a payload filtered against it loses the field -- so a field the picker
--- sends but the action never names can be gone before new_tab_argv sees it, and
--- the flow then falls back to the old behaviour (a configured base, the no-bead
--- prompt) with nothing on screen to show for it. Filtering the payload through
--- the registered declaration pins the declaration and the tab's argv together.
-local function as_rex_passes(name, args)
-  local declared = {}
-  for _, spec in ipairs(rex_stub.actions) do
-    if spec.name == name then
-      declared = (spec.args and spec.args.properties) or {}
-    end
-  end
-  local typed = {}
-  for key, value in pairs(args or {}) do
-    if declared[key] ~= nil then typed[key] = value end
-  end
-  return typed
-end
-
-stub = new_branch_stub()
-pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
-  base = "upstream/main", base_remote = "upstream", blank = true,
-}))
+-- The float's hand-back action is gone with the float: one action answers the
+-- key, and it asks its own questions.
+eq("work_new_go is not an action any more", M.work_new_go, nil)
 do
-  local command = request_of(stub, "session.new_window").layout.block.options.command
-  eq("the base the picker chose reaches the tab", command[7], "upstream/main")
-  eq("the remote that base lives on reaches the tab", command[8], "upstream")
-  eq("a blank answer appends no prompt word", #command, 9)
-  eq("a blank answer leaves the agent last", command[#command], M.options.agent)
-end
-
--- The wt-default sentinel is false, and it has to stay false all the way: a
--- configuration naming a base must not undo the picker's answer, and a
--- declaration that turned it into the string "false" would send `--base false`
--- to worktrunk.
-do
-  local saved = M.options.base
-  M.options.base = "main"
-  stub = new_branch_stub()
-  pcall(M.work_new_go, { origin = "cli" }, as_rex_passes("work_new_go", payload{
-    base = false,
-  }))
-  local command = request_of(stub, "session.new_window").layout.block.options.command
-  eq("the wt-default sentinel reaches the tab as no base", command[7], "")
-  eq("the wt-default sentinel carries no remote", command[8], "")
-  M.options.base = saved
+  local names = {}
+  for _, spec in ipairs(rex_stub.actions) do names[#names + 1] = spec.name end
+  eq("work_new is the only action registered", names, { "work_new" })
 end
 
 if fails > 0 then os.exit(1) end

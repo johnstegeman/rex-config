@@ -4,7 +4,11 @@
 -- by Rex, so nothing at load time may touch the `rex` global (or any other
 -- global). Pure helpers live at the top; the Rex-facing setup() and actions
 -- call rex.* only inside their function bodies.
-
+--
+-- The flow asks its six questions with rex.ui.input and rex.ui.pick, which
+-- pause the action's run until they are answered. That only works inside a
+-- run: never under pcall, never at a script's top level. So the entry point is
+-- the action, and rex do -e cannot drive it.
 local M = { version = "0.1.0" }
 
 -- Replace every {key} placeholder with vars[key]; an unknown key renders as the
@@ -100,6 +104,232 @@ function M.find_tab(windows, label)
   return nil
 end
 
+-- new-work.sh's rows, split into fields. Every verb that prints rows prints
+-- them tab-separated, one row per line, and no field carries a tab of its own:
+-- the script flattens what it reads. An empty line is nothing at all, which is
+-- what an empty listing prints.
+function M.parse_rows(text)
+  local rows = {}
+  for raw in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local line = raw:gsub("\r$", "")
+    if line ~= "" then
+      local fields = {}
+      for field in (line .. "\t"):gmatch("([^\t]*)\t") do
+        fields[#fields + 1] = field
+      end
+      rows[#rows + 1] = fields
+    end
+  end
+  return rows
+end
+
+-- `new-work.sh beads` rows as records: the id, the title, the issue type and
+-- the priority. The priority is empty for a bead bd gave none to.
+function M.bead_rows(text)
+  local rows = {}
+  for _, fields in ipairs(M.parse_rows(text)) do
+    rows[#rows + 1] = {
+      id = fields[1] or "",
+      title = fields[2] or "",
+      issue_type = fields[3] or "",
+      priority = fields[4] or "",
+    }
+  end
+  return rows
+end
+
+-- `new-work.sh bases` rows as records: the ref -- empty for worktrunk's own
+-- default -- and the remote that ref lives on, empty when it is local.
+function M.base_rows(text)
+  local rows = {}
+  for _, fields in ipairs(M.parse_rows(text)) do
+    rows[#rows + 1] = { ref = fields[1] or "", remote = fields[2] or "" }
+  end
+  return rows
+end
+
+-- The rows that are answers rather than data, so their ids can never collide
+-- with one: a NUL is not a character a bead id, a branch or an agent name can
+-- hold. (This is the trick rex-projects uses for its "new worktree" rows.)
+M.NO_BEAD = "\0none"
+M.NO_AGENT = "\0none"
+M.WT_DEFAULT = "\0default"
+
+-- The icon a bead's row carries, by issue type: names rex.ui.pick knows.
+local BEAD_ICON = {
+  epic = "package", feature = "star", bug = "branch", chore = "gear",
+  spike = "code", decision = "tag",
+}
+
+-- The bead question's items: one per ready bead, then the row that says the
+-- flow can go on with a branch and an agent and no bead. With nothing ready the
+-- list is that row alone -- the pick still opens, because a branch and an agent
+-- is work this can start -- and M.bead_question_title says why.
+function M.bead_items(rows)
+  local items = {}
+  for _, row in ipairs(rows or {}) do
+    local item = {
+      id = row.id,
+      title = row.title,
+      subtitle = row.id .. (row.issue_type ~= "" and (" · " .. row.issue_type) or ""),
+      icon = BEAD_ICON[row.issue_type] or "document",
+    }
+    -- A missing priority is not P0 and not a rank of its own: it is nothing to
+    -- say, so the detail line stays empty rather than inventing one.
+    if row.priority ~= "" then
+      item.detail = "P" .. row.priority
+    end
+    items[#items + 1] = item
+  end
+  items[#items + 1] = {
+    id = M.NO_BEAD,
+    title = "No bead: a branch and an agent only",
+    icon = "plus",
+  }
+  return items
+end
+
+-- What the bead question is called. The one row a project with nothing ready
+-- has is the no-bead row, so the title is where the empty listing is said out
+-- loud -- the pick cannot say it any other way.
+function M.bead_question_title(project, rows)
+  if #(rows or {}) == 0 then
+    return "no ready beads in " .. tostring(project)
+  end
+  return "Bead for " .. tostring(project)
+end
+
+-- The base question's items, in new-work.sh's order: the first row is the
+-- answer the question opens on. An empty ref is worktrunk choosing the base
+-- itself, which is a real answer and not a missing one.
+function M.base_items(rows)
+  local items = {}
+  for _, row in ipairs(rows or {}) do
+    local default = row.ref == ""
+    items[#items + 1] = {
+      id = default and M.WT_DEFAULT or row.ref,
+      title = default and "worktrunk's default" or row.ref,
+      subtitle = row.remote ~= "" and ("on " .. row.remote) or "",
+      icon = default and "gear" or "branch",
+    }
+  end
+  return items
+end
+
+-- What the row that starts no agent is called. It is the value the remembered
+-- "none" arrives as, so the two can never drift apart.
+local NO_AGENT_TITLE = "(none)"
+
+-- The agent question's items: the configured names in order, then the row that
+-- starts none. A configured name may not be empty (setup refuses one), so the
+-- row that starts nothing is the only empty answer there is.
+function M.agent_items(names)
+  local items = {}
+  for _, name in ipairs(names or {}) do
+    if name ~= "" then
+      items[#items + 1] = { id = name, title = name, icon = "gear" }
+    end
+  end
+  items[#items + 1] = {
+    id = M.NO_AGENT,
+    title = NO_AGENT_TITLE,
+    subtitle = "a worktree and a shell, no agent",
+    icon = "terminal",
+  }
+  return items
+end
+
+-- The word lists a branch with no bead is named from, so the name reads as a
+-- name rather than as a number: feat/quiet-otter. Two dozen of each is plenty:
+-- the name is a placeholder to type over.
+local BRANCH_ADJECTIVES = {
+  "amber", "bold", "brave", "bright", "calm", "clever", "crisp", "eager",
+  "faint", "gentle", "grand", "hollow", "keen", "lucky", "mellow", "nimble",
+  "plain", "quiet", "rapid", "sharp", "silent", "steady", "vivid", "warm",
+}
+local BRANCH_NOUNS = {
+  "badger", "beacon", "cedar", "comet", "crane", "delta", "ember", "falcon",
+  "ferry", "glade", "harbor", "heron", "lantern", "linnet", "marlin", "meadow",
+  "otter", "pebble", "pilot", "quartz", "sparrow", "summit", "thistle", "willow",
+}
+
+local random_seeded = false
+
+-- A branch name for a flow with no bead to take one from. PICK is how a test
+-- makes it predictable: handed a list length it returns an index into it. The
+-- generator is seeded once, on first use, so two presses in the same second
+-- still get one name each.
+function M.random_branch_name(pick)
+  if pick == nil then
+    if not random_seeded then
+      random_seeded = true
+      if math.randomseed ~= nil and os ~= nil and os.time ~= nil then
+        math.randomseed(os.time())
+      end
+    end
+    pick = math.random
+  end
+  return "feat/" .. BRANCH_ADJECTIVES[pick(#BRANCH_ADJECTIVES)] .. "-"
+    .. BRANCH_NOUNS[pick(#BRANCH_NOUNS)]
+end
+
+-- The directory name worktrunk derives from a branch -- the rule its
+-- worktree-path template applies: a branch is not a path, so every separator
+-- becomes a dash. It is what the worktree question opens on.
+function M.sanitize_branch(branch)
+  return (tostring(branch or ""):gsub("[/\\:]", "-"))
+end
+
+-- Why this is not a worktree name, or nil when it is one. A name travels as
+-- `--path ../<name>` from the main worktree, so it is a directory name and
+-- nothing else: a separator would put the worktree where nobody named, and "."
+-- or ".." would put it on top of an existing directory.
+function M.worktree_problem(name)
+  if name:find("[/\\]") ~= nil then
+    return "a worktree name is a name, not a path: " .. name
+  end
+  if name == "." or name == ".." then
+    return "a worktree name cannot be " .. name
+  end
+  return nil
+end
+
+-- Where this host keeps what it remembers between launches, from the two
+-- variables that decide it: $XDG_STATE_HOME when it is absolute -- the spec says
+-- a relative one means unset -- and $HOME/.local/state otherwise. With neither
+-- set there is no per-user place to name, so the walk lands on /.local/state,
+-- which is nobody's home and whose write fails into the same silence as every
+-- other state this flow cannot keep: a memory lost, never a launch.
+function M.state_dir_for(xdg_state_home, home)
+  local base
+  if type(xdg_state_home) == "string" and xdg_state_home:sub(1, 1) == "/" then
+    base = xdg_state_home
+  else
+    base = tostring(home or "") .. "/.local/state"
+  end
+  return base .. "/rex-config"
+end
+
+-- The one file in it, which holds one `agent=<name>` line.
+function M.state_file_for(xdg_state_home, home)
+  return M.state_dir_for(xdg_state_home, home) .. "/state"
+end
+
+-- The agent a state file remembers: the value of its first `agent=` line, which
+-- is the empty string for a remembered "none" and nil for a file that says
+-- nothing about it. One key, written whole, and read back the way the old float
+-- wrote it -- so a file left behind by an older install still reads, and every
+-- way the file can be wrong is "nothing remembered" rather than an error.
+function M.agent_from_state(text)
+  for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local name = line:match("^agent=(.*)$")
+    if name ~= nil then
+      return name
+    end
+  end
+  return nil
+end
+
 -- A file beside this module, so new-work.sh is found wherever the plugin was
 -- cloned to (normally ~/.config/rex/rex-config), nothing to configure.
 local function beside_module(name)
@@ -115,20 +345,21 @@ end
 M.options = {
   agent = "pi",
   agent_args = {},
-  -- The list the picker's agent question offers. Unset -- nil rather than left
-  -- out, so it reads as a default -- means the one agent above. The picker
-  -- always adds its own no-agent row after these, so "none" is never a name to
-  -- configure.
+  -- The list the agent question offers. Unset -- nil rather than left out, so
+  -- it reads as a default -- means the one agent above. The question always
+  -- adds its own (none) row after these, so "none" is never a name to configure.
   agents = nil,
   bead_prompt = "/brainstorming for bead {id}",
-  no_bead_prompt = "/brainstorming",
+  -- A branch with no bead usually wants nothing said, so the default says
+  -- nothing: the prompt question opens empty, and an accepted empty field means
+  -- the agent starts bare.
+  no_bead_prompt = "",
   -- The base a new branch starts from when nobody answered for this tab. Unset
   -- -- nil rather than a value, so it reads as a default -- is auto-detect: the
-  -- picker resolves the remote's own default branch and the cycle that opens on
-  -- it. A string is that cycle's first entry, and false is "let worktrunk
-  -- choose" -- no --base word at all.
+  -- base question opens on the remote's own default branch. A string is that
+  -- question's first entry, and false is "let worktrunk choose" -- no --base
+  -- word at all.
   base = nil,
-  bounds = { 0.15, 0.1, 0.7, 0.8 },
   script = beside_module("new-work.sh"),
 }
 
@@ -140,16 +371,17 @@ M.options = {
 -- tab.
 --
 -- Every value the flow knows arrives as a positional parameter, so no branch,
--- base, agent name or prompt is ever written into this text: a branch with a
--- slash, a prompt with quotes and an agent name with a space each stay one
--- argument, because the shell hands them over as they were. Nothing here is
+-- base, path, agent name or prompt is ever written into this text: a branch
+-- with a slash, a prompt with quotes and an agent name with a space each stay
+-- one argument, because the shell hands them over as they were. Nothing here is
 -- bash -- it runs on whatever `sh` the machine has.
 M.new_tab_script = [==[
-# $1 = create (1 or 0), $2 = branch, $3 = base (empty when there is none),
-# $4 = the remote the base lives on (empty when there is nothing to fetch),
-# then the agent and the arguments it is started with, the prompt last. An
-# empty agent is an answer -- the picker's "none" -- and the pane then goes
-# straight to a login shell, with the prompt said out loud instead of dropped.
+# $1 = branch, $2 = base (empty when there is none), $3 = the remote the base
+# lives on (empty when there is nothing to fetch), $4 = the worktree's directory
+# (empty when worktrunk's own template should name it), then the agent and the
+# arguments it is started with, the prompt last. An empty agent is an answer --
+# the agent question's "(none)" -- and the pane then goes straight to a login
+# shell, with the prompt said out loud instead of dropped.
 
 # A login shell is this program's last act, and every path below ends here: it
 # is what keeps the pane alive once the agent is gone, with the output above it
@@ -166,17 +398,16 @@ leave_shell() {
 # The four parameters come before the agent, and `shift 4` on a short list is
 # fatal in a non-interactive shell -- dash exits outright -- which would leave
 # the pane with nothing in it. So a broken caller is answered with a shell too,
-# and the message names all four, so a caller that sends the three parameters
-# this program used to take learns about the fourth.
+# and the message names all four.
 if [ "$#" -lt 4 ]; then
-  printf 'rex-config: the tab needs create, branch, base and remote\n' >&2
+  printf 'rex-config: the tab needs branch, base, remote and worktree\n' >&2
   leave_shell
 fi
 
-create=$1
-branch=$2
-base=$3
-remote=$4
+branch=$1
+base=$2
+remote=$3
+worktree=$4
 shift 4
 
 # A fetch in a pane nobody can type into must never stop on a credential
@@ -193,7 +424,7 @@ what=${agent:-an agent}
 
 # A base that lives on a remote is fetched before the switch, so a new branch
 # starts from what the remote has now rather than from whatever this machine
-# saw last. The remote is the picker's answer and is never derived from the
+# saw last. The remote is the question's answer and is never derived from the
 # ref's shape; an empty one means the base is local, so there is nothing to
 # fetch.
 #
@@ -215,33 +446,31 @@ fetch_base() {
 }
 
 # worktrunk owns the switch: --create makes the branch and its worktree, --base
-# says what the branch starts from, and --no-cd leaves this shell where it is,
-# so the worktree's path is read from the JSON reply rather than arrived at by
-# changing directory. Either way the project's hooks run here, and their output
-# belongs on this pane.
+# says what the branch starts from, --path puts the worktree where the person
+# named, and --no-cd leaves this shell where it is, so the worktree's path is
+# read from the JSON reply rather than arrived at by changing directory. Either
+# way the project's hooks run here, and their output belongs on this pane.
 #
-# --base is only sent when there is one to send, and only with --create: an
-# existing worktree is not started from anything, and worktrunk answers a lone
-# --base with "--base flag is only used with --create, ignoring", which would
-# be a line of noise on the pane for no change at all.
+# --base and --path are only sent when there is something to send: an empty base
+# means worktrunk chooses, and an empty path means its own worktree-path
+# template does -- an empty word for either would be a value nobody gave.
 switch_worktree() {
-  if [ "$create" = 1 ]; then
-    if [ -n "$base" ]; then
-      wt switch --create "$branch" --base "$base" --no-cd --format=json
-    else
-      wt switch --create "$branch" --no-cd --format=json
-    fi
-  else
-    wt switch "$branch" --no-cd --format=json
+  set -- --create "$branch"
+  if [ -n "$base" ]; then
+    set -- "$@" --base "$base"
   fi
+  if [ -n "$worktree" ]; then
+    set -- "$@" --path "$worktree"
+  fi
+  set -- "$@" --no-cd --format=json
+  wt switch "$@"
 }
 
 # A fetch that fails does not cost the work: one line says the ref is as it was,
-# and the switch below runs from it anyway. Only a create is given a base to
-# start from, so only a create has anything to freshen -- and the failure line
-# below names that base, so a remote sent without one is not fetched at all:
-# there would be no ref to name and nothing the branch could start from.
-if [ "$create" = 1 ] && [ -n "$base" ] && [ -n "$remote" ]; then
+# and the switch below runs from it anyway. The failure line names the base, so
+# a remote sent without one is not fetched at all: there would be no ref to name
+# and nothing the branch could start from.
+if [ -n "$base" ] && [ -n "$remote" ]; then
   if ! fetch_base; then
     printf 'rex-config: could not fetch %s; %s starts from %s as it is\n' \
       "$remote" "$branch" "$base" >&2
@@ -286,7 +515,7 @@ cd -- "$path" || {
 # No agent was asked for: the pane is the worktree and a login shell. The prompt
 # is the last parameter -- whatever else came with it belonged to an agent that
 # is not running -- and it has nowhere to go now, so it is printed above the
-# shell rather than disappearing with the float that collected it.
+# shell rather than disappearing with the question that collected it.
 if [ -z "$agent" ]; then
   prompt=
   for arg in "$@"; do
@@ -315,26 +544,27 @@ leave_shell
 -- The command the new tab runs: that wrapper, with everything it needs as a
 -- parameter --
 --
---   sh -c SCRIPT sh <create> <branch> <base> <remote> <agent> [agent_args...] <prompt>
+--   sh -c SCRIPT sh <branch> <base> <remote> <worktree> <agent> [agent_args...] <prompt>
 --
--- because a parameter is the one way a branch, a base, a remote, a prompt or an
--- agent name reaches a shell without the shell parsing it as text. The prompt is
--- the picker's own when it was typed there, the bead's, or -- with neither -- the
--- configured no-bead prompt. An empty agent is the picker's "none": the wrapper
--- starts nothing and hands the pane to a login shell. An empty base is "no
--- --base at all", and an empty remote is "nothing to fetch".
+-- because a parameter is the one way a branch, a base, a remote, a path, a
+-- prompt or an agent name reaches a shell without the shell parsing it as text.
+-- The prompt is the one the person typed or accepted, or -- when they never
+-- answered -- the configured template. An empty agent is the agent question's
+-- "(none)": the wrapper starts nothing and hands the pane to a login shell. An
+-- empty base is "no --base at all", an empty remote is "nothing to fetch", and
+-- an empty worktree is worktrunk's own worktree-path template.
 --
--- The prompt is not always there: a blank answer sends no prompt parameter at
--- all, so the argv ends after the agent and its arguments, and a prompt whose
--- first character is "-" travels with one leading space so the agent reads a
--- value rather than a flag.
+-- The prompt is not always there: a blank answer -- or a template that renders
+-- to nothing -- sends no prompt parameter at all, so the argv ends after the
+-- agent and its arguments, and a prompt whose first character is "-" travels
+-- with one leading space so the agent reads a value rather than a flag.
 function M.new_tab_argv(project, args)
   args = args or {}
   assert(type(args.branch) == "string" and args.branch ~= "",
     "new_tab_argv: a branch is required")
   -- The configured default is a program that has to exist: nobody may set an
-  -- empty agent in a configuration file and quietly get no agent at all. A
-  -- payload may answer none, and that is the only way to say it.
+  -- empty agent in a configuration file and quietly get no agent at all. An
+  -- answer may say none, and that is the only way to say it.
   assert(type(M.options.agent) == "string" and M.options.agent ~= "",
     "new_tab_argv: an agent is required")
   local agent = M.options.agent
@@ -342,9 +572,11 @@ function M.new_tab_argv(project, args)
     agent = args.agent
   end
   local prompt = ""
-  if type(args.prompt) == "string" and args.prompt ~= "" then
-    -- What was typed at the picker beats both templates: it is an answer, where
-    -- they are what the plugin says when nobody said anything.
+  if type(args.prompt) == "string" then
+    -- What was answered at the prompt question beats both templates: it is an
+    -- answer, where they are what the plugin says when nobody said anything. An
+    -- empty answer is "nothing said", which the blank test below sends as no
+    -- word at all.
     prompt = args.prompt
   elseif agent ~= "" then
     -- The templates are a prompt for an agent that is about to start, so with
@@ -363,34 +595,42 @@ function M.new_tab_argv(project, args)
   end
 
   -- The base a new branch starts from, and the remote that base lives on. The
-  -- picker resolves both -- no ref is read here -- so this only carries the
-  -- answer, and the base is three-valued: a string is the ref to create from,
-  -- false is the picker's "let worktrunk choose" (and travels as the empty
-  -- parameter, worktrunk's own default), and absent means the picker never
-  -- answered -- a hand-run `rex do` -- so the configured base is the fallback.
+  -- base question resolves both -- no ref is read here -- so this only carries
+  -- the answer, and the base is three-valued: a string is the ref to create
+  -- from, false is the question's "let worktrunk choose" (and travels as the
+  -- empty parameter, worktrunk's own default), and absent means the question
+  -- was never asked -- a hand-run `rex do` -- so the configured base is the
+  -- fallback.
   local base = ""
   if type(args.base) == "string" then
     base = args.base
   elseif args.base == nil and type(M.options.base) == "string" then
     base = M.options.base
   end
-  -- The remote rides beside the base and is sent only when the picker found the
-  -- base on one: an empty parameter is nothing to fetch, which is what keeps a
-  -- local base from costing a `git fetch` in the tab.
+  -- The remote rides beside the base and is sent only when the question found
+  -- the base on one: an empty parameter is nothing to fetch, which is what keeps
+  -- a local base from costing a `git fetch` in the tab.
   local remote = ""
   if type(args.base_remote) == "string" then
     remote = args.base_remote
+  end
+  -- A worktree name is a directory name, and the tab runs in the main worktree,
+  -- so `../<name>` is its sibling -- which is what worktrunk's own template
+  -- builds. An empty name is "no --path word at all".
+  local worktree = ""
+  if type(args.worktree) == "string" and args.worktree ~= "" then
+    worktree = "../" .. args.worktree
   end
 
   local argv = {
     "sh", "-c", M.new_tab_script,
     -- sh takes the word after the program as $0, so this is what keeps the
-    -- create flag in $1 rather than the program's own name.
+    -- branch in $1 rather than the program's own name.
     "sh",
-    args.create and "1" or "0",
     args.branch,
     base,
     remote,
+    worktree,
     agent,
   }
   -- An agent's arguments are the agent's, so they travel only when one starts.
@@ -399,11 +639,11 @@ function M.new_tab_argv(project, args)
       argv[#argv + 1] = arg
     end
   end
-  -- A blank answer is "an agent, and nothing to say": no prompt word at all,
-  -- not an empty one, so the argv ends after the agent and its arguments and
-  -- the templates above do not get to fill the place. That is how blank stays
-  -- distinct from "the picker was never asked", where the template speaks.
-  if args.blank == true then
+  -- A blank answer is "an agent, and nothing to say", and so is a template that
+  -- renders to nothing: no prompt word at all, not an empty one, so the argv
+  -- ends after the agent and its arguments and the agent is handed no argument
+  -- nobody wrote. That is also how a cleared prompt field stays cleared.
+  if args.blank == true or prompt == "" then
     return argv
   end
   -- A prompt whose first character is "-" would be read by the agent as a flag.
@@ -418,18 +658,20 @@ function M.new_tab_argv(project, args)
   return argv
 end
 
-local OPTION_NAMES = { "agent", "agent_args", "agents", "bead_prompt", "no_bead_prompt", "base", "bounds", "script" }
+local OPTION_NAMES = { "agent", "agent_args", "agents", "bead_prompt", "no_bead_prompt", "base", "script" }
 local KNOWN_OPTION = {}
 for _, name in ipairs(OPTION_NAMES) do
   KNOWN_OPTION[name] = true
 end
 
+-- An option that is no longer known is warned about by name, which is what
+-- `bounds` -- the float's geometry -- now gets: there is no float to place.
+
 -- Rex runs an action with its own PATH -- /usr/bin:/bin:/usr/sbin:/sbin on this
 -- Mac -- which knows nothing of mise or Homebrew installs, while the design puts
--- wt, fzf, jq and bd on the login shell's PATH. wt and bd therefore run in that
--- shell, which is also where mise keeps the environment its shims need. Nothing
--- is interpolated into the command text: a directory travels as rex.exec's cwd
--- option, never inside the command.
+-- wt, jq and bd on the login shell's PATH. wt, bd and new-work.sh therefore run
+-- in that shell, which is also where mise keeps the environment its shims need.
+-- Every word handed to it is quoted; see quote() below.
 local function login_shell()
   local shell = os and os.getenv and os.getenv("SHELL")
   if type(shell) ~= "string" or shell == "" then
@@ -459,6 +701,27 @@ end
 -- The same for a tool that lives on the login shell's PATH rather than Rex's.
 local function run_in_shell(command, cwd)
   return run({ login_shell(), "-lc", command }, cwd)
+end
+
+-- One shell word holding `text`, quoted for a POSIX shell. A single-quoted word
+-- needs nothing done to it but its own quotes escaped, so a path with a space, a
+-- branch with a $ or an id with a quote reaches the command as one word and as
+-- itself.
+local function quote(text)
+  local quoted = (tostring(text):gsub("'", "'\\''"))
+  return "'" .. quoted .. "'"
+end
+
+-- new-work.sh, run the way the flow runs it: through the login shell, whose
+-- PATH is what knows wt, bd and jq, with every word quoted so no branch, path or
+-- id is ever parsed as shell text. WORDS are the verb and its arguments; the
+-- script comes in front of them.
+local function run_script(words, cwd)
+  local parts = { quote(M.options.script) }
+  for _, word in ipairs(words) do
+    parts[#parts + 1] = quote(word)
+  end
+  return run_in_shell(table.concat(parts, " "), cwd)
 end
 
 -- The first line of a program's error output, for a one-line refusal.
@@ -583,22 +846,10 @@ local function block_cwd(ctx)
   return nil
 end
 
--- The picker this client opened last, so a second press replaces it instead of
--- stacking another float on top.
-local picker = {}
-
-local function close_picker()
-  if picker.layer_id == nil then
-    return
-  end
-  pcall(rex.session.close_layer, { session_id = picker.session_id, layer_id = picker.layer_id })
-  picker.session_id, picker.layer_id = nil, nil
-end
-
--- The agent names the picker's agent question offers, in the order it offers
--- them: the first is the one an unasked question takes. Unset means the one
--- configured agent, so a configuration that names no list still gets the
--- question -- the agent, or none -- rather than no question at all.
+-- The agent names the agent question offers, in the order it offers them: the
+-- first is the one an unasked question takes. Unset means the one configured
+-- agent, so a configuration that names no list still gets the question -- the
+-- agent, or none -- rather than no question at all.
 local function agent_choices()
   local agents = M.options.agents
   if type(agents) ~= "table" or #agents == 0 then
@@ -607,85 +858,171 @@ local function agent_choices()
   return agents
 end
 
--- argv for new-work.sh's picker, every word of it built here and nowhere else.
--- base = false means "let worktrunk choose", so there is no ref to pass on --
--- but the picker still has to be told, because a picker told nothing resolves
--- the remote's default branch itself and the screen would open on a base the
--- configuration opted out of. So false is --no-base: the cycle opens on the
--- worktrunk-default sentinel, and ctrl-r can still move off it.
-local function picker_command(project)
-  local command = {
-    M.options.script, "pick",
-    "--main", project.main,
-    "--root", project.root,
-    "--project", project.name,
-  }
+-- The ready beads as records, from new-work.sh's tested filter: the jq that
+-- drops molecule steps and gate containers, and sorts by priority then id, is
+-- the one thing this flow did not rewrite.
+local function ready_beads(main)
+  local reply, reason = run_script({ "beads", "--main", main }, main)
+  if reply == nil then
+    return nil, "could not list the ready beads in " .. main .. ": " .. tostring(reason)
+  end
+  if reply.code ~= 0 then
+    return nil, "could not list the ready beads in " .. main .. ": " .. first_line(reply.stderr)
+  end
+  return M.bead_rows(reply.stdout)
+end
+
+-- The base question's rows, in the order new-work.sh prints them: the opening
+-- answer first, then the short cycle around it.
+local function base_choices(main)
+  local words = { "bases", "--main", main }
   if M.options.base == false then
-    command[#command + 1] = "--no-base"
-  elseif M.options.base ~= nil then
-    command[#command + 1] = "--base"
-    command[#command + 1] = M.options.base
+    words[#words + 1] = "--no-base"
+  elseif type(M.options.base) == "string" then
+    words[#words + 1] = "--base"
+    words[#words + 1] = M.options.base
   end
-  -- The agent names are handed over only where the screen has a field to cycle
-  -- them in: the picker seeds its header from the first, ctrl-a walks the rest and
-  -- then none, and a list is the whole of what it needs to do that.
-  for _, name in ipairs(agent_choices()) do
-    if name ~= "" then
-      command[#command + 1] = "--agents"
-      command[#command + 1] = name
-    end
+  local reply, reason = run_script(words, main)
+  if reply == nil then
+    return nil, "could not read the bases of " .. main .. ": " .. tostring(reason)
   end
-  return command
+  if reply.code ~= 0 then
+    return nil, "could not read the bases of " .. main .. ": " .. first_line(reply.stderr)
+  end
+  return M.base_rows(reply.stdout)
 end
 
--- Open the picker in a floating terminal and return at once: a key-bound
--- action cannot wait for input, so the float asks the questions and hands its
--- answer back with `rex do work_new_go`.
-local function open_picker(ctx, project)
-  close_picker()
-  local called, layer, reason = pcall(rex.session.new_layer, {
-    session_id = ctx.session_id,
-    bounds = M.options.bounds,
-    focus = true,
-    layout = {
-      block = {
-        flavor = "com.superlogical.terminal.shell",
-        label = "new work",
-        options = { command = picker_command(project), cwd = project.main },
-      },
-    },
-  })
-  if not called then
-    error("could not open the picker: " .. tostring(layer), 0)
+-- The branch name the bead derives, from new-work.sh's tested type-to-prefix
+-- map: bug, chore and spike keep their prefix, feature and task read feat, and
+-- only the last dash-separated segment of the id is kept. Nothing at all -- a
+-- bead whose id leaves no name -- opens the question empty rather than stopping
+-- it.
+local function branch_default(main, bead, issue_type)
+  if type(bead) ~= "string" or bead == "" then
+    return M.random_branch_name()
   end
-  if type(layer) ~= "table" then
-    error("could not open the picker: " .. tostring(reason), 0)
+  local reply = run_script({ "branch-default", "--type",
+    issue_type ~= "" and issue_type or "other", "--id", bead }, main)
+  if reply == nil or reply.code ~= 0 then
+    return ""
   end
-  picker.session_id, picker.layer_id = ctx.session_id, layer.layer_id
-  return { layer_id = layer.layer_id }
+  return (tostring(reply.stdout or ""):gsub("%s+$", ""))
 end
 
--- Action work_new: from the terminal's directory to the picker. Every reason
--- the flow cannot start is refused here, naming what stands in the way, so
--- nothing opens for a directory that would only fail later.
-function M.work_new(ctx)
-  ctx = ctx or {}
-  local cwd = block_cwd(ctx)
-  if cwd == nil then
-    error("cannot tell which directory this terminal is in", 0)
+-- Whether git would accept this as a branch name, asked of git itself. The
+-- reply is compared with the name that went in because check-ref-format
+-- *expands* a name like @{-1} and prints what it resolved to: only an answer
+-- equal to the input says the input is a branch name.
+local function branch_problem(name, cwd)
+  if name == "" then
+    return "the branch name is empty"
   end
-  local project, reason = M.project_for(cwd)
-  if project == nil then
-    error(reason, 0)
+  local reply, reason = run({ "git", "check-ref-format", "--branch", name }, cwd)
+  if reply == nil then
+    return "could not check the branch name " .. name .. ": " .. tostring(reason)
   end
-  local beads, beads_reason = M.has_beads(project.main)
-  if not beads then
-    if beads_reason ~= nil then
-      error(beads_reason, 0)
+  if reply.code ~= 0 then
+    return "not a branch name: " .. name .. " (" .. first_line(reply.stderr) .. ")"
+  end
+  if (tostring(reply.stdout or ""):gsub("%s+$", "")) ~= name then
+    return "not a branch name: " .. name
+  end
+  return nil
+end
+
+-- Whether this wt switch knows `--path`, which worktrunk calls experimental. A
+-- wt from before it would ignore the flag and put the worktree wherever its
+-- template says, so a worktree name is refused with a message rather than
+-- quietly dropped.
+local function switch_takes_path(main)
+  local reply, reason = run_in_shell("wt switch --help", main)
+  if reply == nil then
+    return false, "could not ask wt switch whether it takes --path: " .. tostring(reason)
+  end
+  local help = tostring(reply.stdout or "") .. "\n" .. tostring(reply.stderr or "")
+  if help:find("%-%-path") == nil then
+    return false, "this wt switch has no --path, so a worktree name cannot be used; "
+      .. "worktrunk 0.82 or later has it"
+  end
+  return true
+end
+
+-- The state directory and file this host's environment names, which is where the
+-- last launch's agent is remembered: $XDG_STATE_HOME/rex-config/state, or
+-- ~/.local/state/rex-config/state. Which one is M.state_dir_for's question, asked
+-- here so it can be tested without an environment to set.
+local function state_dir()
+  local xdg = os and os.getenv and os.getenv("XDG_STATE_HOME")
+  local home = os and os.getenv and os.getenv("HOME")
+  return M.state_dir_for(xdg, home)
+end
+
+-- io is not there in every host Rex embeds (a sandboxed script has none of it),
+-- so a file that cannot be opened is nil and never an error: the memory then
+-- lives in this module alone, for the life of the process.
+local function open_file(path, mode)
+  if io == nil or io.open == nil then
+    return nil
+  end
+  local ok, file = pcall(io.open, path, mode)
+  if not ok then
+    return nil
+  end
+  return file
+end
+
+-- The in-memory half of the memory: what this process wrote, read back by it.
+-- nil means nothing has been remembered here, and an empty string is the
+-- remembered "(none)" -- which is an answer, not a missing one.
+local remembered_here = nil
+
+-- The agent the last launch chose, or nil when nothing is remembered. A name the
+-- list no longer offers is nothing remembered: the question would open filtered
+-- to a row that is not there.
+function M.remembered_agent(names)
+  local name = remembered_here
+  if name == nil then
+    local file = open_file(state_dir() .. "/state", "r")
+    if file ~= nil then
+      local text = file:read("*a") or ""
+      file:close()
+      name = M.agent_from_state(text)
     end
-    error("beads is required, but no beads database was found in " .. project.main, 0)
   end
-  return open_picker(ctx, project)
+  if name == nil or name == "" then
+    return name
+  end
+  for _, offered in ipairs(names or {}) do
+    if offered == name then
+      return name
+    end
+  end
+  return nil
+end
+
+-- And the answer back into it, written before the tab is made so a launch that
+-- fails still counts as the agent that was chosen. A directory that cannot be
+-- made and a file that cannot be written are both discarded: a launch is worth
+-- more than the memory of it.
+function M.remember_agent(name)
+  if type(name) ~= "string" then
+    return false
+  end
+  remembered_here = name
+  local dir = state_dir()
+  -- mkdir in the host's own argv, no shell in the way, and only where rex is
+  -- there to run it: a host that has neither is one whose memory this process
+  -- keeps alone.
+  if type(rex) == "table" and rex.exec ~= nil then
+    pcall(rex.exec, { "mkdir", "-p", dir })
+  end
+  local file = open_file(dir .. "/state", "w")
+  if file == nil then
+    return false
+  end
+  file:write("agent=" .. name .. "\n")
+  file:close()
+  return true
 end
 
 -- Attach to the target session, because a session method only reaches a session
@@ -759,8 +1096,8 @@ local function session_to_use(project, main)
   return created.session_id
 end
 
--- The one thing from the hand-back that travels inside a command line is the
--- bead id, so it is checked against the shape bd's ids have before it goes in.
+-- The one thing from an answer that travels inside a command line is the bead
+-- id, so it is checked against the shape bd's ids have before it goes in.
 local BEAD_ID = "^[%w][%w%._%-]*$"
 
 -- Claim the bead, from the main worktree, which is where the database is
@@ -780,9 +1117,9 @@ local function claim_bead(bead, main)
 end
 
 -- Show the session, and the tab in it. Rex runs an action from a key or the
--- palette itself, so a queued client action is accepted there; a hand-back
--- from `rex do` has no invocation to queue against, so the app's clients are
--- asked directly instead, which needs Remote Control on. nil means shown.
+-- palette itself, so a queued client action is accepted there; a hand-run
+-- `rex do` has no invocation to queue against, so the app's clients are asked
+-- directly instead, which needs Remote Control on. nil means shown.
 local function show_session(ctx, session_id, window_id)
   local origin = ctx.origin
   local args = { session_id = session_id }
@@ -824,47 +1161,25 @@ local function show_session(ctx, session_id, window_id)
   return table.concat(said, "; ")
 end
 
--- Action work_new_go: the picker's hand-back. It already holds the whole
--- answer, so this only has to start the work: the project's session, the tab
--- named after the branch, the claim, and the switch inside the tab. The
--- payload's root is the project's root rather than a place anything runs in, so
--- the tab and every bd call use the main worktree that came with them.
-function M.work_new_go(ctx, args)
-  ctx, args = ctx or {}, args or {}
+-- The second half of the flow, where the questions have been answered: the
+-- project's session, the tab named after the branch, the claim, and the switch
+-- inside the tab. It runs in the project's root and its main worktree rather
+-- than anywhere the key was pressed, so the tab and every bd call are in the one
+-- directory the database is reachable from.
+local function start_work(ctx, project, answers)
+  local main, branch = project.main, answers.branch
 
-  -- The hand-back is the only source of these, so one that is missing is
-  -- refused before anything is made.
-  for _, name in ipairs({ "project", "root", "main", "branch" }) do
-    local value = args[name]
-    if type(value) ~= "string" or value == "" then
-      error("the picker's answer has no " .. name, 0)
-    end
-  end
-
-  -- Rex reads the paths against its own working directory rather than the
-  -- picker's, so a relative one would make the tab somewhere else entirely, and
-  -- fail there with nothing on screen to explain it. new-work.sh refuses them
-  -- for a picker run; this action is also a public `rex do` entry point, so it
-  -- checks for itself.
-  for _, name in ipairs({ "root", "main" }) do
-    if args[name]:sub(1, 1) ~= "/" then
-      error("the picker's answer has a relative " .. name .. ": " .. args[name], 0)
-    end
-  end
-
-  local project, main, branch = args.project, args.main, args.branch
-
-  local session, session_reason = session_to_use(project, main)
+  local session, session_reason = session_to_use(project.name, main)
   if session == nil then
     error(session_reason, 0)
   end
   local windows, attach_reason = attach_session(session)
   if windows == nil then
-    error("could not attach to the " .. project .. " session: " .. attach_reason, 0)
+    error("could not attach to the " .. project.name .. " session: " .. attach_reason, 0)
   end
 
   -- A second press for the same branch finds its tab here: one tab, one worktree
-  -- and one claim, whatever the picker was asked.
+  -- and one claim, whatever the questions were answered with.
   local existing = M.find_tab(windows, branch)
   if existing ~= nil then
     local show_reason = show_session(ctx, session, existing)
@@ -876,7 +1191,7 @@ function M.work_new_go(ctx, args)
 
   -- The bead is claimed before the tab exists, so an agent never starts on a
   -- bead that is not its own: a claim that fails leaves nothing behind.
-  local bead = args.bead
+  local bead = answers.bead
   if type(bead) == "string" and bead ~= "" then
     local claim_reason = claim_bead(bead, main)
     if claim_reason ~= nil then
@@ -892,7 +1207,7 @@ function M.work_new_go(ctx, args)
       label = branch,
       options = {
         cwd = main,
-        command = M.new_tab_argv(project, args),
+        command = M.new_tab_argv(project.name, answers),
         -- Nothing keeps the pane open: the command it runs ends in a login
         -- shell, so the pane lives as long as that shell does and the tab closes
         -- when the user leaves it. A kept-open pane with no program in it is
@@ -907,10 +1222,10 @@ function M.work_new_go(ctx, args)
     -- released by hand. `bd unclaim` is bd's own word for exactly that, with no
     -- quoting to mistype.
     local release = ""
-    if type(args.bead) == "string" and args.bead ~= "" then
-      release = "; the bead is still claimed, so release it with: bd unclaim " .. args.bead
+    if type(answers.bead) == "string" and answers.bead ~= "" then
+      release = "; the bead is still claimed, so release it with: bd unclaim " .. answers.bead
     end
-    error("could not make the " .. branch .. " tab in the " .. project .. " session: "
+    error("could not make the " .. branch .. " tab in the " .. project.name .. " session: "
       .. create_reason .. release, 0)
   end
 
@@ -923,9 +1238,252 @@ function M.work_new_go(ctx, args)
   return { window_id = created.window_id, created = true }
 end
 
--- Options from the configuration file, then the two actions. run takes the
--- action's context, and for work_new_go the hand-back payload as a second
--- argument.
+-- The answer to one question, or the end of the flow.
+--
+-- rex.ui answers nil and a reason when nobody answered. "cancelled" is the
+-- person saying no: the action returns nothing and says nothing, because the
+-- prompt closing is already the answer. Every other reason -- timeout, busy,
+-- no_client, unsupported, failed -- is a refusal, and it names the question,
+-- since a bare "timeout" would not say what went unanswered.
+local function answered(step, value, reason)
+  if value ~= nil then
+    return value
+  end
+  if reason == "cancelled" then
+    return nil
+  end
+  error(step .. " could not be answered: " .. tostring(reason or "failed"), 0)
+end
+
+-- Whether this Rex build can be asked anything. The lookup is inside a pcall
+-- because rex.ui may not exist on an older server at all; the prompts
+-- themselves are never inside one, since a prompt in a frame that cannot pause
+-- is reported as unsupported and would answer nothing.
+local function can_ask()
+  local has_ui, ui = pcall(function() return rex.ui end)
+  return has_ui and type(ui) == "table"
+    and type(ui.input) == "function" and type(ui.pick) == "function"
+end
+
+-- Ask the six questions the flow has, skipping the ones a caller already
+-- answered, then start the work.
+--
+-- The order is bead, branch, worktree, base, agent, prompt, and every one of
+-- them is a rex.ui call inside this action's run -- a frame that can wait. The
+-- whole float-and-hand-back architecture existed because a key-bound action
+-- could not; that constraint is gone.
+--
+--   rex do work_new                          -- asks all six
+--   rex do work_new bead=pmm-iris-608        -- asks the other five
+--   rex do work_new bead= branch=feat/x worktree= base=@ agent=pi prompt=
+--
+-- An empty string is an answer where it means something: bead = "" is no bead,
+-- agent = "" starts none, worktree = "" lets worktrunk name the directory, and
+-- prompt = "" says nothing to the agent.
+function M.work_new(ctx, args)
+  ctx = ctx or {}
+  args = args or {}
+
+  local cwd = block_cwd(ctx)
+  if cwd == nil then
+    error("cannot tell which directory this terminal is in", 0)
+  end
+  local project, reason = M.project_for(cwd)
+  if project == nil then
+    error(reason, 0)
+  end
+  local beads, beads_reason = M.has_beads(project.main)
+  if not beads then
+    if beads_reason ~= nil then
+      error(beads_reason, 0)
+    end
+    error("beads is required, but no beads database was found in " .. project.main, 0)
+  end
+  if not can_ask() then
+    error("this Rex build cannot ask anything (no rex.ui), so work_new has no questions to ask", 0)
+  end
+
+  -- a. The bead: the ready ones, or none.
+  local bead, title, issue_type = args.bead, args.title, ""
+  if bead == nil then
+    local rows, rows_reason = ready_beads(project.main)
+    if rows == nil then
+      error(rows_reason, 0)
+    end
+    local choice = answered("the bead question", rex.ui.pick{
+      title = M.bead_question_title(project.name, rows),
+      placeholder = "Type to filter",
+      items = M.bead_items(rows),
+      confirm = "Start",
+    })
+    if choice == nil then
+      return nil
+    end
+    if choice == M.NO_BEAD then
+      bead, title = "", ""
+    else
+      bead = choice
+      for _, row in ipairs(rows) do
+        if row.id == choice then
+          title, issue_type = row.title, row.issue_type
+          break
+        end
+      end
+    end
+  end
+
+  -- The bases are read before the branch is asked for, so that question can say
+  -- what the new branch will start from; which of them is the answer is settled
+  -- at (d).
+  local bases, bases_reason = base_choices(project.main)
+  if bases == nil then
+    error(bases_reason, 0)
+  end
+
+  -- b. The branch: derived from the bead, or a name of its own when there is
+  -- no bead. git is the judge of it, and the refusal says why.
+  local branch = args.branch
+  if branch == nil then
+    local opening = bases[1] and bases[1].ref or ""
+    local text = answered("the branch question", rex.ui.input{
+      title = "Branch for the new worktree",
+      placeholder = opening ~= "" and ("starts from " .. opening) or "starts from worktrunk's default",
+      value = branch_default(project.main, bead, issue_type),
+      confirm = "Create branch",
+    })
+    if text == nil then
+      return nil
+    end
+    branch = (tostring(text):gsub("^%s+", ""):gsub("%s+$", ""))
+  end
+  local branch_reason = branch_problem(branch, project.main)
+  if branch_reason ~= nil then
+    error(branch_reason, 0)
+  end
+
+  -- c. The worktree: a name, never a path. Blank is worktrunk's own
+  -- worktree-path template, which is what the tab did before this question
+  -- existed.
+  local worktree = args.worktree
+  if worktree == nil then
+    local text = answered("the worktree question", rex.ui.input{
+      title = "Worktree name",
+      placeholder = "blank lets worktrunk name it",
+      value = M.sanitize_branch(branch),
+      confirm = "Use this worktree name",
+    })
+    if text == nil then
+      return nil
+    end
+    worktree = (tostring(text):gsub("^%s+", ""):gsub("%s+$", ""))
+  end
+  if worktree ~= "" then
+    local problem = M.worktree_problem(worktree)
+    if problem ~= nil then
+      error(problem, 0)
+    end
+    local supported, why = switch_takes_path(project.main)
+    if not supported then
+      error(why, 0)
+    end
+  end
+
+  -- d. The base: one of the rows, the first of which is the one a bare Return
+  -- takes. An empty ref is worktrunk's own choice, and travels as false so the
+  -- configured base cannot speak in its place.
+  local base, base_remote = args.base, args.base_remote
+  if base == nil then
+    local choice = answered("the base question", rex.ui.pick{
+      title = "Base for the new branch",
+      placeholder = "Type to filter",
+      items = M.base_items(bases),
+      confirm = "Start",
+    })
+    if choice == nil then
+      return nil
+    end
+    local row = bases[1] or { ref = "", remote = "" }
+    for _, candidate in ipairs(bases) do
+      if (candidate.ref ~= "" and candidate.ref or M.WT_DEFAULT) == choice then
+        row = candidate
+        break
+      end
+    end
+    base = row.ref ~= "" and row.ref or false
+    base_remote = row.remote ~= "" and row.remote or nil
+  end
+
+  -- e. The agent: the configured names, or none. The agent the last launch
+  -- chose arrives as the filter, which narrows the list to that one row, so a
+  -- bare Return takes it -- a single-choice pick has no other way to preselect.
+  local agent = args.agent
+  if agent == nil then
+    local names = agent_choices()
+    local remembered = M.remembered_agent(names)
+    local choice = answered("the agent question", rex.ui.pick{
+      title = "Agent for the new tab",
+      placeholder = "Type to filter",
+      value = remembered == "" and NO_AGENT_TITLE or (remembered or ""),
+      items = M.agent_items(names),
+      confirm = "Start",
+    })
+    if choice == nil then
+      return nil
+    end
+    agent = choice == M.NO_AGENT and "" or choice
+    -- Written before the tab, so a launch that fails still counts as the agent
+    -- that was chosen.
+    M.remember_agent(agent)
+  end
+
+  -- f. The prompt: the configured template for the bead -- or for no bead --
+  -- as the field's text, which the person can edit or clear. A cleared field is
+  -- an answer: the agent starts and is told nothing, and blank says so, because
+  -- new_tab_argv would otherwise fill the place with the template's own text.
+  local prompt = args.prompt
+  local blank = args.blank
+  if prompt == nil then
+    local value
+    if type(bead) == "string" and bead ~= "" then
+      value = M.render_prompt(M.options.bead_prompt, {
+        id = bead,
+        title = title,
+        branch = branch,
+        project = project.name,
+      })
+    else
+      value = M.options.no_bead_prompt
+    end
+    local text = answered("the prompt question", rex.ui.input{
+      title = "Prompt for the agent",
+      placeholder = "cleared means the agent is told nothing",
+      value = value,
+      confirm = "Start",
+    })
+    if text == nil then
+      return nil
+    end
+    prompt = text
+  end
+  if prompt == "" then
+    blank = true
+  end
+
+  return start_work(ctx, project, {
+    bead = bead,
+    title = title,
+    branch = branch,
+    worktree = worktree,
+    base = base,
+    base_remote = base_remote,
+    agent = agent,
+    prompt = prompt,
+    blank = blank,
+  })
+end
+
+-- Options from the configuration file, then the action. run takes the action's
+-- context and its optional answers.
 local actions_registered = false
 
 function M.setup(opts)
@@ -939,9 +1497,9 @@ function M.setup(opts)
       error(string.format(
         'rex-config: agent_args must be a list of arguments, not a %s', type(value)), 0)
     end
-    -- agents reaches the picker as one --agents per name, so a string here is
-    -- the same mistake in a different shape, and a name that is not a string
-    -- would reach the float as nothing at all.
+    -- agents reaches the agent question as its rows, so a string here is the
+    -- same mistake in a different shape, and a name that is not a string would
+    -- reach the question as nothing at all.
     if key == "agents" then
       if type(value) ~= "table" then
         error(string.format(
@@ -974,54 +1532,36 @@ function M.setup(opts)
     name = "work_new",
     title = "New work: from a bead…",
     category = "New work",
-    run = function(ctx)
-      return M.work_new(ctx)
-    end,
-  }
-  rex.action{
-    name = "work_new_go",
-    title = "New work: start the branch the picker chose",
-    category = "New work",
-    -- This Rex build refuses a *named* undeclared pair -- `rex do work_new_go
-    -- blank=true` is rejected outright without the declaration -- while an
-    -- `--args` object reaches the action whole, undeclared fields and all. The
-    -- picker hands back exactly these pairs, so every one of them is declared
-    -- here: the declaration is what the named path is checked against, and no
-    -- pair the picker sends is left to depend on which path a caller took.
+    -- The answers as optional arguments: the flow asks only for the ones it was
+    -- not given, which is what keeps a hand-run `rex do work_new bead=<id>`
+    -- working without a person at the prompts.
     args = {
       type = "object",
       properties = {
-        project = { type = "string" },
-        root = { type = "string" },
-        main = { type = "string" },
-        branch = { type = "string" },
-        -- The agent the picker chose -- an empty string is its "none" -- and the
-        -- prompt the user typed there, when they typed one.
-        agent = { type = "string" },
-        prompt = { type = "string" },
+        -- An id, or the empty string for "no bead".
         bead = { type = "string" },
         title = { type = "string" },
-        create = { type = "boolean" },
-        -- What the branch is created from, and the remote that ref lives on.
-        -- The base is three-valued -- a string is the ref, false is worktrunk's
-        -- own default (no --base word at all), and absent means the picker never
-        -- answered -- so both types are declared: a `string` alone would call
-        -- the picker's sentinel an illegal value, and a validator that took that
-        -- at its word would drop it and let a configured base speak instead.
-        -- The remote is present only for a remote-tracking ref.
+        branch = { type = "string" },
+        -- A directory name, or the empty string to let worktrunk name it.
+        worktree = { type = "string" },
+        -- The base is three-valued here too: a string is the ref to create
+        -- from, false is worktrunk's own default (no --base word at all), and
+        -- absent is a question to ask. The remote is present only for a
+        -- remote-tracking ref.
         base = { type = { "string", "boolean" } },
         base_remote = { type = "string" },
-        -- ctrl-n: an agent, and nothing to say. Not a prompt and not the
-        -- configured template, so a payload without it keeps the template.
+        -- An empty string is the "(none)" row: a worktree and a shell.
+        agent = { type = "string" },
+        -- An empty string is "an agent, and nothing said to it".
+        prompt = { type = "string" },
         blank = { type = "boolean" },
       },
-      required = { "project", "root", "main", "branch" },
     },
     run = function(ctx, args)
-      return M.work_new_go(ctx, args)
+      return M.work_new(ctx, args)
     end,
   }
-  -- Set only once both are in, so a registration Rex rejects leaves the flag
+  -- Set only once the action is in, so a registration Rex rejects leaves the flag
   -- alone and a retry registers again.
   actions_registered = true
 
